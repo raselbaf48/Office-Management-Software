@@ -37,16 +37,47 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
     return null;
   }
 
-  const rawName = String(propOfficeName || activeIdentity.officeName || 'Office Management').trim();
-  const isGeneric =
-    !rawName ||
-    rawName === 'Office Management' ||
-    rawName === 'Office Management Application' ||
-    rawName === 'Office Management System';
-  const displayName = isGeneric ? 'Office Management' : rawName;
-  const displayLogo =
-    String(propOfficeLogo || activeIdentity.officeLogo || '/155-uasu-baf-logo.png').trim() ||
-    '/155-uasu-baf-logo.png';
+  const isGenericName = (n: string) =>
+    !n ||
+    n === 'Office Management' ||
+    n === 'Office Management Application' ||
+    n === 'Office Management System';
+  const isGenericLogo = (l: string) =>
+    !l ||
+    l.includes('office-management-logo') ||
+    l.includes('pwa-pc-192x192') ||
+    l.includes('pwa-pc-512x512');
+
+  let savedMetaName = '';
+  let savedMetaLogo = '';
+  try {
+    const rawMeta = localStorage.getItem('baf_pwa_active_office_meta');
+    if (rawMeta) {
+      const parsed = JSON.parse(rawMeta);
+      if (parsed?.officeName && !isGenericName(String(parsed.officeName).trim())) {
+        savedMetaName = String(parsed.officeName).trim();
+      }
+      if (parsed?.logoUrl && !isGenericLogo(String(parsed.logoUrl).trim())) {
+        savedMetaLogo = String(parsed.logoUrl).trim();
+      }
+    }
+  } catch {}
+
+  const candidatePropName = String(propOfficeName || '').trim();
+  const candidateActiveName = String(activeIdentity.officeName || '').trim();
+  const displayName = !isGenericName(candidatePropName)
+    ? candidatePropName
+    : !isGenericName(candidateActiveName)
+      ? candidateActiveName
+      : savedMetaName || '155 UASU BAF';
+
+  const candidatePropLogo = String(propOfficeLogo || '').trim();
+  const candidateActiveLogo = String(activeIdentity.officeLogo || '').trim();
+  const displayLogo = !isGenericLogo(candidatePropLogo)
+    ? candidatePropLogo
+    : !isGenericLogo(candidateActiveLogo)
+      ? candidateActiveLogo
+      : savedMetaLogo || '/155-uasu-baf-logo.png';
 
   const handleInstallClick = async () => {
     if (isInstallable) {

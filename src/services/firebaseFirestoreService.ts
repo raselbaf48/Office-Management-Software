@@ -47,6 +47,9 @@ export interface SyncManifest {
   updatedByBdNo?: string;
   lastReason?: string;
   changedCollections?: string[];
+  dataHash?: string;
+  airmenCount?: number;
+  assignmentsCount?: number;
 }
 
 export interface PendingAssignmentDelta {
@@ -195,6 +198,11 @@ export function getAirmanDocId(a: any): string {
   return sanitizeDocId(raw);
 }
 
+export function getUserProfileDocId(u: any): string {
+  const cleanBd = clampStr(String(u?.userId || u?.bdNo || '').replace(/^BD\/?/i, '').trim() || 'unknown', 64) || 'unknown';
+  return sanitizeDocId(u?.id || `user_login_${cleanBd}`);
+}
+
 // -------------------- Pending Offline Delta Queue --------------------
 
 function emptyQueue(): PendingDeltaQueue {
@@ -302,7 +310,7 @@ export function recordPendingDeltas(params: {
   });
 
   (params.users || []).forEach((u) => {
-    const id = sanitizeDocId(u?.id || `user_${u?.bdNo || 'u'}`);
+    const id = getUserProfileDocId(u);
     q.users[id] = u?.updatedAt || now;
   });
 
@@ -841,7 +849,8 @@ function getCurrentBdNo(): string {
 
 export async function publishSyncManifest(
   changedCollections: string[],
-  reason: string = 'delta_sync'
+  reason: string = 'delta_sync',
+  extraMeta?: { dataHash?: string; airmenCount?: number; assignmentsCount?: number }
 ): Promise<void> {
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   const manifestDocId = getSyncManifestDocId();
@@ -858,6 +867,9 @@ export async function publishSyncManifest(
       updatedByBdNo: getCurrentBdNo() || 'system',
       lastReason: clampStr(reason, 200) || 'delta_sync',
       changedCollections: safeCollections,
+      ...(extraMeta?.dataHash ? { dataHash: clampStr(extraMeta.dataHash, 128) } : cachedManifestResult?.dataHash ? { dataHash: cachedManifestResult.dataHash } : {}),
+      ...(typeof extraMeta?.airmenCount === 'number' ? { airmenCount: extraMeta.airmenCount } : {}),
+      ...(typeof extraMeta?.assignmentsCount === 'number' ? { assignmentsCount: extraMeta.assignmentsCount } : {}),
     };
     await withFirestoreTimeout(
       setDoc(doc(dbLite, 'system_meta', manifestDocId), nextManifest, { merge: true }),
@@ -881,16 +893,21 @@ let sharedManifestTimer: ReturnType<typeof setInterval> | null = null;
 let sharedManifestOnlineBound = false;
 let latestManifestSnapshot: SyncManifest | null = null;
 
-async function pollSharedManifestOnce() {
+async function pollSharedManifestOnce(force: boolean = false) {
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   if (manifestListeners.size === 0) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
 
   try {
-    const data = await fetchSyncManifestFromFirebase();
+    const data = await fetchSyncManifestFromFirebase(force);
     if (data && data.updatedAt) {
-      if (!latestManifestSnapshot || latestManifestSnapshot.revision !== data.revision || latestManifestSnapshot.updatedAt !== data.updatedAt) {
+      if (
+        !latestManifestSnapshot ||
+        latestManifestSnapshot.revision !== data.revision ||
+        latestManifestSnapshot.updatedAt !== data.updatedAt ||
+        (data.dataHash && latestManifestSnapshot.dataHash !== data.dataHash)
+      ) {
         latestManifestSnapshot = data;
         manifestListeners.forEach((cb) => {
           try {
@@ -911,7 +928,7 @@ function ensureSharedManifestListener() {
   void pollSharedManifestOnce();
   sharedManifestTimer = setInterval(() => {
     void pollSharedManifestOnce();
-  }, 600 * 1000); // 10 minutes background manifest poll
+  }, 60 * 1000); // 60 seconds background manifest poll when active
 }
 
 export function subscribeToSyncManifest(
@@ -933,6 +950,17 @@ export function subscribeToSyncManifest(
     window.addEventListener('online', () => {
       if (manifestListeners.size > 0) {
         ensureSharedManifestListener();
+        void pollSharedManifestOnce(true);
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (manifestListeners.size > 0) {
+        void pollSharedManifestOnce(true);
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && manifestListeners.size > 0) {
+        void pollSharedManifestOnce(true);
       }
     });
   }
@@ -1133,7 +1161,7 @@ export async function fetchParadeStatesFromFirebase(sinceIso?: string): Promise<
 
 function formatUserProfileForFirestore(u: any, nowIso: string): { docId: string; data: Record<string, any> } {
   const cleanBd = clampStr(String(u?.userId || u?.bdNo || '').replace(/^BD\/?/i, '').trim() || 'unknown', 64) || 'unknown';
-  const docId = sanitizeDocId(u?.id || `user_login_${cleanBd}`);
+  const docId = getUserProfileDocId(u);
   const payload: Record<string, any> = {
     id: clampStr(u?.id || docId, 128) || docId,
     bdNo: cleanBd,

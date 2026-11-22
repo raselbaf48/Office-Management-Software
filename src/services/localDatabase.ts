@@ -56,6 +56,7 @@ import {
   purgeActiveCustomOfficeCloudData,
   getAssignmentDocId,
   getAirmanDocId,
+  getUserProfileDocId,
   getPendingDeltaQueue,
   recordPendingDeltas,
   clearPendingDeltas,
@@ -605,16 +606,21 @@ export class LocalDatabaseEngine {
         }
       }, MULTI_USER_POLL_INTERVAL_MS);
 
-      // Quota Recovery & Retry Ticker (every 5 minutes when quota is exhausted + pending offline deltas exist)
-      setInterval(async () => {
+      // Quota Recovery & Pending Delta Auto-Backup Check (runs every 45s + on focus/online/visibilitychange)
+      const checkQuotaRecoveryAndFlushDeltas = async () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
         if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         if (this.isFirebaseSyncing || this.isPushing) return;
+
+        // Capture any unsaved in-memory diff into the persistent delta queue first
+        this.captureCurrentDiffIntoPendingQueue();
 
         if (isFirestoreQuotaExceeded()) {
           if (hasPendingDeltas()) {
             const probe = await probeFirebaseConnectionAndQuota(true);
             if (probe.ok && !probe.quotaExceeded) {
+              // Quota just reset! Immediately back up ONLY the changed items first
+              await this.flushPendingDeltasOnlyToFirebase('quota_reset_delta_backup');
               await this.syncFromFirebase({ isQuotaRecovery: true });
               window.dispatchEvent(new CustomEvent('baf_firebase_quota_recovered'));
             }
@@ -623,9 +629,25 @@ export class LocalDatabaseEngine {
         }
 
         if (hasPendingDeltas() && !this.saveTimeout) {
-          this.saveToFirebase(this.db, true);
+          await this.flushPendingDeltasOnlyToFirebase('pending_delta_auto_backup');
         }
-      }, 5 * 60 * 1000);
+      };
+
+      setInterval(() => {
+        void checkQuotaRecoveryAndFlushDeltas();
+      }, 45 * 1000);
+
+      window.addEventListener('online', () => {
+        void checkQuotaRecoveryAndFlushDeltas();
+      });
+      window.addEventListener('focus', () => {
+        void checkQuotaRecoveryAndFlushDeltas();
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          void checkQuotaRecoveryAndFlushDeltas();
+        }
+      });
     }
   }
 
@@ -657,10 +679,15 @@ export class LocalDatabaseEngine {
     this.manifestUnsub = subscribeToSyncManifest((manifest) => {
       if (!manifest || !manifest.updatedAt) return;
       if (manifest.updatedBySessionId === CLIENT_SESSION_ID) return;
-      if (manifest.revision && manifest.revision <= this.lastHandledRevision) return;
+      const localFp = this.computeLocalDataFingerprint(this.db);
+      if (manifest.dataHash && manifest.dataHash === localFp) {
+        this.recordHandledRevision(manifest.revision);
+        return;
+      }
+      if (!manifest.dataHash && manifest.revision && manifest.revision <= this.lastHandledRevision) return;
       const manifestMs = this.parseTimeMs(manifest.updatedAt);
       const lastPullMs = this.parseTimeMs(this.lastPullAt);
-      if (manifestMs > 0 && lastPullMs > 0 && manifestMs <= lastPullMs) {
+      if (!manifest.dataHash && manifestMs > 0 && lastPullMs > 0 && manifestMs <= lastPullMs) {
         this.recordHandledRevision(manifest.revision);
         return;
       }
@@ -724,6 +751,113 @@ export class LocalDatabaseEngine {
     } catch {
       return JSON.stringify(dbObj);
     }
+  }
+
+  /**
+   * Computes a deterministic content fingerprint (hash) of the current Local Cloud data
+   * so any device logging in can compare its Local Cloud state with Firebase Cloud's sync_manifest
+   * in 1 single document read without downloading or uploading when already matched.
+   */
+  public computeLocalDataFingerprint(dbObj: LocalStorageDB = this.db): string {
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    const feed = (str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        h1 ^= c;
+        h1 = Math.imul(h1, 0x01000193) >>> 0;
+        h2 ^= c;
+        h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+      }
+    };
+
+    const airmenList = [...(dbObj.airmen || [])].sort((a: any, b: any) => {
+      const ka = String(a?.bdNo || a?.id || '').replace(/\D/g, '') || String(a?.id || '');
+      const kb = String(b?.bdNo || b?.id || '').replace(/\D/g, '') || String(b?.id || '');
+      return ka.localeCompare(kb);
+    });
+    for (const a of airmenList) {
+      const key = String(a?.bdNo || a?.id || '').replace(/\D/g, '') || String(a?.id || '');
+      feed(
+        `A:${key}|${a?.rank || ''}|${a?.name || ''}|${a?.flightName || ''}|${a?.trade || ''}|${
+          a?.active !== false ? '1' : '0'
+        }|${a?.mobileNo || ''}|${a?.addressBlock || ''}|${a?.remarks || ''}|${a?.leaveReason || ''};`
+      );
+    }
+
+    const asnRecords: Array<{ docId: string; sig: string }> = [];
+    Object.values(dbObj.assignments || {}).forEach((monthList) => {
+      if (!Array.isArray(monthList)) return;
+      for (const rawA of monthList) {
+        const a: any = rawA;
+        if (!a || isCorruptedAssignmentRecord(a) || a.isDeleted) continue;
+        const normAirId = normalizeCanonicalAirmanId(a.airmanId);
+        const normA = { ...a, airmanId: normAirId };
+        const docId = getAssignmentDocId(normA);
+        const sig = `${docId}|${normAirId}|${a.date || ''}|${a.dutyCode || 'ON_PARADE'}|${a.idaShift || ''}|${
+          a.disposalScope || 'ALL'
+        }|${a.proxyForFlight || ''}|${a.notes || ''}|${a.location || ''}|${a.isOfficial ? '1' : '0'}|${
+          a.isCompleted ? '1' : '0'
+        }`;
+        asnRecords.push({ docId, sig });
+      }
+    });
+    asnRecords.sort((x, y) => x.docId.localeCompare(y.docId));
+    for (const r of asnRecords) {
+      feed(`D:${r.sig};`);
+    }
+
+    const usersList = [...(dbObj.detailedUsers || [])]
+      .filter((u: any) => u && (u.bdNo || u.id))
+      .sort((a: any, b: any) => {
+        const ka = String(a?.bdNo || a?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+        const kb = String(b?.bdNo || b?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+        return ka.localeCompare(kb);
+      });
+    for (const u of usersList) {
+      const k = String(u?.bdNo || u?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+      feed(`U:${k}|${u?.role || ''}|${u?.status || ''}|${u?.pin || u?.password || ''}|${u?.name || ''}|${u?.rank || ''};`);
+    }
+
+    if (typeof window !== 'undefined') {
+      const keySettings = [
+        'baf_official_duty_matrix_v4',
+        'baf_custom_duties',
+        'baf_leave_requests',
+        'baf_tdy_records',
+        'baf_deployment_records',
+      ];
+      for (const sk of keySettings) {
+        const val = window.localStorage.getItem(sk);
+        if (val) {
+          feed(`S:${sk}=${val};`);
+        }
+      }
+    }
+
+    return `fp_${h1.toString(36)}_${h2.toString(36)}_${airmenList.length}_${asnRecords.length}`;
+  }
+
+  private getManifestExtraMeta(dbObj: LocalStorageDB = this.db): {
+    dataHash: string;
+    airmenCount: number;
+    assignmentsCount: number;
+  } {
+    let assignmentsCount = 0;
+    Object.values(dbObj.assignments || {}).forEach((list) => {
+      if (Array.isArray(list)) assignmentsCount += list.length;
+    });
+    const dataHash = this.computeLocalDataFingerprint(dbObj);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'), dataHash);
+      } catch {}
+    }
+    return {
+      dataHash,
+      airmenCount: (dbObj.airmen || []).length,
+      assignmentsCount,
+    };
   }
 
   private hasUnsyncedDifferences(dbToCheck: LocalStorageDB = this.db): boolean {
@@ -1050,24 +1184,31 @@ export class LocalDatabaseEngine {
       }, 45000);
 
       try {
-      // Skip duplicate boot/login sync if a pull already completed within the last 10 minutes
+      // Capture any in-memory local edits into PendingDeltaQueue before syncing
+      this.captureCurrentDiffIntoPendingQueue();
+
+      // Skip duplicate background boot sync only if NOT an explicit login sync, NOT a force pull, and NOT quota recovery
       const lastPullAgeMs = this.lastPullAt ? Date.now() - this.parseTimeMs(this.lastPullAt) : Infinity;
       if (
+        !options?.isLoginSync &&
         !options?.forceFullPull &&
         !options?.isQuotaRecovery &&
         !isFirestoreQuotaExceeded() &&
         !hasPendingDeltas() &&
         (this.db.airmen || []).length > 0 &&
+        this.lastHandledRevision > 0 &&
         lastPullAgeMs >= 0 &&
-        lastPullAgeMs < 10 * 60 * 1000
+        lastPullAgeMs < 2 * 60 * 1000
       ) {
         this.isInitialPullDone = true;
         return true;
       }
 
-      // On login or manual sync, verify Firebase health & quota live from server
-      if (options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded()) {
-        const probe = await probeFirebaseConnectionAndQuota(Boolean(options?.isQuotaRecovery));
+      // On login, quota recovery, or when quota flag is set, verify Firebase health & quota live from server
+      if (options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded() || hasPendingDeltas()) {
+        const probe = await probeFirebaseConnectionAndQuota(
+          Boolean(options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded())
+        );
         if (probe.quotaExceeded || isFirestoreQuotaExceeded()) {
           await this.pullDatabaseFromServer();
           await this.pullAllSettingsFromServer();
@@ -1103,61 +1244,105 @@ export class LocalDatabaseEngine {
         }
       }
 
-      emitSyncProgress(15, 'Checking Firebase sync manifest...');
+      // REQUIREMENT 2: If the user made ANY changes while Firebase quota was exhausted (or offline),
+      // as soon as quota resets / user logs in, FIRST back up ONLY those changed items to Firebase
+      // without touching any other untouched data in Firebase!
+      if (hasPendingDeltas() && !isFirestoreQuotaExceeded()) {
+        emitSyncProgress(10, 'Backing up pending local changes to Firebase...');
+        await this.flushPendingDeltasOnlyToFirebase(
+          options?.isQuotaRecovery ? 'quota_reset_delta_backup' : 'login_pending_delta_backup'
+        );
+      }
+
+      emitSyncProgress(20, 'Comparing Local Cloud with Firebase Cloud...');
 
       const hasLocalAirmen = (this.db.airmen || []).length > 0;
-      const hasLocalAssignments = Object.values(this.db.assignments || {}).some(
-        (arr) => Array.isArray(arr) && arr.length > 0
-      );
-
-      const manifest = !options?.forceFullPull && hasLocalAirmen ? await fetchSyncManifestFromFirebase() : null;
+      // Always force a fresh manifest read on login or quota recovery so cross-device comparison is 100% accurate
+      const manifest = !options?.forceFullPull
+        ? await fetchSyncManifestFromFirebase(Boolean(options?.isLoginSync || options?.isQuotaRecovery || !this.lastPullAt))
+        : null;
       const manifestMs = manifest?.updatedAt ? this.parseTimeMs(manifest.updatedAt) : 0;
       const lastPullMs = this.lastPullAt ? this.parseTimeMs(this.lastPullAt) : 0;
+      const localFingerprint = this.computeLocalDataFingerprint(this.db);
 
-      const canUseIncremental =
-        !options?.forceFullPull &&
-        hasLocalAirmen &&
-        Boolean(manifest) &&
-        lastPullMs > 0;
-
-      // Ultra-fast path: skip when manifest updatedAt <= lastPullAt and no local pending deltas exist
-      if (
-        canUseIncremental &&
-        !hasPendingDeltas() &&
+      const isExactFingerprintMatch = Boolean(
         manifest &&
+        manifest.dataHash &&
+        manifest.dataHash === localFingerprint &&
+        hasLocalAirmen &&
+        !hasPendingDeltas()
+      );
+
+      const isRevisionAndTimestampMatch = Boolean(
+        manifest &&
+        !manifest.dataHash &&
+        manifest.revision &&
+        this.lastHandledRevision > 0 &&
+        manifest.revision === this.lastHandledRevision &&
         manifestMs > 0 &&
         lastPullMs > 0 &&
-        manifestMs <= lastPullMs
-      ) {
+        manifestMs <= lastPullMs &&
+        hasLocalAirmen &&
+        !hasPendingDeltas()
+      );
+
+      // REQUIREMENT 1: On first login (or boot), compare Local Cloud with Firebase Cloud first.
+      // If they match, perform ZERO downloads and ZERO uploads!
+      if (!options?.forceFullPull && (isExactFingerprintMatch || isRevisionAndTimestampMatch)) {
         if (manifest?.revision) {
           this.recordHandledRevision(manifest.revision);
+        }
+        if (manifest?.dataHash) {
+          try {
+            window.localStorage.setItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'), manifest.dataHash);
+          } catch {}
         }
         this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
         this.seedBaselineSettingsMap();
         const nowIso = new Date().toISOString();
+        this.lastPullAt = nowIso;
+        window.localStorage.setItem(getActiveLastPullKey(), nowIso);
+        window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
         firebaseConnected = true;
         firebaseLastSyncTime = nowIso;
         window.localStorage.setItem('baf_cloud_connected', 'true');
         window.localStorage.setItem('baf_cloud_last_sync', nowIso);
         this.isInitialPullDone = true;
-        emitSyncProgress(100, 'Already up to date with Firebase!');
+        emitSyncProgress(100, 'Local Cloud matches Firebase Cloud (No download/upload needed)!');
         addSyncLog({
           timestamp: nowIso,
           type: 'PULL',
           status: 'SUCCESS',
-          message: `Synced with Firebase Firestore (${this.db.airmen.length} airmen — already up to date).`,
+          message: `Local Cloud matched Firebase Cloud (${this.db.airmen.length} airmen — 0 downloads, 0 uploads).`,
         });
         return true;
       }
 
-      // Subtract 10-second clock-skew overlap; if lastPullAt wasn't recorded yet but local assignments already exist,
-      // fallback to a 24-hour window so we NEVER do a 3,000+ document full scan of duty_assignments unless forceFullPull is requested
-      const fallbackRecentIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      // Local Cloud does NOT match Firebase Cloud -> Download the latest data from Firebase Cloud
+      const lastSyncedHash = typeof window !== 'undefined'
+        ? window.localStorage.getItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'))
+        : null;
+
+      // Only use incremental pull if this device has previously completed a verified sync with Firebase
+      const canUseIncremental =
+        !options?.forceFullPull &&
+        hasLocalAirmen &&
+        Boolean(manifest) &&
+        lastPullMs > 0 &&
+        this.lastHandledRevision > 0 &&
+        Boolean(lastSyncedHash);
+
       const overlapIso = lastPullMs > 0
         ? new Date(Math.max(0, lastPullMs - 10 * 1000)).toISOString()
-        : (this.lastPullAt || (hasLocalAssignments ? fallbackRecentIso : undefined));
-      const useSinceIso = canUseIncremental ? overlapIso : undefined;
-      emitSyncProgress(30, useSinceIso ? 'Fetching recent changes from Firebase...' : 'Fetching database from Firebase Firestore...');
+        : undefined;
+      let useSinceIso = canUseIncremental ? overlapIso : undefined;
+
+      emitSyncProgress(
+        35,
+        useSinceIso
+          ? 'Local Cloud differs — downloading latest updates from Firebase...'
+          : 'Local Cloud differs — downloading full latest dataset from Firebase...'
+      );
 
       let fbAirmen: any[] = [];
       let fbAssignments: any[] = [];
@@ -1165,35 +1350,43 @@ export class LocalDatabaseEngine {
       let fbUsers: any[] = [];
       let fbSettingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }> = {};
 
-      if (useSinceIso) {
-        const changedCols = Array.isArray(manifest?.changedCollections) && manifest!.changedCollections!.length > 0
-          ? manifest!.changedCollections!
-          : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
-        [fbAirmen, fbAssignments, fbHistory, fbUsers, fbSettingsMeta] = await Promise.all([
-          changedCols.includes('airmen') ? fetchAirmenFromFirebase(useSinceIso) : Promise.resolve([]),
-          changedCols.includes('duty_assignments') ? fetchDutyAssignmentsFromFirebase(useSinceIso) : Promise.resolve([]),
-          changedCols.includes('parade_states') ? fetchParadeStatesFromFirebase(useSinceIso) : Promise.resolve([]),
-          changedCols.includes('user_profiles') ? fetchUserProfilesFromFirebase(useSinceIso) : Promise.resolve([]),
-          changedCols.includes('app_settings') ? fetchAppSettingsWithMetaFromFirebase(useSinceIso) : Promise.resolve({}),
-        ]);
-      } else {
-        // Fetch lightweight collections first so the large duty_assignments payload does not starve them
-        [fbAirmen, fbHistory, fbUsers, fbSettingsMeta] = await Promise.all([
-          fetchAirmenFromFirebase(),
-          fetchParadeStatesFromFirebase(),
-          fetchUserProfilesFromFirebase(),
-          fetchAppSettingsWithMetaFromFirebase(),
-        ]);
-        const isBrandNewEmptyCloud =
-          fbAirmen.length === 0 &&
-          fbUsers.length === 0 &&
-          Object.keys(fbSettingsMeta).length === 0;
-        fbAssignments = isBrandNewEmptyCloud
-          ? []
-          : await fetchDutyAssignmentsFromFirebase(hasLocalAssignments ? fallbackRecentIso : undefined);
-      }
+      const fetchCollectionsFromFirebase = async (sinceParam?: string) => {
+        if (sinceParam) {
+          const changedCols =
+            Array.isArray(manifest?.changedCollections) && manifest!.changedCollections!.length > 0
+              ? manifest!.changedCollections!
+              : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
+          const [a, d, h, u, s] = await Promise.all([
+            changedCols.includes('airmen') ? fetchAirmenFromFirebase(sinceParam) : Promise.resolve([]),
+            changedCols.includes('duty_assignments') ? fetchDutyAssignmentsFromFirebase(sinceParam) : Promise.resolve([]),
+            changedCols.includes('parade_states') ? fetchParadeStatesFromFirebase(sinceParam) : Promise.resolve([]),
+            changedCols.includes('user_profiles') ? fetchUserProfilesFromFirebase(sinceParam) : Promise.resolve([]),
+            changedCols.includes('app_settings') ? fetchAppSettingsWithMetaFromFirebase(sinceParam) : Promise.resolve({}),
+          ]);
+          return { a, d, h, u, s };
+        } else {
+          // Full fetch mode: download ALL airmen, parade_states, user_profiles, app_settings, and ALL duty_assignments
+          // so a second device logging in gets 100% of Firebase Cloud data (not just the last 24 hours).
+          const [a, h, u, s] = await Promise.all([
+            fetchAirmenFromFirebase(),
+            fetchParadeStatesFromFirebase(),
+            fetchUserProfilesFromFirebase(),
+            fetchAppSettingsWithMetaFromFirebase(),
+          ]);
+          const isBrandNewEmptyCloud = a.length === 0 && u.length === 0 && Object.keys(s).length === 0;
+          const d = isBrandNewEmptyCloud ? [] : await fetchDutyAssignmentsFromFirebase(undefined);
+          return { a, d, h, u, s };
+        }
+      };
 
-      emitSyncProgress(60, 'Reconciling cloud & local records...');
+      const initialFetched = await fetchCollectionsFromFirebase(useSinceIso);
+      fbAirmen = initialFetched.a;
+      fbAssignments = initialFetched.d;
+      fbHistory = initialFetched.h;
+      fbUsers = initialFetched.u;
+      fbSettingsMeta = initialFetched.s;
+
+      emitSyncProgress(60, 'Applying latest Firebase Cloud data to Local Cloud...');
 
       // First-time seed: Firebase is completely empty (full fetch mode) while local DB already has data
       if (!useSinceIso && !isFirestoreQuotaExceeded() && fbAirmen.length === 0 && fbAssignments.length === 0 && this.db.airmen.length > 0) {
@@ -1236,306 +1429,351 @@ export class LocalDatabaseEngine {
       const pushedUserIds: string[] = [];
       const pushedSettingKeys: string[] = [];
 
-      const newDb: LocalStorageDB = {
-        ...this.db,
-        airmen: [...(this.db.airmen || [])],
-        assignments: { ...(this.db.assignments || {}) },
-        activityHistory: [...(this.db.activityHistory || [])],
-        detailedUsers: [...(this.db.detailedUsers || [])],
-      };
+      const reconcileFetchedData = (
+        modeIncremental: boolean,
+        cloudAirmen: any[],
+        cloudAssignments: any[],
+        cloudHistory: any[],
+        cloudUsers: any[],
+        cloudSettingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>
+      ): { candidateDb: LocalStorageDB; settingsChanged: boolean } => {
+        pushBackAirmen.length = 0;
+        pushBackAssignments.length = 0;
+        pushBackDeletedAssignments.length = 0;
+        pushBackHistory.length = 0;
+        pushBackUsers.length = 0;
+        pushBackSettings.length = 0;
+        pushedAirmenIds.length = 0;
+        pushedAssignmentDocIds.length = 0;
+        pushedHistoryIds.length = 0;
+        pushedUserIds.length = 0;
+        pushedSettingKeys.length = 0;
 
-      // 1. Reconcile Airmen
-      const airmenMap = new Map<string, any>();
-      const getCanonicalAirKey = (a: any) => {
-        const cleanBd = String(a?.bdNo || a?.id || '').replace(/\D/g, '');
-        return cleanBd || String(a?.id || '');
-      };
+        const candidateDb: LocalStorageDB = {
+          ...this.db,
+          airmen: [...(this.db.airmen || [])],
+          assignments: { ...(this.db.assignments || {}) },
+          activityHistory: [...(this.db.activityHistory || [])],
+          detailedUsers: [...(this.db.detailedUsers || [])],
+        };
 
-      // In incremental mode, seed map from local airmen first
-      if (useSinceIso) {
-        (this.db.airmen || []).forEach((a: any) => {
+        // 1. Reconcile Airmen
+        const airmenMap = new Map<string, any>();
+        const getCanonicalAirKey = (a: any) => {
+          const cleanBd = String(a?.bdNo || a?.id || '').replace(/\D/g, '');
+          return cleanBd || String(a?.id || '');
+        };
+
+        if (modeIncremental) {
+          (this.db.airmen || []).forEach((a: any) => {
+            const k = getCanonicalAirKey(a);
+            if (k) airmenMap.set(k, a);
+          });
+        }
+
+        cloudAirmen.forEach((a: any) => {
           const k = getCanonicalAirKey(a);
           if (k) airmenMap.set(k, a);
         });
-      }
 
-      fbAirmen.forEach((a: any) => {
-        const k = getCanonicalAirKey(a);
-        if (k) airmenMap.set(k, a);
-      });
-
-      (this.db.airmen || []).forEach((localA: any) => {
-        const k = getCanonicalAirKey(localA);
-        const docId = getAirmanDocId(localA);
-        const pendingTime = pendingQueue.airmen[docId];
-        const cloudA = k ? airmenMap.get(k) : undefined;
-        if (pendingTime) {
-          const lMs = this.parseTimeMs((localA as any).updatedAt || pendingTime);
-          const cMs = this.parseTimeMs(cloudA?.updatedAt);
-          if (!cloudA || lMs >= cMs) {
-            airmenMap.set(k, { ...cloudA, ...localA, updatedAt: (localA as any).updatedAt || pendingTime });
-            pushBackAirmen.push(airmenMap.get(k));
+        (this.db.airmen || []).forEach((localA: any) => {
+          const k = getCanonicalAirKey(localA);
+          const docId = getAirmanDocId(localA);
+          const pendingTime = pendingQueue.airmen[docId];
+          const cloudA = k ? airmenMap.get(k) : undefined;
+          if (pendingTime) {
+            const lMs = this.parseTimeMs((localA as any).updatedAt || pendingTime);
+            const cMs = this.parseTimeMs(cloudA?.updatedAt);
+            if (!cloudA || lMs >= cMs) {
+              airmenMap.set(k, { ...cloudA, ...localA, updatedAt: (localA as any).updatedAt || pendingTime });
+              pushBackAirmen.push(airmenMap.get(k));
+            }
+            pushedAirmenIds.push(docId);
+          } else if (!cloudA && cloudAirmen.length === 0) {
+            airmenMap.set(k, localA);
           }
-          pushedAirmenIds.push(docId);
-        } else if (!cloudA && fbAirmen.length === 0) {
-          airmenMap.set(k, localA);
+        });
+
+        if (airmenMap.size > 0) {
+          const default155 = isDefault155UasuOffice();
+          candidateDb.airmen = normalizeAirmenSeniority(
+            Array.from(airmenMap.values()).map((a) => enrichAirmanWithInitialBaseline(a, default155))
+          );
         }
-      });
 
-      if (airmenMap.size > 0) {
-        const default155 = isDefault155UasuOffice();
-        newDb.airmen = normalizeAirmenSeniority(
-          Array.from(airmenMap.values()).map((a) => enrichAirmanWithInitialBaseline(a, default155))
-        );
-      }
+        // 2. Reconcile Duty Assignments
+        const mergedAsnMap = new Map<string, { item: any; isDeleted: boolean; updatedAtMs: number }>();
 
-      // 2. Reconcile Duty Assignments (Incremental-aware + Skip identical redundant pushes)
-      const mergedAsnMap = new Map<string, { item: any; isDeleted: boolean; updatedAtMs: number }>();
-
-      // In incremental mode, preserve existing local assignments before overlaying changed cloud docs
-      if (useSinceIso) {
-        Object.values(this.db.assignments || {}).forEach((monthList) => {
-          (monthList || []).forEach((a) => {
-            if (isCorruptedAssignmentRecord(a)) return;
-            const docId = getAssignmentDocId(a);
-            mergedAsnMap.set(docId, {
-              item: a,
-              isDeleted: false,
-              updatedAtMs: this.parseTimeMs((a as any).updatedAt || this.lastPullAt),
+        if (modeIncremental) {
+          Object.values(this.db.assignments || {}).forEach((monthList) => {
+            (monthList || []).forEach((a) => {
+              if (isCorruptedAssignmentRecord(a)) return;
+              const docId = getAssignmentDocId(a);
+              mergedAsnMap.set(docId, {
+                item: a,
+                isDeleted: false,
+                updatedAtMs: this.parseTimeMs((a as any).updatedAt || this.lastPullAt),
+              });
             });
           });
-        });
-      }
-
-      fbAssignments.forEach((a: any) => {
-        const corrupted = isCorruptedAssignmentRecord(a);
-        const cleanItem = a && !String(a.dutyCode || '').trim()
-          ? { ...a, dutyCode: 'ON_PARADE' }
-          : a;
-        const docId = getAssignmentDocId(cleanItem);
-        mergedAsnMap.set(docId, {
-          item: cleanItem,
-          isDeleted: corrupted || Boolean(cleanItem.isDeleted),
-          updatedAtMs: this.parseTimeMs(cleanItem.updatedAt),
-        });
-      });
-
-      // Overlay any local assignments that have genuine pending deltas
-      Object.values(pendingQueue.assignments || {}).forEach((delta) => {
-        if (!delta || !delta.docId) return;
-        const lMs = this.parseTimeMs(delta.updatedAt);
-        const cloudEntry = mergedAsnMap.get(delta.docId);
-
-        // If identical doc is already present in cloud/local merged map, clear without redundant upload
-        const isSameAsCloud =
-          cloudEntry &&
-          Boolean(cloudEntry.isDeleted) === Boolean(delta.isDeleted) &&
-          cloudEntry.item?.airmanId === delta.assignment?.airmanId &&
-          cloudEntry.item?.date === delta.assignment?.date &&
-          cloudEntry.item?.dutyCode === delta.assignment?.dutyCode &&
-          (cloudEntry.item?.idaShift || '') === (delta.assignment?.idaShift || '') &&
-          (cloudEntry.item?.disposalScope || 'ALL') === (delta.assignment?.disposalScope || 'ALL') &&
-          (cloudEntry.item?.notes || '') === (delta.assignment?.notes || '') &&
-          (cloudEntry.item?.location || '') === (delta.assignment?.location || '');
-
-        if (isSameAsCloud && (!cloudEntry || cloudEntry.updatedAtMs >= lMs || Object.keys(pendingQueue.assignments).length > 200)) {
-          pushedAssignmentDocIds.push(delta.docId);
-          return;
         }
 
-        if (!cloudEntry || lMs >= cloudEntry.updatedAtMs) {
-          mergedAsnMap.set(delta.docId, {
-            item: delta.assignment,
-            isDeleted: Boolean(delta.isDeleted),
-            updatedAtMs: lMs,
+        cloudAssignments.forEach((a: any) => {
+          const corrupted = isCorruptedAssignmentRecord(a);
+          const cleanItem = a && !String(a.dutyCode || '').trim() ? { ...a, dutyCode: 'ON_PARADE' } : a;
+          const docId = getAssignmentDocId(cleanItem);
+          mergedAsnMap.set(docId, {
+            item: cleanItem,
+            isDeleted: corrupted || Boolean(cleanItem.isDeleted),
+            updatedAtMs: this.parseTimeMs(cleanItem.updatedAt),
           });
-          if (delta.isDeleted && delta.assignment) {
-            pushBackDeletedAssignments.push(delta.assignment);
-          } else if (delta.assignment) {
-            pushBackAssignments.push(delta.assignment);
-          }
-        }
-        pushedAssignmentDocIds.push(delta.docId);
-      });
+        });
 
-      const assignmentsByMonth: Record<string, DutyAssignment[]> = {};
-      const seenAsnKeysByMonth: Record<string, Set<string>> = {};
-      mergedAsnMap.forEach((entry) => {
-        if (entry.isDeleted || !entry.item) return;
-        const a = { ...entry.item, airmanId: normalizeCanonicalAirmanId(entry.item.airmanId) };
-        delete a.isDeleted;
-        const dateStr = String(a.date || '');
-        if (dateStr.length >= 7) {
-          const ym = dateStr.slice(0, 7);
-          if (!assignmentsByMonth[ym]) {
-            assignmentsByMonth[ym] = [];
-            seenAsnKeysByMonth[ym] = new Set<string>();
-          }
-          const shiftKey = a.idaShift || (a as any).shift || 'n';
-          const scopeKey = a.disposalScope || 'ALL';
-          const dedupKey = `${a.airmanId}_${a.date}_${a.dutyCode}_${shiftKey}_${scopeKey}`;
-          if (!seenAsnKeysByMonth[ym].has(dedupKey)) {
-            seenAsnKeysByMonth[ym].add(dedupKey);
-            assignmentsByMonth[ym].push(a);
-          }
-        }
-      });
-      if (useSinceIso || fbAssignments.length > 0 || Object.keys(pendingQueue.assignments).length > 0) {
-        newDb.assignments = assignmentsByMonth;
-      }
+        Object.values(pendingQueue.assignments || {}).forEach((delta) => {
+          if (!delta || !delta.docId) return;
+          const lMs = this.parseTimeMs(delta.updatedAt);
+          const cloudEntry = mergedAsnMap.get(delta.docId);
 
-      // 3. Reconcile Parade States / Activity History
-      const histMap = new Map<string, ActivityHistoryItem>();
-      fbHistory.forEach((h: any) => {
-        if (h && h.id) histMap.set(h.id, h);
-      });
-      (this.db.activityHistory || []).forEach((localH: any) => {
-        if (!localH || !localH.id) return;
-        const docId = sanitizeDocId(localH.id);
-        const pendingTime = pendingQueue.history[docId];
-        const cloudH = histMap.get(localH.id);
-        if (pendingTime) {
-          const lMs = this.parseTimeMs(localH.updatedAt || localH.timestamp || pendingTime);
-          const cMs = this.parseTimeMs((cloudH as any)?.updatedAt || cloudH?.timestamp);
-          if (!cloudH || lMs >= cMs) {
+          const isSameAsCloud =
+            cloudEntry &&
+            Boolean(cloudEntry.isDeleted) === Boolean(delta.isDeleted) &&
+            cloudEntry.item?.airmanId === delta.assignment?.airmanId &&
+            cloudEntry.item?.date === delta.assignment?.date &&
+            cloudEntry.item?.dutyCode === delta.assignment?.dutyCode &&
+            (cloudEntry.item?.idaShift || '') === (delta.assignment?.idaShift || '') &&
+            (cloudEntry.item?.disposalScope || 'ALL') === (delta.assignment?.disposalScope || 'ALL') &&
+            (cloudEntry.item?.notes || '') === (delta.assignment?.notes || '') &&
+            (cloudEntry.item?.location || '') === (delta.assignment?.location || '');
+
+          if (
+            isSameAsCloud &&
+            (!cloudEntry || cloudEntry.updatedAtMs >= lMs || Object.keys(pendingQueue.assignments).length > 200)
+          ) {
+            pushedAssignmentDocIds.push(delta.docId);
+            return;
+          }
+
+          if (!cloudEntry || lMs >= cloudEntry.updatedAtMs) {
+            mergedAsnMap.set(delta.docId, {
+              item: delta.assignment,
+              isDeleted: Boolean(delta.isDeleted),
+              updatedAtMs: lMs,
+            });
+            if (delta.isDeleted && delta.assignment) {
+              pushBackDeletedAssignments.push(delta.assignment);
+            } else if (delta.assignment) {
+              pushBackAssignments.push(delta.assignment);
+            }
+          }
+          pushedAssignmentDocIds.push(delta.docId);
+        });
+
+        const assignmentsByMonth: Record<string, DutyAssignment[]> = {};
+        const seenAsnKeysByMonth: Record<string, Set<string>> = {};
+        mergedAsnMap.forEach((entry) => {
+          if (entry.isDeleted || !entry.item) return;
+          const a = { ...entry.item, airmanId: normalizeCanonicalAirmanId(entry.item.airmanId) };
+          delete a.isDeleted;
+          const dateStr = String(a.date || '');
+          if (dateStr.length >= 7) {
+            const ym = dateStr.slice(0, 7);
+            if (!assignmentsByMonth[ym]) {
+              assignmentsByMonth[ym] = [];
+              seenAsnKeysByMonth[ym] = new Set<string>();
+            }
+            const shiftKey = a.idaShift || (a as any).shift || 'n';
+            const scopeKey = a.disposalScope || 'ALL';
+            const dedupKey = `${a.airmanId}_${a.date}_${a.dutyCode}_${shiftKey}_${scopeKey}`;
+            if (!seenAsnKeysByMonth[ym].has(dedupKey)) {
+              seenAsnKeysByMonth[ym].add(dedupKey);
+              assignmentsByMonth[ym].push(a);
+            }
+          }
+        });
+        if (modeIncremental || cloudAssignments.length > 0 || Object.keys(pendingQueue.assignments).length > 0) {
+          candidateDb.assignments = assignmentsByMonth;
+        }
+
+        // 3. Reconcile Parade States / Activity History
+        const histMap = new Map<string, ActivityHistoryItem>();
+        cloudHistory.forEach((h: any) => {
+          if (h && h.id) histMap.set(h.id, h);
+        });
+        (this.db.activityHistory || []).forEach((localH: any) => {
+          if (!localH || !localH.id) return;
+          const docId = sanitizeDocId(localH.id);
+          const pendingTime = pendingQueue.history[docId];
+          const cloudH = histMap.get(localH.id);
+          if (pendingTime) {
+            const lMs = this.parseTimeMs(localH.updatedAt || localH.timestamp || pendingTime);
+            const cMs = this.parseTimeMs((cloudH as any)?.updatedAt || cloudH?.timestamp);
+            if (!cloudH || lMs >= cMs) {
+              histMap.set(localH.id, localH);
+              pushBackHistory.push(localH);
+            }
+            pushedHistoryIds.push(docId);
+          } else if (modeIncremental && !cloudH) {
             histMap.set(localH.id, localH);
-            pushBackHistory.push(localH);
           }
-          pushedHistoryIds.push(docId);
-        } else if (!cloudH) {
-          histMap.set(localH.id, localH);
+        });
+        candidateDb.activityHistory = Array.from(histMap.values()).sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+
+        // 4. Reconcile User Profiles
+        const isDefaultOffice = isDefault155UasuOffice();
+        const validCustomAirmenBdSet = new Set<string>(
+          (candidateDb.airmen || [])
+            .map((a: any) => String(a?.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase())
+            .filter(Boolean)
+        );
+        const isLeaked155AutoSyncedUser = (u: any): boolean => {
+          if (isDefaultOffice || !u) return false;
+          const cleanBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+          const digits = cleanBd.replace(/\D/g, '');
+          if (digits === '48456' || u.role === 'master_owner' || u.isProtected === true) return false;
+          if (String(u.id || '').startsWith('office-admin-')) return false;
+          const isAutoSynced = u.remarks === 'Auto-synced from Nominal Roll' || u.detailedBy === 'System Auto Sync';
+          return isAutoSynced && !validCustomAirmenBdSet.has(cleanBd);
+        };
+
+        const userMap = new Map<string, any>();
+        const getUserBdKey = (u: any) => String(u?.bdNo || u?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
+        if (modeIncremental) {
+          (this.db.detailedUsers || []).forEach((u: any) => {
+            if (isLeaked155AutoSyncedUser(u)) return;
+            const k = getUserBdKey(u);
+            if (k) userMap.set(k, u);
+          });
         }
-      });
-      newDb.activityHistory = Array.from(histMap.values()).sort(
-        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      );
-
-      // 4. Reconcile User Profiles
-      const isDefaultOffice = isDefault155UasuOffice();
-      const validCustomAirmenBdSet = new Set<string>(
-        (newDb.airmen || [])
-          .map((a: any) => String(a?.bdNo || '').replace(/^BD\/?/i, '').trim().toLowerCase())
-          .filter(Boolean)
-      );
-      const isLeaked155AutoSyncedUser = (u: any): boolean => {
-        if (isDefaultOffice || !u) return false;
-        const cleanBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-        const digits = cleanBd.replace(/\D/g, '');
-        if (digits === '48456' || u.role === 'master_owner' || u.isProtected === true) return false;
-        if (String(u.id || '').startsWith('office-admin-')) return false;
-        const isAutoSynced =
-          u.remarks === 'Auto-synced from Nominal Roll' ||
-          u.detailedBy === 'System Auto Sync';
-        return isAutoSynced && !validCustomAirmenBdSet.has(cleanBd);
-      };
-
-      // One-time cleanup if this custom office was created before isolation fix and had 155 UASU settings/users leaked into cloud
-      const needsCustomOfficeSanitize =
-        !isDefaultOffice &&
-        (newDb.airmen || []).length === 0 &&
-        window.localStorage.getItem('baf_custom_office_clean_v3') !== 'true';
-
-      if (needsCustomOfficeSanitize) {
-        fbSettingsMeta = {};
-        fbUsers = fbUsers.filter((u: any) => !isLeaked155AutoSyncedUser(u));
-        resetDutyMatrixToDefault();
-        window.localStorage.setItem('baf_custom_office_clean_v3', 'true');
-        await purgeActiveCustomOfficeCloudData({ onlySettingsAndLeakedUsers: true }).catch(() => {});
-      }
-
-      const userMap = new Map<string, any>();
-      const getUserBdKey = (u: any) => String(u?.bdNo || u?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-      if (useSinceIso) {
-        (this.db.detailedUsers || []).forEach((u: any) => {
+        cloudUsers.forEach((u: any) => {
           if (isLeaked155AutoSyncedUser(u)) return;
           const k = getUserBdKey(u);
           if (k) userMap.set(k, u);
         });
-      }
-      fbUsers.forEach((u: any) => {
-        if (isLeaked155AutoSyncedUser(u)) return;
-        const k = getUserBdKey(u);
-        if (k) userMap.set(k, u);
-      });
-      (this.db.detailedUsers || []).forEach((localU: any) => {
-        if (isLeaked155AutoSyncedUser(localU)) return;
-        const k = getUserBdKey(localU);
-        const docId = sanitizeDocId(localU?.id || `user_login_${localU?.bdNo || 'u'}`);
-        const pendingTime = pendingQueue.users[docId];
-        const cloudU = k ? userMap.get(k) : undefined;
-        if (pendingTime) {
-          const lMs = this.parseTimeMs(localU.updatedAt || pendingTime);
-          const cMs = this.parseTimeMs(cloudU?.updatedAt);
-          if (!cloudU || lMs >= cMs) {
+        (this.db.detailedUsers || []).forEach((localU: any) => {
+          if (isLeaked155AutoSyncedUser(localU)) return;
+          const k = getUserBdKey(localU);
+          const docId = getUserProfileDocId(localU);
+          const legacyDocId = sanitizeDocId(localU?.id || `user_${localU?.bdNo || 'u'}`);
+          const pendingTime = pendingQueue.users[docId] || pendingQueue.users[legacyDocId];
+          const cloudU = k ? userMap.get(k) : undefined;
+          if (pendingTime) {
+            const lMs = this.parseTimeMs(localU.updatedAt || pendingTime);
+            const cMs = this.parseTimeMs(cloudU?.updatedAt);
+            if (!cloudU || lMs >= cMs) {
+              userMap.set(k, localU);
+              pushBackUsers.push(localU);
+            }
+            pushedUserIds.push(docId, legacyDocId);
+          } else if (!cloudU && cloudUsers.length === 0) {
             userMap.set(k, localU);
-            pushBackUsers.push(localU);
           }
-          pushedUserIds.push(docId);
-        } else if (!cloudU && fbUsers.length === 0) {
-          userMap.set(k, localU);
+        });
+        if (userMap.size > 0) {
+          candidateDb.detailedUsers = Array.from(userMap.values());
         }
-      });
-      if (userMap.size > 0) {
-        newDb.detailedUsers = Array.from(userMap.values());
+
+        if (!isDefaultOffice) {
+          this.reconcileCustomOfficeAirmenAndUsers(candidateDb, false);
+        }
+
+        // 5. Reconcile App Settings
+        let settingsChanged = false;
+        Object.entries(cloudSettingsMeta).forEach(([k, info]) => {
+          if (!isSyncableSettingKey(k)) return;
+          const pendingTime = pendingQueue.settings[k];
+          const localValStr = window.localStorage.getItem(k);
+
+          if (pendingTime && localValStr !== null) {
+            if (k === 'baf_official_duty_matrix_v4') {
+              const { mergedStr, changedFromCloud } = this.mergeDutyMatrices(
+                localValStr,
+                info.valueStr,
+                pendingTime,
+                info.updatedAt
+              );
+              window.localStorage.setItem(k, mergedStr);
+              lastSyncedSettingsMap.set(k, mergedStr);
+              if (changedFromCloud) {
+                pushBackSettings.push({ settingKey: k, value: mergedStr, updatedAt: new Date().toISOString() });
+              } else if (mergedStr !== localValStr) {
+                settingsChanged = true;
+              }
+            } else {
+              const lMs = this.parseTimeMs(pendingTime);
+              const cMs = this.parseTimeMs(info.updatedAt);
+              if (lMs >= cMs) {
+                pushBackSettings.push({ settingKey: k, value: localValStr, updatedAt: pendingTime });
+                lastSyncedSettingsMap.set(k, localValStr);
+              } else {
+                if (localValStr !== info.valueStr) settingsChanged = true;
+                window.localStorage.setItem(k, info.valueStr);
+                lastSyncedSettingsMap.set(k, info.valueStr);
+              }
+            }
+            pushedSettingKeys.push(k);
+          } else {
+            if (localValStr !== info.valueStr) settingsChanged = true;
+            window.localStorage.setItem(k, info.valueStr);
+            lastSyncedSettingsMap.set(k, info.valueStr);
+          }
+        });
+
+        Object.entries(pendingQueue.settings || {}).forEach(([k, updatedIso]) => {
+          if (!cloudSettingsMeta[k] && isSyncableSettingKey(k)) {
+            const val = window.localStorage.getItem(k);
+            if (val !== null) {
+              pushBackSettings.push({ settingKey: k, value: val, updatedAt: updatedIso });
+              pushedSettingKeys.push(k);
+            }
+          }
+        });
+
+        return { candidateDb, settingsChanged };
+      };
+
+      let { candidateDb: newDb, settingsChanged: settingsChangedFromCloud } = reconcileFetchedData(
+        Boolean(useSinceIso),
+        fbAirmen,
+        fbAssignments,
+        fbHistory,
+        fbUsers,
+        fbSettingsMeta
+      );
+
+      // Verification check: If we did an incremental pull, verify that our reconciled Local Cloud fingerprint
+      // now matches Firebase's manifest.dataHash. If it still doesn't match (e.g., older differences existed),
+      // automatically run a full pull from Firebase so both devices have 100% identical data!
+      if (
+        useSinceIso &&
+        manifest?.dataHash &&
+        !hasPendingDeltas() &&
+        this.computeLocalDataFingerprint(newDb) !== manifest.dataHash
+      ) {
+        emitSyncProgress(50, 'Synchronizing complete dataset from Firebase Cloud...');
+        useSinceIso = undefined;
+        const fullFetched = await fetchCollectionsFromFirebase(undefined);
+        const fullReconciled = reconcileFetchedData(
+          false,
+          fullFetched.a,
+          fullFetched.d,
+          fullFetched.h,
+          fullFetched.u,
+          fullFetched.s
+        );
+        newDb = fullReconciled.candidateDb;
+        settingsChangedFromCloud = settingsChangedFromCloud || fullReconciled.settingsChanged;
+      }
+
+      if ((newDb.detailedUsers || []).length > 0) {
         try {
           window.localStorage.setItem(getActiveDetailedUsersStorageKey(), JSON.stringify(newDb.detailedUsers));
           window.dispatchEvent(new CustomEvent('baf_detailed_users_changed', { detail: newDb.detailedUsers }));
         } catch {}
       }
 
-      if (!isDefaultOffice) {
-        this.reconcileCustomOfficeAirmenAndUsers(newDb, false);
-      }
-
-      // 5. Reconcile App Settings
-      let settingsChangedFromCloud = false;
-      Object.entries(fbSettingsMeta).forEach(([k, info]) => {
-        if (!isSyncableSettingKey(k)) return;
-        const pendingTime = pendingQueue.settings[k];
-        const localValStr = window.localStorage.getItem(k);
-
-        if (pendingTime && localValStr !== null) {
-          if (k === 'baf_official_duty_matrix_v4') {
-            const { mergedStr, changedFromCloud } = this.mergeDutyMatrices(localValStr, info.valueStr, pendingTime, info.updatedAt);
-            window.localStorage.setItem(k, mergedStr);
-            lastSyncedSettingsMap.set(k, mergedStr);
-            if (changedFromCloud) {
-              pushBackSettings.push({ settingKey: k, value: mergedStr, updatedAt: new Date().toISOString() });
-            } else if (mergedStr !== localValStr) {
-              settingsChangedFromCloud = true;
-            }
-          } else {
-            const lMs = this.parseTimeMs(pendingTime);
-            const cMs = this.parseTimeMs(info.updatedAt);
-            if (lMs >= cMs) {
-              pushBackSettings.push({ settingKey: k, value: localValStr, updatedAt: pendingTime });
-              lastSyncedSettingsMap.set(k, localValStr);
-            } else {
-              if (localValStr !== info.valueStr) settingsChangedFromCloud = true;
-              window.localStorage.setItem(k, info.valueStr);
-              lastSyncedSettingsMap.set(k, info.valueStr);
-            }
-          }
-          pushedSettingKeys.push(k);
-        } else {
-          if (localValStr !== info.valueStr) settingsChangedFromCloud = true;
-          window.localStorage.setItem(k, info.valueStr);
-          lastSyncedSettingsMap.set(k, info.valueStr);
-        }
-      });
-
-      // Settings that exist ONLY in local pendingQueue (not yet in Firebase)
-      Object.entries(pendingQueue.settings || {}).forEach(([k, updatedIso]) => {
-        if (!fbSettingsMeta[k] && isSyncableSettingKey(k)) {
-          const val = window.localStorage.getItem(k);
-          if (val !== null) {
-            pushBackSettings.push({ settingKey: k, value: val, updatedAt: updatedIso });
-            pushedSettingKeys.push(k);
-          }
-        }
-      });
-
-      // Push winning local deltas back to Firebase after quota recovery / login
+      // Push any remaining winning local deltas back to Firebase
       const changedCollections: string[] = [];
       if (pushBackAirmen.length > 0) {
         await pushAirmenToFirebase(pushBackAirmen);
@@ -1559,11 +1797,10 @@ export class LocalDatabaseEngine {
       }
       if (pushBackSettings.length > 0) {
         await pushAppSettingsToFirebase(pushBackSettings);
-        pushBackSettings.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, typeof s.value === 'string' ? s.value : JSON.stringify(s.value)));
+        pushBackSettings.forEach((s) =>
+          lastSyncedSettingsMap.set(s.settingKey, typeof s.value === 'string' ? s.value : JSON.stringify(s.value))
+        );
         changedCollections.push('app_settings');
-      }
-      if (changedCollections.length > 0) {
-        await publishSyncManifest(Array.from(new Set(changedCollections)), options?.isQuotaRecovery ? 'quota_recovery_merge' : 'login_delta_merge');
       }
 
       if (
@@ -1589,7 +1826,19 @@ export class LocalDatabaseEngine {
       this.db = newDb;
       this.saveToStorage(newDb, false, false, false);
       window.localStorage.removeItem('baf_pending_sync');
-      this.recordHandledRevision(manifest?.revision);
+
+      const extraMeta = this.getManifestExtraMeta(newDb);
+      if (changedCollections.length > 0 || !manifest?.dataHash) {
+        await publishSyncManifest(
+          changedCollections.length > 0
+            ? Array.from(new Set(changedCollections))
+            : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'],
+          options?.isQuotaRecovery ? 'quota_recovery_merge' : 'login_delta_merge',
+          extraMeta
+        );
+      }
+
+      this.recordHandledRevision(manifest?.revision || Date.now());
       this.lastSyncedDbStr = this.stripTimestampForCompare(newDb);
       this.seedBaselineSettingsMap();
       const nowIso = new Date().toISOString();
@@ -1611,12 +1860,14 @@ export class LocalDatabaseEngine {
         window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { source: 'firebase' } }));
       }
 
-      emitSyncProgress(100, 'Firebase sync complete!');
+      emitSyncProgress(100, 'Downloaded latest data from Firebase Cloud!');
       addSyncLog({
         timestamp: nowIso,
         type: 'PULL',
         status: 'SUCCESS',
-        message: `Synced from Firebase Firestore (${newDb.airmen.length} airmen${changedCollections.length ? ', merged local edits' : ''}).`,
+        message: `Downloaded latest data from Firebase Firestore (${newDb.airmen.length} airmen${
+          changedCollections.length ? ', merged local edits' : ''
+        }).`,
       });
       return true;
     } catch (err: any) {
@@ -1810,11 +2061,13 @@ export class LocalDatabaseEngine {
         this.db = newDb;
         this.saveToStorage(newDb, false, false, false);
         this.lastSyncedDbStr = this.stripTimestampForCompare(newDb);
+        this.getManifestExtraMeta(newDb);
         window.dispatchEvent(new CustomEvent('baf_db_updated', { detail: { source: 'firebase' } }));
         window.dispatchEvent(new CustomEvent('baf_state_updated', { detail: { source: 'firebase' } }));
         window.dispatchEvent(new CustomEvent('baf_duty_distribution_updated', { detail: { source: 'firebase' } }));
       }
       if (settingsChanged) {
+        this.getManifestExtraMeta(this.db);
         window.dispatchEvent(new CustomEvent('baf_settings_updated', { detail: { source: 'firebase' } }));
         window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { source: 'firebase' } }));
       }
@@ -1843,7 +2096,7 @@ export class LocalDatabaseEngine {
       lastSyncedSettingsMap.set(key, value);
       clearPendingDeltas({ settingKeys: [key] });
       if (key !== 'baf_user_login_history') {
-        await publishSyncManifest(['app_settings'], `setting_${key}`);
+        await publishSyncManifest(['app_settings'], `setting_${key}`, this.getManifestExtraMeta(this.db));
       }
       return true;
     } catch (e: any) {
@@ -1870,123 +2123,109 @@ export class LocalDatabaseEngine {
       pushAppSettingsToFirebase(settingInputs),
     ]);
     settingInputs.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, String(s.value)));
-    await publishSyncManifest(['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'], reason);
+    await publishSyncManifest(
+      ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'],
+      reason,
+      this.getManifestExtraMeta(dbToPush)
+    );
+  }
+
+  private computeCurrentDiff() {
+    const currDb = this.db;
+    let lastSyncedDb: any = {};
+    try {
+      lastSyncedDb = JSON.parse(this.lastSyncedDbStr || '{}');
+    } catch {}
+
+    const stripVolatileFields = (obj: any) => {
+      if (!obj || typeof obj !== 'object') return obj;
+      const { updatedAt: _u, updated_at: _ua, detailedAt: _d, lastLoginAt: _l, ...rest } = obj;
+      return rest;
+    };
+
+    const changedAirmen = (currDb.airmen || []).filter((a) => {
+      if (!lastSyncedDb.airmen) return true;
+      const cleanBd = String(a.bdNo || '').replace(/\D/g, '');
+      const prev = lastSyncedDb.airmen.find(
+        (p: any) => p.id === a.id || (cleanBd && p.bdNo && String(p.bdNo).replace(/\D/g, '') === cleanBd)
+      );
+      return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(a));
+    });
+
+    const changedAssignments: any[] = [];
+    const deletedAssignments: any[] = [];
+    const prevAsnMap = new Map<string, any>();
+    Object.values(lastSyncedDb.assignments || {}).forEach((monthList: any) => {
+      if (Array.isArray(monthList)) {
+        monthList.forEach((prevA: any) => prevAsnMap.set(getAssignmentDocId(prevA), prevA));
+      }
+    });
+
+    const currAsnMap = new Map<string, any>();
+    Object.values(currDb.assignments || {}).forEach((monthList: any) => {
+      if (Array.isArray(monthList)) {
+        monthList.forEach((currA: any) => currAsnMap.set(getAssignmentDocId(currA), currA));
+      }
+    });
+
+    prevAsnMap.forEach((prevA, docId) => {
+      if (!currAsnMap.has(docId)) deletedAssignments.push(prevA);
+    });
+    currAsnMap.forEach((currA, docId) => {
+      const prevA = prevAsnMap.get(docId);
+      if (
+        !prevA ||
+        prevA.airmanId !== currA.airmanId ||
+        prevA.date !== currA.date ||
+        prevA.dutyCode !== currA.dutyCode ||
+        (prevA.idaShift || '') !== (currA.idaShift || '') ||
+        (prevA.proxyForFlight || '') !== (currA.proxyForFlight || '') ||
+        (prevA.disposalScope || 'ALL') !== (currA.disposalScope || 'ALL') ||
+        (prevA.notes || '') !== (currA.notes || '') ||
+        (prevA.location || '') !== (currA.location || '') ||
+        Boolean(prevA.isOfficial) !== Boolean(currA.isOfficial) ||
+        Boolean(prevA.isCompleted) !== Boolean(currA.isCompleted)
+      ) {
+        changedAssignments.push(currA);
+      }
+    });
+
+    const changedHistory = (currDb.activityHistory || []).filter((h) => {
+      if (!lastSyncedDb.activityHistory) return true;
+      const prev = lastSyncedDb.activityHistory.find((p: any) => p.id === h.id);
+      return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(h));
+    });
+
+    const changedUsers = (currDb.detailedUsers || []).filter((u) => {
+      if (!lastSyncedDb.detailedUsers) return true;
+      const prev = lastSyncedDb.detailedUsers.find((p: any) => p.id === u.id || (u.bdNo && p.bdNo === u.bdNo));
+      return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(u));
+    });
+
+    const settingsSnap = this.getSyncableSettingsSnapshot();
+    const changedSettings: Array<{ settingKey: string; value: string }> = [];
+    Object.entries(settingsSnap).forEach(([k, val]) => {
+      if (lastSyncedSettingsMap.get(k) !== val) {
+        changedSettings.push({ settingKey: k, value: val });
+      }
+    });
+
+    return {
+      changedAirmen,
+      changedAssignments,
+      deletedAssignments,
+      changedHistory,
+      changedUsers,
+      changedSettings,
+    };
   }
 
   /**
-   * Granular delta backup to Firebase Firestore:
-   * - Only changed items upload (Requirement 5)
-   * - Multi-user: 10s interval when differences exist; 0 writes when unchanged (Requirement 2)
-   * - Single-user: 30m interval + immediate flush on app close/logout (Requirement 1)
-   * - Quota exceeded / offline: queues deltas persistently in Local Storage until reset (Requirement 4)
+   * Immediately records any newly modified items into PendingDeltaQueue and advances the local diff baseline
+   * so that even while Firebase quota is exhausted or offline, ONLY the exact modified records are queued.
    */
-  public async saveToFirebase(_dbToSave: LocalStorageDB, immediate = false): Promise<boolean> {
-    if (typeof window === 'undefined') return false;
-
-    // Wait until initial Firebase pull/seed establishes baseline before computing diffs,
-    // but schedule a retry so local edits made during boot sync are never dropped
-    if (!immediate && (!this.isInitialPullDone || this.isFirebaseSyncing)) {
-      if (!this.saveTimeout) {
-        this.saveTimeout = setTimeout(() => {
-          this.saveTimeout = null;
-          this.scheduledMode = null;
-          this.saveToFirebase(this.db, false);
-        }, 1500);
-      }
-      return false;
-    }
-
-    const computeDiff = () => {
-      const currDb = this.db;
-      let lastSyncedDb: any = {};
-      try {
-        lastSyncedDb = JSON.parse(this.lastSyncedDbStr || '{}');
-      } catch {}
-
-      const stripVolatileFields = (obj: any) => {
-        if (!obj || typeof obj !== 'object') return obj;
-        const { updatedAt: _u, updated_at: _ua, detailedAt: _d, lastLoginAt: _l, ...rest } = obj;
-        return rest;
-      };
-
-      const changedAirmen = (currDb.airmen || []).filter((a) => {
-        if (!lastSyncedDb.airmen) return true;
-        const cleanBd = String(a.bdNo || '').replace(/\D/g, '');
-        const prev = lastSyncedDb.airmen.find(
-          (p: any) => p.id === a.id || (cleanBd && p.bdNo && String(p.bdNo).replace(/\D/g, '') === cleanBd)
-        );
-        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(a));
-      });
-
-      const changedAssignments: any[] = [];
-      const deletedAssignments: any[] = [];
-      const prevAsnMap = new Map<string, any>();
-      Object.values(lastSyncedDb.assignments || {}).forEach((monthList: any) => {
-        if (Array.isArray(monthList)) {
-          monthList.forEach((prevA: any) => prevAsnMap.set(getAssignmentDocId(prevA), prevA));
-        }
-      });
-
-      const currAsnMap = new Map<string, any>();
-      Object.values(currDb.assignments || {}).forEach((monthList: any) => {
-        if (Array.isArray(monthList)) {
-          monthList.forEach((currA: any) => currAsnMap.set(getAssignmentDocId(currA), currA));
-        }
-      });
-
-      prevAsnMap.forEach((prevA, docId) => {
-        if (!currAsnMap.has(docId)) deletedAssignments.push(prevA);
-      });
-      currAsnMap.forEach((currA, docId) => {
-        const prevA = prevAsnMap.get(docId);
-        if (
-          !prevA ||
-          prevA.airmanId !== currA.airmanId ||
-          prevA.date !== currA.date ||
-          prevA.dutyCode !== currA.dutyCode ||
-          (prevA.idaShift || '') !== (currA.idaShift || '') ||
-          (prevA.proxyForFlight || '') !== (currA.proxyForFlight || '') ||
-          (prevA.disposalScope || 'ALL') !== (currA.disposalScope || 'ALL') ||
-          (prevA.notes || '') !== (currA.notes || '') ||
-          (prevA.location || '') !== (currA.location || '') ||
-          Boolean(prevA.isOfficial) !== Boolean(currA.isOfficial) ||
-          Boolean(prevA.isCompleted) !== Boolean(currA.isCompleted)
-        ) {
-          changedAssignments.push(currA);
-        }
-      });
-
-      const changedHistory = (currDb.activityHistory || []).filter((h) => {
-        if (!lastSyncedDb.activityHistory) return true;
-        const prev = lastSyncedDb.activityHistory.find((p: any) => p.id === h.id);
-        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(h));
-      });
-
-      const changedUsers = (currDb.detailedUsers || []).filter((u) => {
-        if (!lastSyncedDb.detailedUsers) return true;
-        const prev = lastSyncedDb.detailedUsers.find((p: any) => p.id === u.id || (u.bdNo && p.bdNo === u.bdNo));
-        return !prev || JSON.stringify(stripVolatileFields(prev)) !== JSON.stringify(stripVolatileFields(u));
-      });
-
-      const settingsSnap = this.getSyncableSettingsSnapshot();
-      const changedSettings: Array<{ settingKey: string; value: string }> = [];
-      Object.entries(settingsSnap).forEach(([k, val]) => {
-        if (lastSyncedSettingsMap.get(k) !== val) {
-          changedSettings.push({ settingKey: k, value: val });
-        }
-      });
-
-      return {
-        changedAirmen,
-        changedAssignments,
-        deletedAssignments,
-        changedHistory,
-        changedUsers,
-        changedSettings,
-      };
-    };
-
-    const diffNow = computeDiff();
+  private captureCurrentDiffIntoPendingQueue(): boolean {
+    const diffNow = this.computeCurrentDiff();
     const hasNewDiffs =
       diffNow.changedAirmen.length > 0 ||
       diffNow.changedAssignments.length > 0 ||
@@ -1995,17 +2234,230 @@ export class LocalDatabaseEngine {
       diffNow.changedUsers.length > 0 ||
       diffNow.changedSettings.length > 0;
 
-    // Persist any detected deltas immediately to offline delta queue (survives quota limit, close, refresh)
-    if (hasNewDiffs && this.isInitialPullDone) {
-      recordPendingDeltas({
-        airmen: diffNow.changedAirmen,
-        assignments: diffNow.changedAssignments,
-        deletedAssignments: diffNow.deletedAssignments,
-        history: diffNow.changedHistory,
-        users: diffNow.changedUsers,
-        settingKeys: diffNow.changedSettings.map((s) => s.settingKey),
-      });
+    if (!hasNewDiffs) return false;
+
+    const nowIso = new Date().toISOString();
+    diffNow.changedAirmen.forEach((a: any) => {
+      a.updatedAt = nowIso;
+    });
+    diffNow.changedAssignments.forEach((a: any) => {
+      a.updatedAt = nowIso;
+    });
+    diffNow.changedHistory.forEach((h: any) => {
+      h.updatedAt = nowIso;
+    });
+    diffNow.changedUsers.forEach((u: any) => {
+      u.updatedAt = nowIso;
+    });
+
+    recordPendingDeltas({
+      airmen: diffNow.changedAirmen,
+      assignments: diffNow.changedAssignments,
+      deletedAssignments: diffNow.deletedAssignments,
+      history: diffNow.changedHistory,
+      users: diffNow.changedUsers,
+      settingKeys: diffNow.changedSettings.map((s) => s.settingKey),
+    });
+
+    // Advance local diff baseline so subsequent edits only detect newly modified items
+    this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
+    diffNow.changedSettings.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, s.value));
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('baf_pending_sync', 'true');
     }
+    return true;
+  }
+
+  /**
+   * Uploads ONLY the specific items queued in PendingDeltaQueue to Firebase Firestore,
+   * leaving all other untouched documents in Firebase completely untouched.
+   */
+  public async flushPendingDeltasOnlyToFirebase(reason: string = 'delta_sync'): Promise<boolean> {
+    if (typeof window === 'undefined') return false;
+    if (this.isPushing) return false;
+
+    this.captureCurrentDiffIntoPendingQueue();
+
+    if (!hasPendingDeltas()) {
+      window.localStorage.removeItem('baf_pending_sync');
+      return true;
+    }
+
+    if (!isFirebaseConfigured || isFirestoreQuotaExceeded() || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+      window.localStorage.setItem('baf_pending_sync', 'true');
+      return false;
+    }
+
+    const pending = getPendingDeltaQueue();
+
+    const airmenToPushMap = new Map<string, any>();
+    Object.keys(pending.airmen || {}).forEach((docId) => {
+      const found = (this.db.airmen || []).find((a) => getAirmanDocId(a) === docId);
+      if (found) airmenToPushMap.set(docId, found);
+    });
+
+    const assignToPushMap = new Map<string, any>();
+    const assignToDelMap = new Map<string, any>();
+    Object.values(pending.assignments || {}).forEach((p) => {
+      if (!p || !p.docId) return;
+      if (p.isDeleted) {
+        if (p.assignment) assignToDelMap.set(p.docId, p.assignment);
+      } else if (p.assignment) {
+        assignToPushMap.set(p.docId, p.assignment);
+      }
+    });
+
+    const histToPushMap = new Map<string, any>();
+    Object.keys(pending.history || {}).forEach((docId) => {
+      const found = (this.db.activityHistory || []).find((h) => sanitizeDocId(h.id) === docId);
+      if (found) histToPushMap.set(docId, found);
+    });
+
+    const usersToPushMap = new Map<string, any>();
+    const userDocIdsToClear: string[] = [];
+    Object.keys(pending.users || {}).forEach((docId) => {
+      const found = (this.db.detailedUsers || []).find(
+        (u) => getUserProfileDocId(u) === docId || sanitizeDocId(u?.id || `user_${u?.bdNo || 'u'}`) === docId
+      );
+      if (found) {
+        usersToPushMap.set(getUserProfileDocId(found), found);
+      }
+      userDocIdsToClear.push(docId);
+    });
+
+    const settingsToPushMap = new Map<string, { settingKey: string; value: string; updatedAt?: string }>();
+    Object.entries(pending.settings || {}).forEach(([k, updatedAt]) => {
+      if (isSyncableSettingKey(k)) {
+        const v = window.localStorage.getItem(k);
+        if (v !== null) settingsToPushMap.set(k, { settingKey: k, value: v, updatedAt });
+      }
+    });
+
+    const airmenList = Array.from(airmenToPushMap.values());
+    const assignUpsertList = Array.from(assignToPushMap.values());
+    const assignDelList = Array.from(assignToDelMap.values());
+    const histList = Array.from(histToPushMap.values());
+    const userList = Array.from(usersToPushMap.values());
+    const settingsList = Array.from(settingsToPushMap.values());
+
+    if (
+      airmenList.length === 0 &&
+      assignUpsertList.length === 0 &&
+      assignDelList.length === 0 &&
+      histList.length === 0 &&
+      userList.length === 0 &&
+      settingsList.length === 0
+    ) {
+      clearPendingDeltas({ clearAll: true });
+      window.localStorage.removeItem('baf_pending_sync');
+      return true;
+    }
+
+    this.isPushing = true;
+    isSyncingActive = true;
+    broadcastSyncState();
+    emitSyncProgress(15, 'Backing up changed items to Firebase...');
+
+    try {
+      const changedCollections: string[] = [];
+
+      if (airmenList.length > 0) {
+        await pushAirmenToFirebase(airmenList);
+        changedCollections.push('airmen');
+      }
+      emitSyncProgress(40, 'Backing up changed duty assignments...');
+      if (assignDelList.length > 0) {
+        await softDeleteDutyAssignmentsInFirebase(assignDelList);
+        changedCollections.push('duty_assignments');
+      }
+      if (assignUpsertList.length > 0) {
+        await pushDutyAssignmentsToFirebase(assignUpsertList);
+        changedCollections.push('duty_assignments');
+      }
+      emitSyncProgress(65, 'Backing up changed history & user profiles...');
+      if (histList.length > 0) {
+        await pushParadeStatesToFirebase(histList);
+        changedCollections.push('parade_states');
+      }
+      if (userList.length > 0) {
+        await pushUserProfilesToFirebase(userList);
+        changedCollections.push('user_profiles');
+      }
+      emitSyncProgress(85, 'Backing up changed settings...');
+      if (settingsList.length > 0) {
+        await pushAppSettingsToFirebase(settingsList);
+        settingsList.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, s.value));
+        changedCollections.push('app_settings');
+      }
+
+      const extraMeta = this.getManifestExtraMeta(this.db);
+      if (changedCollections.length > 0) {
+        await publishSyncManifest(Array.from(new Set(changedCollections)), reason, extraMeta);
+      }
+
+      clearPendingDeltas({
+        airmenIds: Object.keys(pending.airmen || {}),
+        assignmentDocIds: [...Array.from(assignToPushMap.keys()), ...Array.from(assignToDelMap.keys())],
+        historyIds: Object.keys(pending.history || {}),
+        userIds: userDocIdsToClear,
+        settingKeys: Object.keys(pending.settings || {}),
+      });
+
+      this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
+      const curMatrix = window.localStorage.getItem('baf_official_duty_matrix_v4');
+      if (curMatrix) lastSyncedMatrixRaw = curMatrix;
+
+      const nowIso = new Date().toISOString();
+      this.lastPullAt = nowIso;
+      window.localStorage.setItem(getActiveLastPullKey(), nowIso);
+      window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
+      window.localStorage.removeItem('baf_pending_sync');
+      firebaseConnected = true;
+      firebaseLastSyncTime = nowIso;
+      window.localStorage.setItem('baf_cloud_connected', 'true');
+      window.localStorage.setItem('baf_cloud_last_sync', nowIso);
+
+      emitSyncProgress(100, 'Backed up changed items to Firebase!');
+      addSyncLog({
+        timestamp: nowIso,
+        type: 'PUSH',
+        status: 'SUCCESS',
+        message: `Backed up ONLY changed items (${airmenList.length} airmen, ${
+          assignUpsertList.length + assignDelList.length
+        } duties, ${histList.length} logs, ${settingsList.length} settings).`,
+      });
+      return true;
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      const isQuota = isQuotaExceededError(err) || isFirestoreQuotaExceeded();
+      addSyncLog({
+        timestamp: new Date().toISOString(),
+        type: 'PUSH',
+        status: 'ERROR',
+        message: isQuota
+          ? 'Firebase quota exceeded — changes safely saved in Local Cloud queue.'
+          : `Firebase push error: ${msg}`,
+      });
+      window.localStorage.setItem('baf_pending_sync', 'true');
+      return false;
+    } finally {
+      this.isPushing = false;
+      isSyncingActive = false;
+      broadcastSyncState();
+    }
+  }
+
+  /**
+   * Granular delta backup to Firebase Firestore:
+   * - Only changed items upload
+   * - Quota exceeded / offline: queues deltas persistently in Local Storage until reset,
+   *   then uploads ONLY those changed items as soon as quota resets
+   */
+  public async saveToFirebase(_dbToSave: LocalStorageDB, immediate = false): Promise<boolean> {
+    if (typeof window === 'undefined') return false;
+
+    // Always capture any newly modified items into PendingDeltaQueue first (even during boot or when quota is exceeded)
+    const hasNewDiffs = this.captureCurrentDiffIntoPendingQueue();
 
     if (!hasNewDiffs && !hasPendingDeltas()) {
       if (this.saveTimeout) {
@@ -2033,190 +2485,13 @@ export class LocalDatabaseEngine {
       return false;
     }
 
-    const doSave = async (): Promise<boolean> => {
-      if (this.isPushing) return false;
-      if (this.saveTimeout) {
-        clearTimeout(this.saveTimeout);
-        this.saveTimeout = null;
-        this.scheduledMode = null;
-      }
-      if (isFirestoreQuotaExceeded() || (typeof navigator !== 'undefined' && !navigator.onLine)) {
-        return true;
-      }
-
-      const d = computeDiff();
-      const pending = getPendingDeltaQueue();
-
-      // Merge diffNow + persisted pendingDeltaQueue so no offline edit is missed
-      const airmenToPushMap = new Map<string, any>();
-      d.changedAirmen.forEach((a) => airmenToPushMap.set(getAirmanDocId(a), a));
-      Object.keys(pending.airmen || {}).forEach((docId) => {
-        if (!airmenToPushMap.has(docId)) {
-          const found = (this.db.airmen || []).find((a) => getAirmanDocId(a) === docId);
-          if (found) airmenToPushMap.set(docId, found);
-        }
-      });
-
-      const assignToPushMap = new Map<string, any>();
-      const assignToDelMap = new Map<string, any>();
-      d.changedAssignments.forEach((a) => assignToPushMap.set(getAssignmentDocId(a), a));
-      d.deletedAssignments.forEach((a) => assignToDelMap.set(getAssignmentDocId(a), a));
-      Object.values(pending.assignments || {}).forEach((p) => {
-        if (!p || !p.docId) return;
-        if (p.isDeleted) {
-          if (!assignToPushMap.has(p.docId) && p.assignment) assignToDelMap.set(p.docId, p.assignment);
-        } else if (p.assignment && !assignToDelMap.has(p.docId) && !assignToPushMap.has(p.docId)) {
-          assignToPushMap.set(p.docId, p.assignment);
-        }
-      });
-
-      const histToPushMap = new Map<string, any>();
-      d.changedHistory.forEach((h) => histToPushMap.set(sanitizeDocId(h.id), h));
-      Object.keys(pending.history || {}).forEach((docId) => {
-        if (!histToPushMap.has(docId)) {
-          const found = (this.db.activityHistory || []).find((h) => sanitizeDocId(h.id) === docId);
-          if (found) histToPushMap.set(docId, found);
-        }
-      });
-
-      const usersToPushMap = new Map<string, any>();
-      d.changedUsers.forEach((u) => usersToPushMap.set(sanitizeDocId(u?.id || `user_login_${u?.bdNo || 'u'}`), u));
-      Object.keys(pending.users || {}).forEach((docId) => {
-        if (!usersToPushMap.has(docId)) {
-          const found = (this.db.detailedUsers || []).find(
-            (u) => sanitizeDocId(u?.id || `user_login_${u?.bdNo || 'u'}`) === docId
-          );
-          if (found) usersToPushMap.set(docId, found);
-        }
-      });
-
-      const settingsToPushMap = new Map<string, { settingKey: string; value: string }>();
-      d.changedSettings.forEach((s) => settingsToPushMap.set(s.settingKey, s));
-      Object.keys(pending.settings || {}).forEach((k) => {
-        if (!settingsToPushMap.has(k) && isSyncableSettingKey(k)) {
-          const v = window.localStorage.getItem(k);
-          if (v !== null) settingsToPushMap.set(k, { settingKey: k, value: v });
-        }
-      });
-
-      const airmenList = Array.from(airmenToPushMap.values());
-      const assignUpsertList = Array.from(assignToPushMap.values());
-      const assignDelList = Array.from(assignToDelMap.values());
-      const histList = Array.from(histToPushMap.values());
-      const userList = Array.from(usersToPushMap.values());
-      const settingsList = Array.from(settingsToPushMap.values());
-
-      if (
-        airmenList.length === 0 &&
-        assignUpsertList.length === 0 &&
-        assignDelList.length === 0 &&
-        histList.length === 0 &&
-        userList.length === 0 &&
-        settingsList.length === 0
-      ) {
-        window.localStorage.removeItem('baf_pending_sync');
-        return true;
-      }
-
-      this.isPushing = true;
-      isSyncingActive = true;
-      broadcastSyncState();
-      emitSyncProgress(10, 'Uploading changed items to Firebase...');
-
-      try {
-        const changedCollections: string[] = [];
-
-        if (airmenList.length > 0) {
-          await pushAirmenToFirebase(airmenList);
-          changedCollections.push('airmen');
-        }
-        emitSyncProgress(35, 'Syncing duty updates...');
-        if (assignDelList.length > 0) {
-          await softDeleteDutyAssignmentsInFirebase(assignDelList);
-          changedCollections.push('duty_assignments');
-        }
-        if (assignUpsertList.length > 0) {
-          await pushDutyAssignmentsToFirebase(assignUpsertList);
-          changedCollections.push('duty_assignments');
-        }
-        emitSyncProgress(60, 'Syncing history & user profiles...');
-        if (histList.length > 0) {
-          await pushParadeStatesToFirebase(histList);
-          changedCollections.push('parade_states');
-        }
-        if (userList.length > 0) {
-          await pushUserProfilesToFirebase(userList);
-          changedCollections.push('user_profiles');
-        }
-        emitSyncProgress(85, 'Syncing changed settings...');
-        if (settingsList.length > 0) {
-          await pushAppSettingsToFirebase(settingsList);
-          settingsList.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, s.value));
-          changedCollections.push('app_settings');
-        }
-
-        if (changedCollections.length > 0) {
-          await publishSyncManifest(Array.from(new Set(changedCollections)), 'delta_sync');
-        }
-
-        clearPendingDeltas({
-          airmenIds: Array.from(airmenToPushMap.keys()),
-          assignmentDocIds: [...Array.from(assignToPushMap.keys()), ...Array.from(assignToDelMap.keys())],
-          historyIds: Array.from(histToPushMap.keys()),
-          userIds: Array.from(usersToPushMap.keys()),
-          settingKeys: Array.from(settingsToPushMap.keys()),
-        });
-
-        this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
-        const curMatrix = window.localStorage.getItem('baf_official_duty_matrix_v4');
-        if (curMatrix) lastSyncedMatrixRaw = curMatrix;
-
-        const nowIso = new Date().toISOString();
-        this.lastPullAt = nowIso;
-        window.localStorage.setItem(getActiveLastPullKey(), nowIso);
-        window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
-        window.localStorage.removeItem('baf_pending_sync');
-        firebaseConnected = true;
-        firebaseLastSyncTime = nowIso;
-        window.localStorage.setItem('baf_cloud_connected', 'true');
-        window.localStorage.setItem('baf_cloud_last_sync', nowIso);
-
-        emitSyncProgress(100, 'Synced changed items to Firebase!');
-        addSyncLog({
-          timestamp: nowIso,
-          type: 'PUSH',
-          status: 'SUCCESS',
-          message: `Synced ${airmenList.length} airmen, ${assignUpsertList.length + assignDelList.length} duties, ${histList.length} logs, ${settingsList.length} settings.`,
-        });
-        return true;
-      } catch (err: any) {
-        const msg = err?.message || String(err);
-        const isQuota = isQuotaExceededError(err) || isFirestoreQuotaExceeded();
-        addSyncLog({
-          timestamp: new Date().toISOString(),
-          type: 'PUSH',
-          status: 'ERROR',
-          message: isQuota
-            ? 'Firebase quota exceeded — changes safely saved in Local Cloud queue.'
-            : `Firebase push error: ${msg}`,
-        });
-        window.localStorage.setItem('baf_pending_sync', 'true');
-        return false;
-      } finally {
-        this.isPushing = false;
-        isSyncingActive = false;
-        broadcastSyncState();
-      }
-    };
-
     if (immediate) {
-      return doSave();
+      return this.flushPendingDeltasOnlyToFirebase('delta_sync');
     }
 
     const desiredMode: 'single' | 'multi' = isMultiUserMode() ? 'multi' : 'single';
     const intervalMs = desiredMode === 'multi' ? MULTI_USER_BACKUP_INTERVAL_MS : SINGLE_USER_BACKUP_INTERVAL_MS;
 
-    // Trailing debounce: re-arm timer on every new edit so changes batch cleanly & upload in 2.5–4s
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
       this.saveTimeout = null;
@@ -2226,7 +2501,7 @@ export class LocalDatabaseEngine {
     this.saveTimeout = setTimeout(() => {
       this.saveTimeout = null;
       this.scheduledMode = null;
-      doSave();
+      void this.flushPendingDeltasOnlyToFirebase('delta_sync');
     }, intervalMs);
 
     return true;
@@ -2254,6 +2529,7 @@ export class LocalDatabaseEngine {
       recordPendingDeltas({
         settingKeys: ['baf_official_duty_matrix_v4'],
       });
+      lastSyncedSettingsMap.set('baf_official_duty_matrix_v4', JSON.stringify(matrix));
 
       if (!isFirebaseConfigured || isFirestoreQuotaExceeded() || (typeof navigator !== 'undefined' && !navigator.onLine)) {
         return true;
@@ -2268,10 +2544,9 @@ export class LocalDatabaseEngine {
       ]);
 
       if (pushed > 0) {
-        lastSyncedSettingsMap.set('baf_official_duty_matrix_v4', JSON.stringify(matrix));
         lastSyncedMatrixRaw = JSON.stringify(matrix);
         clearPendingDeltas({ settingKeys: ['baf_official_duty_matrix_v4'] });
-        await publishSyncManifest(['app_settings'], 'duty_matrix_update');
+        await publishSyncManifest(['app_settings'], 'duty_matrix_update', this.getManifestExtraMeta(this.db));
         window.localStorage.removeItem('baf_pending_sync');
         emitSyncProgress(100, 'Duty Matrix synced to Firebase');
         addSyncLog({ timestamp: nowIso, type: 'PUSH', status: 'SUCCESS', message: 'Duty Matrix synced to Firebase Firestore.' });

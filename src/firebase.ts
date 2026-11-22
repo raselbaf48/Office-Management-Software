@@ -202,28 +202,13 @@ export function syncBrowserTabIdentity(
       typeof window !== 'undefined' &&
       Boolean(window.sessionStorage?.getItem('baf_user_session'));
 
-    // When no office is logged in, always display the default Office Management Application title & logo in the address bar
+    const identity = getActiveOfficeIdentity();
+
     if (!hasActiveSession) {
       document.title = DEFAULT_APP_TITLE;
-      const iconSelectors = 'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]';
-      const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
-      if (existingIcons.length > 0) {
-        existingIcons.forEach((linkEl) => {
-          linkEl.href =
-            linkEl.sizes?.value === '512x512'
-              ? '/pwa-pc-512x512.png?v=17'
-              : '/pwa-pc-192x192.png?v=17';
-        });
-      } else {
-        const newIcon = document.createElement('link');
-        newIcon.rel = 'icon';
-        newIcon.href = '/pwa-pc-192x192.png?v=17';
-        document.head.appendChild(newIcon);
-      }
       return;
     }
 
-    const identity = getActiveOfficeIdentity();
     const rawName = String(officeName ?? identity.officeName ?? '').trim();
     const isGenericName =
       !rawName ||
@@ -232,8 +217,15 @@ export function syncBrowserTabIdentity(
       rawName === 'Office Management System';
 
     const cleanName = isGenericName ? String(identity.officeName || '155 UASU BAF').trim() : rawName;
+    const passedLogo = String(officeLogo || '').trim();
+    const isPassedGenericLogo =
+      !passedLogo ||
+      passedLogo.includes('office-management-logo') ||
+      passedLogo.includes('pwa-pc-192x192') ||
+      passedLogo.includes('pwa-pc-512x512');
+
     const cleanLogo =
-      String(officeLogo || identity.officeLogo || '/155-uasu-baf-logo.png').trim() ||
+      (!isPassedGenericLogo ? passedLogo : String(identity.officeLogo || '/155-uasu-baf-logo.png').trim()) ||
       '/155-uasu-baf-logo.png';
 
     document.title =
@@ -243,28 +235,7 @@ export function syncBrowserTabIdentity(
         ? `${cleanName} | ${DEFAULT_APP_TITLE}`
         : DEFAULT_APP_TITLE;
 
-    const is155Logo = cleanLogo.includes('155-uasu-baf-logo');
-    const iconSelectors = 'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]';
-    const existingIcons = document.head.querySelectorAll<HTMLLinkElement>(iconSelectors);
-    if (existingIcons.length > 0) {
-      existingIcons.forEach((linkEl) => {
-        if (is155Logo) {
-          linkEl.href =
-            linkEl.sizes?.value === '512x512'
-              ? '/pwa-512x512-trans.png?v=17'
-              : '/pwa-192x192-trans.png?v=17';
-        } else {
-          linkEl.href = cleanLogo;
-        }
-      });
-    } else {
-      const newIcon = document.createElement('link');
-      newIcon.rel = 'icon';
-      newIcon.href = is155Logo ? '/pwa-192x192-trans.png?v=17' : cleanLogo;
-      document.head.appendChild(newIcon);
-    }
-
-    syncDynamicOfficePwaManifest({
+    void syncDynamicOfficePwaManifest({
       officeName: cleanName,
       officeLogo: cleanLogo,
       officeCode: identity.officeCode,
@@ -623,21 +594,9 @@ const urlSetupConfig = checkAndApplyUrlSetupParam();
 export function isAiStudioPracticeEnvironment(): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const host = String(window.location.hostname || '').toLowerCase().trim();
-    const isAiStudioHost =
-      host.startsWith('ais-dev-') ||
-      host.startsWith('ais-pre-') ||
-      host.includes('.scf.usercontent.goog') ||
-      host.includes('aistudio.google.com') ||
-      host === 'localhost' ||
-      host === '127.0.0.1';
-    if (isAiStudioHost) return true;
-    // Also detect if embedded inside the AI Studio preview iframe
-    if (window.self !== window.top) {
-      const ref = String(document.referrer || '').toLowerCase();
-      if (ref.includes('aistudio.google.com') || ref.includes('ais-dev-') || ref.includes('ais-pre-')) {
-        return true;
-      }
+    // Only enter offline practice mode if explicitly forced by user flag
+    if (window.localStorage.getItem('baf_force_practice_mode') === 'true') {
+      return true;
     }
   } catch {}
   return false;

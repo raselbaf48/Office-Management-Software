@@ -526,119 +526,223 @@ async function startServer() {
     res.status(200).json({ success: true, message: 'Handled via local store' });
   });
 
-  // In-memory store for dynamically resized square PWA PNG icons (192x192, 512x512, maskable 512x512)
+  // Persistent + in-memory store for dynamically resized square PWA PNG icons (192x192, 512x512, maskable 512x512)
   const dynamicPwaIconStore = new Map<string, { icon192: Buffer; icon512: Buffer; maskable512: Buffer }>();
+  const ACTIVE_PWA_STATE_FILE = path.join(DATA_DIR, 'active_pwa_office.json');
+
+  interface ActivePwaOfficeState {
+    officeName: string;
+    officeCode: string;
+    officeSlogan: string;
+    is155Office: boolean;
+    iconHash: string;
+  }
+
+  let activePwaOfficeState: ActivePwaOfficeState = {
+    officeName: '155 UASU BAF',
+    officeCode: '155-UASU',
+    officeSlogan: 'Intel • Surveillance • Strike',
+    is155Office: true,
+    iconHash: '',
+  };
+
+  try {
+    if (fs.existsSync(ACTIVE_PWA_STATE_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(ACTIVE_PWA_STATE_FILE, 'utf-8'));
+      if (saved && saved.officeName) {
+        activePwaOfficeState = {
+          officeName: String(saved.officeName || '155 UASU BAF'),
+          officeCode: String(saved.officeCode || ''),
+          officeSlogan: String(saved.officeSlogan || ''),
+          is155Office: Boolean(saved.is155Office),
+          iconHash: String(saved.iconHash || ''),
+        };
+        if (saved.iconHash && saved.icon192Base64 && saved.icon512Base64) {
+          const b192 = Buffer.from(saved.icon192Base64, 'base64');
+          const b512 = Buffer.from(saved.icon512Base64, 'base64');
+          const bMask = saved.maskable512Base64 ? Buffer.from(saved.maskable512Base64, 'base64') : b512;
+          dynamicPwaIconStore.set(saved.iconHash, { icon192: b192, icon512: b512, maskable512: bMask });
+        }
+      }
+    }
+  } catch {}
+
+  const persistActivePwaState = (
+    nextState: ActivePwaOfficeState,
+    buffers?: { icon192: Buffer; icon512: Buffer; maskable512: Buffer }
+  ) => {
+    activePwaOfficeState = nextState;
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      const payload: Record<string, any> = { ...nextState };
+      if (buffers) {
+        payload.icon192Base64 = buffers.icon192.toString('base64');
+        payload.icon512Base64 = buffers.icon512.toString('base64');
+        payload.maskable512Base64 = buffers.maskable512.toString('base64');
+      }
+      fs.writeFileSync(ACTIVE_PWA_STATE_FILE, JSON.stringify(payload), 'utf-8');
+    } catch {}
+  };
 
   app.post('/api/pwa-icon-upload', express.json({ limit: '15mb' }), (req, res) => {
     try {
-      const { hash, icon192, icon512, maskable512 } = req.body || {};
-      if (!hash || !icon192 || !icon512) {
-        return res.status(400).json({ error: 'Missing hash or icon buffers' });
+      const { hash, icon192, icon512, maskable512, officeName, officeCode, officeSlogan, is155Office } = req.body || {};
+      const cleanName = String(officeName || '').trim();
+      const isGeneric =
+        !cleanName ||
+        cleanName === 'Office Management' ||
+        cleanName === 'Office Management Application' ||
+        cleanName === 'Office Management System';
+
+      let buffers: { icon192: Buffer; icon512: Buffer; maskable512: Buffer } | undefined;
+      if (hash && icon192 && icon512) {
+        const stripDataPrefix = (dataUrl: string) =>
+          Buffer.from(String(dataUrl).replace(/^data:image\/\w+;base64,/, ''), 'base64');
+
+        const buf192 = stripDataPrefix(icon192);
+        const buf512 = stripDataPrefix(icon512);
+        const bufMask = maskable512 ? stripDataPrefix(maskable512) : buf512;
+
+        buffers = { icon192: buf192, icon512: buf512, maskable512: bufMask };
+        dynamicPwaIconStore.set(String(hash), buffers);
       }
-      const stripDataPrefix = (dataUrl: string) =>
-        Buffer.from(String(dataUrl).replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
-      const buf192 = stripDataPrefix(icon192);
-      const buf512 = stripDataPrefix(icon512);
-      const bufMask = maskable512 ? stripDataPrefix(maskable512) : buf512;
+      if (!isGeneric) {
+        const detected155 =
+          Boolean(is155Office) ||
+          cleanName.toUpperCase().includes('155') ||
+          String(officeCode || '').toUpperCase().includes('155');
+        persistActivePwaState(
+          {
+            officeName: cleanName,
+            officeCode: String(officeCode || '').trim(),
+            officeSlogan: String(officeSlogan || '').trim(),
+            is155Office: detected155,
+            iconHash: detected155 ? '' : String(hash || activePwaOfficeState.iconHash || ''),
+          },
+          buffers
+        );
+      }
 
-      dynamicPwaIconStore.set(String(hash), {
-        icon192: buf192,
-        icon512: buf512,
-        maskable512: bufMask,
-      });
-
-      res.json({ success: true, hash });
+      res.json({ success: true, hash: hash || '' });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to store PWA icons' });
     }
   });
 
+  const sendActiveOrFallbackPwaIcon = (
+    res: express.Response,
+    sizeType: '192' | '512' | 'maskable',
+    requestedHash?: string
+  ) => {
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    const targetHash = requestedHash || (!activePwaOfficeState.is155Office ? activePwaOfficeState.iconHash : '');
+    if (targetHash && dynamicPwaIconStore.has(targetHash)) {
+      const entry = dynamicPwaIconStore.get(targetHash)!;
+      const buf =
+        sizeType === '192' ? entry.icon192 : sizeType === 'maskable' ? entry.maskable512 : entry.icon512;
+      return res.status(200).send(buf);
+    }
+
+    const fallbackFile =
+      sizeType === '192'
+        ? 'pwa-192x192-trans.png'
+        : sizeType === 'maskable'
+          ? 'pwa-512x512-full.png'
+          : 'pwa-512x512-trans.png';
+    const fallbackPath = path.join(process.cwd(), 'public', fallbackFile);
+    if (fs.existsSync(fallbackPath)) {
+      return res.sendFile(fallbackPath);
+    }
+    return res.redirect('/pwa-512x512-trans.png');
+  };
+
   app.get('/api/pwa-icon/:hash/:file', (req, res) => {
     try {
       const { hash, file } = req.params;
-      const entry = dynamicPwaIconStore.get(hash);
-      if (entry) {
-        let buf = entry.icon512;
-        if (file.includes('192')) buf = entry.icon192;
-        else if (file.includes('maskable')) buf = entry.maskable512;
-        res.setHeader('Content-Type', 'image/png');
-        res.setHeader('Cache-Control', 'public, max-age=86400');
-        return res.status(200).send(buf);
-      }
-      // Fallback to exact 192x192 / 512x512 PNG if server restarted before client re-uploaded
-      const fallbackFile = file.includes('192')
-        ? 'pwa-192x192-trans.png'
+      const sizeType: '192' | '512' | 'maskable' = file.includes('192')
+        ? '192'
         : file.includes('maskable')
-          ? 'pwa-512x512-full.png'
-          : 'pwa-512x512-trans.png';
-      const fallbackPath = path.join(process.cwd(), 'public', fallbackFile);
-      if (fs.existsSync(fallbackPath)) {
-        res.setHeader('Content-Type', 'image/png');
-        return res.sendFile(fallbackPath);
-      }
-      return res.redirect('/pwa-512x512-trans.png');
+          ? 'maskable'
+          : '512';
+      return sendActiveOrFallbackPwaIcon(res, sizeType, hash);
     } catch {
       return res.redirect('/pwa-512x512-trans.png');
     }
   });
 
-  // Dynamic Office-Specific PWA Manifest Endpoint
-  app.get('/api/pwa-manifest', (req, res) => {
-    try {
-      const rawName = String(req.query.name || '').trim();
-      const rawLogo = String(req.query.logo || '').trim();
-      const rawCode = String(req.query.code || '').trim();
-      const rawSlogan = String(req.query.slogan || '').trim();
-      const iconHash = String(req.query.iconHash || '').trim();
+  app.get('/api/pwa-active-icon-192.png', (req, res) => {
+    const hash = String(req.query.iconHash || '').trim();
+    return sendActiveOrFallbackPwaIcon(res, '192', hash);
+  });
 
-      const isGeneric =
-        !rawName ||
-        rawName === 'Office Management' ||
-        rawName === 'Office Management Application' ||
-        rawName === 'Office Management System';
+  app.get('/api/pwa-active-icon-512.png', (req, res) => {
+    const hash = String(req.query.iconHash || '').trim();
+    return sendActiveOrFallbackPwaIcon(res, '512', hash);
+  });
+
+  app.get('/api/pwa-active-maskable-512.png', (req, res) => {
+    const hash = String(req.query.iconHash || '').trim();
+    return sendActiveOrFallbackPwaIcon(res, 'maskable', hash);
+  });
+
+  // Shared handler for both /manifest.json and /api/pwa-manifest so Chromium ALWAYS gets the active office's Name & Logo
+  const handlePwaManifestRequest = (req: express.Request, res: express.Response) => {
+    try {
+      const queryName = String(req.query.name || '').trim();
+      const queryLogo = String(req.query.logo || '').trim();
+      const queryCode = String(req.query.code || '').trim();
+      const querySlogan = String(req.query.slogan || '').trim();
+      const queryHash = String(req.query.iconHash || '').trim();
+
+      const isQueryGeneric =
+        !queryName ||
+        queryName === 'Office Management' ||
+        queryName === 'Office Management Application' ||
+        queryName === 'Office Management System';
+
+      const appName = !isQueryGeneric
+        ? queryName
+        : activePwaOfficeState.officeName || '155 UASU BAF';
+      const rawCode = !isQueryGeneric ? queryCode : activePwaOfficeState.officeCode;
+      const rawSlogan = !isQueryGeneric ? querySlogan : activePwaOfficeState.officeSlogan;
+      const iconHash = queryHash || (!activePwaOfficeState.is155Office ? activePwaOfficeState.iconHash : '');
 
       const is155Office =
-        !isGeneric &&
-        (rawName.toUpperCase().includes('155') ||
-          rawCode.toUpperCase().includes('155') ||
-          rawLogo.includes('155-uasu-baf-logo'));
+        appName.toUpperCase().includes('155') ||
+        rawCode.toUpperCase().includes('155') ||
+        queryLogo.includes('155-uasu-baf-logo');
 
-      const appName = isGeneric ? 'Office Management Application' : rawName;
-      const shortName = isGeneric
-        ? 'Office Mgmt'
-        : rawName.length <= 12
-          ? rawName
-          : rawName.slice(0, 12).trim();
+      const shortName = appName.length <= 12 ? appName : appName.slice(0, 12).trim();
 
       const description = rawSlogan
         ? `${appName} — ${rawSlogan}`
         : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
 
-      const hasPreparedIcons = Boolean(iconHash && dynamicPwaIconStore.has(iconHash));
+      const hasPreparedIcons = Boolean(!is155Office && iconHash && dynamicPwaIconStore.has(iconHash));
+      const hashParam = hasPreparedIcons ? `?iconHash=${encodeURIComponent(iconHash)}` : '?v=18';
 
-      // Default to exact 192x192 & 512x512 PNGs (never 2048x2048 or 1846x2304)
-      let icon192Url = isGeneric ? '/pwa-pc-192x192.png?v=17' : '/pwa-192x192-trans.png?v=17';
-      let icon512Url = isGeneric ? '/pwa-pc-512x512.png?v=17' : '/pwa-512x512-trans.png?v=17';
-      let maskable192Url = isGeneric ? '/pwa-pc-192x192.png?v=17' : '/pwa-192x192-full.png?v=17';
-      let maskable512Url = isGeneric ? '/pwa-pc-512x512.png?v=17' : '/pwa-512x512-full.png?v=17';
+      const icon192Url = hasPreparedIcons
+        ? `/api/pwa-active-icon-192.png${hashParam}`
+        : '/pwa-192x192-trans.png?v=18';
+      const icon512Url = hasPreparedIcons
+        ? `/api/pwa-active-icon-512.png${hashParam}`
+        : '/pwa-512x512-trans.png?v=18';
+      const maskable192Url = hasPreparedIcons
+        ? `/api/pwa-active-icon-192.png${hashParam}`
+        : '/pwa-192x192-full.png?v=18';
+      const maskable512Url = hasPreparedIcons
+        ? `/api/pwa-active-maskable-512.png${hashParam}`
+        : '/pwa-512x512-full.png?v=18';
 
-      if (!is155Office && !isGeneric && hasPreparedIcons) {
-        icon192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
-        icon512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-512.png`;
-        maskable192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
-        maskable512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/maskable-512.png`;
-      } else if (hasPreparedIcons && !is155Office) {
-        icon192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
-        icon512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-512.png`;
-        maskable192Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/icon-192.png`;
-        maskable512Url = `/api/pwa-icon/${encodeURIComponent(iconHash)}/maskable-512.png`;
-      }
-
-      const officeQuery = rawCode ? `?office=${encodeURIComponent(rawCode)}` : '';
+      const officeQuery = rawCode && !is155Office ? `?office=${encodeURIComponent(rawCode)}` : '';
 
       const manifestPayload = {
-        id: `/${officeQuery}`,
+        id: '/',
         name: appName,
         short_name: shortName,
         description,
@@ -680,9 +784,12 @@ async function startServer() {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.status(200).send(JSON.stringify(manifestPayload, null, 2));
     } catch (err) {
-      res.redirect('/manifest.json');
+      res.status(500).json({ error: 'Manifest generation error' });
     }
-  });
+  };
+
+  app.get('/manifest.json', handlePwaManifestRequest);
+  app.get('/api/pwa-manifest', handlePwaManifestRequest);
 
   // Dedicated Office App Unit Data Endpoints
   app.get('/api/airmen', (req, res) => {

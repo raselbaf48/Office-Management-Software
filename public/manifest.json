@@ -1,23 +1,23 @@
 {
   "id": "/",
-  "short_name": "Office Mgmt",
-  "name": "Office Management Application",
-  "description": "Centralized Multi-Office Management Application for personnel duty register, parade state tracker, TDY register, and monthly roster management.",
+  "short_name": "155 UASU BAF",
+  "name": "155 UASU BAF",
+  "description": "Military personnel duty register, parade state tracker, TDY register, and monthly roster management system.",
   "icons": [
     {
-      "src": "/pwa-pc-192x192.png?v=17",
+      "src": "/pwa-192x192-trans.png?v=18",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "any"
     },
     {
-      "src": "/pwa-pc-512x512.png?v=17",
+      "src": "/pwa-512x512-trans.png?v=18",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
     },
     {
-      "src": "/pwa-pc-512x512.png?v=17",
+      "src": "/pwa-512x512-full.png?v=18",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "maskable"
