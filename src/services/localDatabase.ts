@@ -4084,10 +4084,11 @@ export class LocalDatabaseEngine {
   }
 
   public batchAssign(params: {
-    fromDate: string;
-    toDate: string;
+    fromDate?: string;
+    toDate?: string;
     assignments: Array<{
       airmanId: string;
+      date?: string;
       dutyCode: DutyCategoryCode;
       idaShift?: IDAShift;
       proxyForFlight?: FlightName;
@@ -4096,13 +4097,14 @@ export class LocalDatabaseEngine {
     }>;
     removedAirmanIds?: string[];
   }): { count: number; assignedDates: string[] } {
-    const { fromDate, toDate, assignments, removedAirmanIds } = params;
-    const assignedDates = getDatesInRange(fromDate, toDate);
+    const { fromDate, toDate, assignments = [], removedAirmanIds } = params || {};
+    const rangeDates = fromDate ? getDatesInRange(fromDate, toDate || fromDate) : [];
+    const allAssignedDatesSet = new Set<string>(rangeDates);
     const prevStates: Array<{ airmanId: string; date: string; dutyCode?: any; idaShift?: any; notes?: string }> = [];
 
     // Remove unassigned
-    if (Array.isArray(removedAirmanIds) && removedAirmanIds.length > 0) {
-      for (const dateStr of assignedDates) {
+    if (Array.isArray(removedAirmanIds) && removedAirmanIds.length > 0 && rangeDates.length > 0) {
+      for (const dateStr of rangeDates) {
         const monthKey = dateStr.slice(0, 7);
         if (this.db.assignments[monthKey]) {
           for (const remId of removedAirmanIds) {
@@ -4118,12 +4120,19 @@ export class LocalDatabaseEngine {
       }
     }
 
-    // Apply assignments
+    let appliedCount = 0;
+
+    // Apply assignments (supports either top-level fromDate/toDate or per-item item.date)
     for (const item of assignments) {
-      const { airmanId, dutyCode, idaShift, proxyForFlight, notes, disposalScope } = item;
+      const { airmanId, date: itemDate, dutyCode, idaShift, proxyForFlight, notes, disposalScope } = item || ({} as any);
       if (!airmanId || !dutyCode) continue;
 
-      for (const dateStr of assignedDates) {
+      const targetDates = itemDate ? [itemDate] : rangeDates;
+      if (targetDates.length === 0) continue;
+
+      for (const dateStr of targetDates) {
+        if (!dateStr) continue;
+        allAssignedDatesSet.add(dateStr);
         const monthKey = dateStr.slice(0, 7);
         if (!this.db.assignments[monthKey]) {
           this.db.assignments[monthKey] = [];
@@ -4142,7 +4151,7 @@ export class LocalDatabaseEngine {
           index = list.findIndex((a) => this.isSameAirmanId(a.airmanId, airmanId) && a.date === dateStr && !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === 'Night') && (a.disposalScope || 'ALL') === scope && isDep(a.dutyCode) === isDep(dutyCode));
         }
 
-        const assignment: DutyAssignment = {
+        const assignment: DutyAssignment = normalizeAssignmentRecord({
           airmanId,
           date: dateStr,
           dutyCode,
@@ -4151,18 +4160,19 @@ export class LocalDatabaseEngine {
           disposalScope: disposalScope || 'ALL',
           notes: notes || '',
           updatedAt: new Date().toISOString(),
-        };
+        });
 
         if (index >= 0) {
           list[index] = assignment;
         } else {
           list.push(assignment);
         }
+        appliedCount++;
       }
     }
 
     this.saveToStorage();
-    return { count: assignments.length * assignedDates.length, assignedDates };
+    return { count: appliedCount, assignedDates: Array.from(allAssignedDatesSet).sort() };
   }
 
   public deleteAssignment(airmanId: string, date: string, dutyCode?: DutyCategoryCode, idaShift?: any, disposalScope?: 'ALL' | 'PARADE' | 'PT' | 'NIGHT_COUNT'): boolean {

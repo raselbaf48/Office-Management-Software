@@ -686,8 +686,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       result[t.id] = {};
       const isSecurity = t.id === 'security_duty';
       const isEqual = isFixedEqualDuty(t);
+      const validEligGroups = (t.eligibleFlights || []).filter((g) =>
+        activeUnitGroups.includes(String(g))
+      );
       const eligGroups = activeUnitGroups.filter(
-        (grp) => !t.eligibleFlights || t.eligibleFlights.length === 0 || t.eligibleFlights.includes(grp as any) || officeHasFlights === false
+        (grp) => validEligGroups.length === 0 || validEligGroups.includes(grp as any)
       );
       let poolSize = 0;
       eligGroups.forEach((grp) => {
@@ -754,7 +757,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       : 0;
                     setNewDutySerNo(currentMaxSer + 1);
                     setNewDutyName('');
-                    setNewDutyFlights(['Mechanics', 'Avionics', 'GCS', 'Admin']);
+                    setNewDutyFlights(activeUnitGroups as FlightName[]);
                     setNewDutyRanks(['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2']);
                     setIsAddingNewDuty(true);
                   }}
@@ -807,7 +810,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       </button>
                       <button 
                         onClick={() => {
-                          const elig = table.eligibleFlights || ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+                          const rawElig = (table.eligibleFlights || []).filter(g => activeUnitGroups.includes(String(g)));
+                          const elig = (rawElig.length > 0 ? rawElig : activeUnitGroups) as FlightName[];
                           setEditingDutyIdx(idx);
                           setEditDutyName(table.title);
                           setEditDutySerNo(table.serNo ?? '');
@@ -1770,7 +1774,10 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             <span>Req: <strong className="font-mono text-slate-700 dark:text-slate-300">{monthTotal}</strong></span>
                             <span>•</span>
                             <span className="truncate">
-                              {t.eligibleFlights && t.eligibleFlights.length > 0 ? t.eligibleFlights.join(', ') : 'All Flights'}
+                              {(() => {
+                                const valid = (t.eligibleFlights || []).filter(g => activeUnitGroups.includes(String(g)));
+                                return valid.length > 0 ? valid.join(', ') : (officeHasFlights ? 'All Flights' : 'All Trades');
+                              })()}
                             </span>
                           </div>
                         </div>
@@ -1921,9 +1928,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
               </div>
 
               <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Eligible Flights</label>
+                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
+                  {officeHasFlights ? 'Eligible Flights' : 'Eligible Trades'}
+                </label>
                 <div className="grid grid-cols-2 gap-2">
-                  {['Mechanics', 'Avionics', 'GCS', 'Admin'].map(flt => (
+                  {activeUnitGroups.map(flt => (
                     <label key={flt} className="flex items-center space-x-2 cursor-pointer p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
                       <input 
                         type="checkbox" 
@@ -1955,13 +1964,15 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                        <span className="text-sm font-bold text-slate-900 dark:text-white">One From Each Flt</span>
+                        <span className="text-sm font-bold text-slate-900 dark:text-white">
+                          {officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}
+                        </span>
                         <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-amber-200 text-amber-900 dark:bg-amber-800 dark:text-amber-200">
                           Must
                         </span>
                       </div>
                       <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-1 leading-tight">
-                        যেহেতু শুধুমাত্র ১টি ফ্লাইট নির্বাচিত ({newDutyFlights[0]}), তাই Allotment Type অবশ্যই <strong>One From Each Flt</strong> হবে।
+                        যেহেতু শুধুমাত্র ১টি {officeHasFlights ? 'ফ্লাইট' : 'ট্রেড'} নির্বাচিত ({newDutyFlights[0]}), তাই Allotment Type অবশ্যই <strong>{officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}</strong> হবে।
                       </p>
                     </div>
                   </div>
@@ -1992,7 +2003,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                         <span className="text-sm font-bold text-slate-800 dark:text-slate-200">As Per Ratio</span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 pl-6 leading-tight">
-                        Total duty ÷ Total eligible personnel of flight
+                        Total duty ÷ Total eligible personnel of {officeHasFlights ? 'flight' : 'trade'}
                       </p>
                     </button>
 
@@ -2013,10 +2024,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           onChange={() => setNewDutyAllotmentType('equal')}
                           className="text-indigo-600 focus:ring-indigo-500"
                         />
-                        <span className="text-sm font-bold text-slate-800 dark:text-slate-200">One From Each Flt</span>
+                        <span className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                          {officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}
+                        </span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 pl-6 leading-tight">
-                        Total duty ÷ Eligible flights (All flights get same allotment)
+                        Total duty ÷ Eligible {officeHasFlights ? 'flights (All flights get same allotment)' : 'trades (All trades get same allotment)'}
                       </p>
                     </button>
                   </div>
@@ -2299,9 +2312,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
               </div>
 
               <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Eligible Flights</label>
+                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
+                  {officeHasFlights ? 'Eligible Flights' : 'Eligible Trades'}
+                </label>
                 <div className="grid grid-cols-2 gap-2">
-                  {['Mechanics', 'Avionics', 'GCS', 'Admin'].map(flt => (
+                  {activeUnitGroups.map(flt => (
                     <label key={flt} className="flex items-center space-x-2 cursor-pointer p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
                       <input 
                         type="checkbox" 
@@ -2333,13 +2348,15 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                        <span className="text-sm font-bold text-slate-900 dark:text-white">One From Each Flt</span>
+                        <span className="text-sm font-bold text-slate-900 dark:text-white">
+                          {officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}
+                        </span>
                         <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-amber-200 text-amber-900 dark:bg-amber-800 dark:text-amber-200">
                           Must
                         </span>
                       </div>
                       <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-1 leading-tight">
-                        যেহেতু শুধুমাত্র ১টি ফ্লাইট নির্বাচিত ({editDutyFlights[0]}), তাই Allotment Type অবশ্যই <strong>One From Each Flt</strong> হবে।
+                        যেহেতু শুধুমাত্র ১টি {officeHasFlights ? 'ফ্লাইট' : 'ট্রেড'} নির্বাচিত ({editDutyFlights[0]}), তাই Allotment Type অবশ্যই <strong>{officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}</strong> হবে।
                       </p>
                     </div>
                   </div>
@@ -2370,7 +2387,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                         <span className="text-sm font-bold text-slate-800 dark:text-slate-200">As Per Ratio</span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 pl-6 leading-tight">
-                        Total duty ÷ Total eligible personnel of flight
+                        Total duty ÷ Total eligible personnel of {officeHasFlights ? 'flight' : 'trade'}
                       </p>
                     </button>
 
@@ -2391,10 +2408,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           onChange={() => setEditDutyAllotmentType('equal')}
                           className="text-indigo-600 focus:ring-indigo-500"
                         />
-                        <span className="text-sm font-bold text-slate-800 dark:text-slate-200">One From Each Flt</span>
+                        <span className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                          {officeHasFlights ? 'One From Each Flt' : 'One From Each Trade'}
+                        </span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 pl-6 leading-tight">
-                        Total duty ÷ Eligible flights (All flights get same allotment)
+                        Total duty ÷ Eligible {officeHasFlights ? 'flights (All flights get same allotment)' : 'trades (All trades get same allotment)'}
                       </p>
                     </button>
                   </div>

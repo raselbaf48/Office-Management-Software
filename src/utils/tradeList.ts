@@ -48,6 +48,36 @@ export function getAvailableTrades(extraTrades: string[] = []): string[] {
   return result;
 }
 
+export function getBiodataTrades(
+  airmenOrTrades: Array<{ trade?: string; active?: boolean } | string | null | undefined> = []
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const item of airmenOrTrades) {
+    if (!item) continue;
+    if (typeof item === 'object' && item.active === false) continue;
+    const raw = typeof item === 'string' ? item : item.trade;
+    const clean = String(raw || '').trim();
+    if (
+      !clean ||
+      clean === '-' ||
+      clean.toLowerCase() === 'n/a' ||
+      clean === '__CUSTOM__' ||
+      clean === 'Custom'
+    ) {
+      continue;
+    }
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(clean);
+    }
+  }
+
+  return result;
+}
+
 export function addCustomTradeToList(tradeName: string): string[] {
   const clean = String(tradeName || '').trim();
   if (!clean || clean === '__CUSTOM__' || clean === 'Custom') {

@@ -254,13 +254,16 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
 
     // 5. Duty Assignment Actions
     if (pathname === '/api/roster/assign') {
-      const { monthKey, assignment } = body || {};
-      const targetMonth = monthKey || assignment?.date?.slice(0, 7);
-      const perm = verifyDutyWritePermission(assignment?.airmanId, assignment?.date);
+      const resolvedAssignment = body?.assignment || (body?.airmanId && body?.date ? body : null);
+      if (!resolvedAssignment || !resolvedAssignment.airmanId || !resolvedAssignment.date) {
+        return jsonResponse({ error: 'Missing required assignment details (airmanId, date)' }, 400);
+      }
+      const targetMonth = body?.monthKey || String(resolvedAssignment.date).slice(0, 7);
+      const perm = verifyDutyWritePermission(resolvedAssignment.airmanId, resolvedAssignment.date);
       if (!perm.canAssign) {
         return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
       }
-      const res = localDb.assignDuty(targetMonth, assignment);
+      const res = localDb.assignDuty(targetMonth, resolvedAssignment);
       return jsonResponse({ success: true, assignment: res });
     }
 

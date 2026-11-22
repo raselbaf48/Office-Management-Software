@@ -411,10 +411,14 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
   const rawFb = raw.firebaseConfig || firebaseConfigData;
   if (!officeName || !rawFb || typeof rawFb !== 'object') return null;
 
-  // Automatically migrate any config referencing the retired Firebase project/database to the newly linked firebaseConfigData
+  // Automatically migrate any config referencing a retired or mismatched AI Studio Firebase project/database to the newly linked firebaseConfigData
   const isRetiredDefaultProject =
     rawFb.projectId === 'gen-lang-client-0251225792' ||
-    rawFb.firestoreDatabaseId === 'ai-studio-155uasubaf-80277d05-254c-4645-916d-5b54fa108313';
+    rawFb.projectId === 'steady-weft-wf6jr' ||
+    rawFb.firestoreDatabaseId === 'ai-studio-155uasubaf-80277d05-254c-4645-916d-5b54fa108313' ||
+    (typeof rawFb.firestoreDatabaseId === 'string' &&
+      rawFb.firestoreDatabaseId.startsWith('ai-studio-') &&
+      rawFb.firestoreDatabaseId !== (firebaseConfigData as any).firestoreDatabaseId);
   const fb = isRetiredDefaultProject ? { ...rawFb, ...firebaseConfigData } : rawFb;
 
   const apiKey = String(fb.apiKey || firebaseConfigData.apiKey || '').trim();
@@ -3747,6 +3751,9 @@ export async function testConnection(): Promise<boolean> {
     }
     return true;
   } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+    }
     if (isQuotaExceededError(error)) {
       const msg = error instanceof Error ? error.message : String(error);
       setFirestoreQuotaExceeded(true, msg);

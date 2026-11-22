@@ -60,7 +60,8 @@ import { DisposalCategoryDropdown } from './DisposalCategoryDropdown';
 import { saveCustomDisposal, getSavedCustomDisposals, removeSavedCustomDisposal } from '../utils/customDisposalStore';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getWeekdayShort } from '../utils/holidayUtils';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 import { localDb } from '../services/localDatabase';
 
 interface ParadeStateFormattedViewProps {
@@ -186,30 +187,43 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  notes?: string;
  } | null>(null);
 
- // Add Disposal Modal State
- const [showAddDisposalModal, setShowAddDisposalModal] = useState<boolean>(false);
- const [disposalDateMode, setDisposalDateMode] = useState<'SINGLE' | 'MULTI'>('SINGLE');
- const [disposalFlight, setDisposalFlight] = useState<FlightName>(role === 'ADMIN' && userFlight ? userFlight as FlightName : 'Avionics');
- const [disposalCategory, setDisposalCategory] = useState<string>('');
- const [disposalCustomTitle, setDisposalCustomTitle] = useState<string>('');
- const [selectedDisposalAirmenIds, setSelectedDisposalAirmenIds] = useState<string[]>([]);
- const [disposalPersonnelStatusMap, setDisposalPersonnelStatusMap] = useState<Record<string, { statusCategory: string; dutyCode: string; notes?: string; dutyName?: string }>>({});
- const [disposalFromDate, setDisposalFromDate] = useState<string>(selectedDate);
- const [disposalToDate, setDisposalToDate] = useState<string>(selectedDate);
- const [disposalScope, setDisposalScope] = useState<'ALL' | 'PARADE' | 'PT'>('ALL');
- const [disposalNotes, setDisposalNotes] = useState<string>('');
- const [disposalLoading, setDisposalLoading] = useState<boolean>(false);
- const [disposalSuccessMsg, setDisposalSuccessMsg] = useState<string>('');
+  const officeHasFlights = doesOfficeHaveFlights(airmen);
+  const biodataTrades = getBiodataTrades(airmen);
+  const unitGroupOptions: FlightName[] = officeHasFlights
+    ? ['Avionics', 'Mechanics', 'GCS', 'Admin']
+    : ((biodataTrades.length > 0 ? biodataTrades : ['General']) as FlightName[]);
 
- const [savedDisposals, setSavedDisposals] = useState<Array<{code: string, label: string, customTitle?: string}>>(() => {
- try {
- const saved = localStorage.getItem('savedDisposalKeys_Parade');
- return saved ? JSON.parse(saved) : [];
- } catch { return []; }
- });
- const [showDisposalDropdown, setShowDisposalDropdown] = useState(false);
- const [isEditingDisposals, setIsEditingDisposals] = useState(false);
- const [historicalCustomCats, setHistoricalCustomCats] = useState<{code: string, label: string, customTitle: string}[]>(() => { try { const saved = localStorage.getItem('parade_historical_custom'); return saved ? JSON.parse(saved) : []; } catch { return []; } });
+  // Add Disposal Modal State
+  const [showAddDisposalModal, setShowAddDisposalModal] = useState<boolean>(false);
+  const [disposalDateMode, setDisposalDateMode] = useState<'SINGLE' | 'MULTI'>('SINGLE');
+  const [disposalFlight, setDisposalFlight] = useState<FlightName>(
+    role === 'ADMIN' && userFlight ? (userFlight as FlightName) : (unitGroupOptions[0] || 'Avionics')
+  );
+  useEffect(() => {
+    if (!unitGroupOptions.includes(disposalFlight) && unitGroupOptions.length > 0) {
+      setDisposalFlight(unitGroupOptions[0]);
+    }
+  }, [officeHasFlights, unitGroupOptions.join(',')]);
+  const [disposalCategory, setDisposalCategory] = useState<string>('');
+  const [disposalCustomTitle, setDisposalCustomTitle] = useState<string>('');
+  const [selectedDisposalAirmenIds, setSelectedDisposalAirmenIds] = useState<string[]>([]);
+  const [disposalPersonnelStatusMap, setDisposalPersonnelStatusMap] = useState<Record<string, { statusCategory: string; dutyCode: string; notes?: string; dutyName?: string }>>({});
+  const [disposalFromDate, setDisposalFromDate] = useState<string>(selectedDate);
+  const [disposalToDate, setDisposalToDate] = useState<string>(selectedDate);
+  const [disposalScope, setDisposalScope] = useState<'ALL' | 'PARADE' | 'PT'>('ALL');
+  const [disposalNotes, setDisposalNotes] = useState<string>('');
+  const [disposalLoading, setDisposalLoading] = useState<boolean>(false);
+  const [disposalSuccessMsg, setDisposalSuccessMsg] = useState<string>('');
+
+  const [savedDisposals, setSavedDisposals] = useState<Array<{code: string, label: string, customTitle?: string}>>(() => {
+  try {
+  const saved = localStorage.getItem('savedDisposalKeys_Parade');
+  return saved ? JSON.parse(saved) : [];
+  } catch { return []; }
+  });
+  const [showDisposalDropdown, setShowDisposalDropdown] = useState(false);
+  const [isEditingDisposals, setIsEditingDisposals] = useState(false);
+  const [historicalCustomCats, setHistoricalCustomCats] = useState<{code: string, label: string, customTitle: string}[]>(() => { try { const saved = localStorage.getItem('parade_historical_custom'); return saved ? JSON.parse(saved) : []; } catch { return []; } });
 
   const ALL_DISPOSAL_OPTIONS = [
     { code: "TDY", label: "TDY (Air HQ)", customTitle: "TDY (Air HQ)" },
@@ -230,7 +244,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
     { code: "CANTEEN", label: "Canteen" },
     { code: "DUTY_OFF", label: "Security Duty Off" },
     { code: "BAKE_N_BITE", label: "Bake & Bite" },
-    { code: "RECEPTION", label: "K/O & Reception" },
+    ...(isDefault155UasuOffice() ? [{ code: "RECEPTION", label: "K/O & Reception" }] : []),
     { code: "ADMIN_ORDER", label: "Admin Order" },
     { code: "CLASS_TRG", label: "Class" },
     { code: "OTHERS", customTitle: "Exam", label: "Exam" },
@@ -797,7 +811,11 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const pList =
  selectedFlight === 'Overall'
  ? rawPersonnel
- : rawPersonnel.filter((s) => s.airman.flightName === selectedFlight);
+ : rawPersonnel.filter((s) =>
+     officeHasFlights
+       ? s.airman.flightName === selectedFlight
+       : s.airman.trade === selectedFlight || s.airman.flightName === selectedFlight
+   );
 
  const pParts = dStr.split('-');
  const dateObj = new Date(
@@ -944,9 +962,19 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  if (a.dateLeft && a.dateLeft < fromDate) return false;
  return true;
  });
- const flightAirmen = fl === 'Overall' ? activeAirmen : activeAirmen.filter((a) => a.flightName === fl);
+ const flightAirmen =
+   fl === 'Overall'
+     ? activeAirmen
+     : activeAirmen.filter((a) =>
+         officeHasFlights ? a.flightName === fl : a.trade === fl || a.flightName === fl
+       );
  const rawPersonnel = singleParadeData?.personnelStatusList || [];
- const pList = fl === 'Overall' ? rawPersonnel : rawPersonnel.filter((p) => p.airman.flightName === fl);
+ const pList =
+   fl === 'Overall'
+     ? rawPersonnel
+     : rawPersonnel.filter((p) =>
+         officeHasFlights ? p.airman.flightName === fl : p.airman.trade === fl || p.airman.flightName === fl
+       );
 
  let detTdyCount = 0;
  let leaveCount = 0;
@@ -1074,7 +1102,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  };
 
  // Single-Day Categorization for Bottom Lists
- const targetAirmen = (selectedFlight === 'Overall' ? airmen : airmen.filter((a) => a.flightName === selectedFlight)).filter(a => a.active !== false);
+ const targetAirmen = (
+   selectedFlight === 'Overall'
+     ? airmen
+     : airmen.filter((a) =>
+         officeHasFlights ? a.flightName === selectedFlight : a.trade === selectedFlight || a.flightName === selectedFlight
+       )
+ ).filter(a => a.active !== false);
 
  const onPtList: { airman: Airman; note?: string }[] = [];
  const leaveList: { airman: Airman; note?: string }[] = [];
@@ -1102,7 +1136,11 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const statusList = rawList
  ? selectedFlight === 'Overall'
  ? rawList
- : rawList.filter((item) => item.airman.flightName === selectedFlight)
+ : rawList.filter((item) =>
+     officeHasFlights
+       ? item.airman.flightName === selectedFlight
+       : item.airman.trade === selectedFlight || item.airman.flightName === selectedFlight
+   )
  : null;
 
  if (statusList) {
@@ -1409,7 +1447,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  )}
  </div>
 
- {/* Flight Selector (Hidden on Others State as requested) */}
+ {/* Flight / Trade Selector (Hidden on Others State as requested) */}
  {!isOthersDocument && (
  <div className="flex items-center space-x-1.5 bg-slate-100 dark:bg-slate-800 print:bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
  <Filter className="w-3.5 h-3.5 text-slate-400" />
@@ -1419,10 +1457,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  className="bg-transparent text-slate-900 dark:text-white print:text-black font-black outline-none cursor-pointer"
  >
  <option value="Overall">Overall</option>
- <option value="Avionics">Avionics</option>
- <option value="Mechanics">Mechanics</option>
- <option value="GCS">GCS</option>
- <option value="Admin">Admin</option>
+ {unitGroupOptions.map((grp) => (
+   <option key={grp} value={grp}>{grp}</option>
+ ))}
  </select>
  </div>
  )}
@@ -2280,18 +2317,18 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  )}
  </div>
 
- {/* 3. Flight Filter & Airman Selection */}
+ {/* 3. Flight / Trade Filter & Airman Selection */}
  <div className="space-y-2">
  <div className="flex items-center justify-between">
  <label className="text-xs font-bold text-slate-800 dark:text-slate-200">
- 3. Select Flight & Personnel
+ {officeHasFlights ? '3. Select Flight & Personnel' : '3. Select Trade & Personnel'}
  </label>
  </div>
- <div className="grid grid-cols-4 gap-1.5">
- {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((fl) => {
+ <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+ {unitGroupOptions.map((fl) => {
  const isSuperAdmin = (role === 'SUPER_ADMIN' || role === 'OWNER');
  const isPastDate = disposalFromDate < todayStr;
- const isDisabledFlt = (role === 'ADMIN' && userFlight && fl !== userFlight) || (isPastDate && !isSuperAdmin);
+ const isDisabledFlt = (role === 'ADMIN' && userFlight && officeHasFlights && fl !== userFlight) || (isPastDate && !isSuperAdmin);
  return (
  <button
  key={fl}
@@ -2317,7 +2354,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  if (a.active === false) return false;
  if (a.dateJoined && a.dateJoined > disposalFromDate) return false;
  if (a.dateLeft && a.dateLeft < disposalFromDate) return false;
- return a.flightName === disposalFlight;
+ return officeHasFlights ? a.flightName === disposalFlight : (a.trade === disposalFlight || a.flightName === disposalFlight);
  });
 
  const getAirmanStatusLabel = (airmanId: string) => {

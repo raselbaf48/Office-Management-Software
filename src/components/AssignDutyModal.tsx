@@ -45,6 +45,8 @@ import { AssignDeploymentTab } from './AssignDeploymentTab';
 import { localDb, resolveCanonicalIdacShift } from '../services/localDatabase';
 import { isHolidayDate, getWeekdayShort, getWeekdayFull } from '../utils/holidayUtils';
 import { matchAirmanId } from '../utils/airmanDisposalHelper';
+import { doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 
 export const isSameAirman = (id1?: string, id2?: string): boolean => {
   return matchAirmanId(id1, id2);
@@ -83,6 +85,17 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const isUser = !isAdmin && !isSuperAdmin;
   const adminFlight = session?.flightName;
   const todayStr = new Date().toISOString().split('T')[0];
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const is155Uasu = useMemo(() => isDefault155UasuOffice(), []);
+  const unitGroupOptions = useMemo<FlightName[]>(() => {
+    if (officeHasFlights) return ['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[];
+    return getBiodataTrades(airmen) as unknown as FlightName[];
+  }, [officeHasFlights, airmen]);
+  const matchesAirmanGroup = (airman: Airman | undefined, grp: FlightName | 'All') => {
+    if (!airman) return false;
+    if (grp === 'All') return true;
+    return officeHasFlights ? airman.flightName === grp : (airman.trade === grp || airman.flightName === grp);
+  };
 
   const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(1);
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -570,7 +583,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
   // Helper to get required ratio count for duty
   const getRequiredCountForDuty = (dutyCode: DutyCategoryCode, shift?: IDAShift, specificFlight?: FlightName | 'All'): number => {
-    const flights: FlightName[] = ['Mechanics', 'Avionics', 'GCS', 'Admin'];
+    const flights: FlightName[] = unitGroupOptions.length > 0 ? unitGroupOptions : (['Mechanics', 'Avionics', 'GCS', 'Admin'] as FlightName[]);
     const targetFlight = specificFlight !== undefined ? specificFlight : activeFlight;
     if (targetFlight === 'All') {
       if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
@@ -636,7 +649,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (d) airman = airmanMap.get(d);
       }
       if (!airman) return;
-      if (activeFlight !== 'All' && airman.flightName !== activeFlight) return;
+      if (activeFlight !== 'All' && !matchesAirmanGroup(airman, activeFlight)) return;
 
       if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
         if (assignment.dutyCode !== 'IDAC' && assignment.dutyCode !== 'IDA') return;
@@ -684,7 +697,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
           if (d) airman = airmanMap.get(d);
         }
         if (!airman) return;
-        if (activeFlight !== 'All' && airman.flightName !== activeFlight) return;
+        if (activeFlight !== 'All' && !matchesAirmanGroup(airman, activeFlight)) return;
         seen.add(`${airman.id}_${assignment.dutyCode}_${assignment.idaShift || ''}`);
       });
       return seen.size;
@@ -701,6 +714,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       const storedMatrix = getStoredDutyMatrix();
       const activeDuties = DUTY_TYPES.filter((dt) => {
         if (!dt.isCountedAsDuty) return false;
+        if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
         const mEntries = storedMatrix.filter((t) => t.dutyCode === dt.code);
         if (mEntries.length > 0 && mEntries.every((t) => t.isDisabled)) return false;
         return true;
@@ -1747,7 +1761,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (airman.dateJoined && airman.dateJoined > fromDate) return false;
         if (airman.dateLeft && airman.dateLeft <= fromDate) return false;
 
-        if (targetFlight !== 'All' && airman.flightName !== targetFlight) return false;
+        if (targetFlight !== 'All' && !matchesAirmanGroup(airman, targetFlight as FlightName)) return false;
 
         // If IDAC duty is selected but no shift is selected, show empty list
         if ((['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) && !activeIdaShift) {
@@ -1761,11 +1775,12 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (dutyConfig) {
           // If the duty has overridden eligible flights in the matrix, use those instead
           const matrixConfig = getStoredDutyMatrix().find(t => t.dutyCode === activeDutyCode);
-          const eligibleFlights = matrixConfig?.eligibleFlights || dutyConfig.eligibleFlights;
+          const eligibleFlights = matrixConfig?.eligibleFlights || (officeHasFlights ? dutyConfig.eligibleFlights : undefined);
           const eligibleRanks = matrixConfig?.eligibleRanks || dutyConfig.eligibleRanks;
           
           if (eligibleFlights && eligibleFlights.length > 0) {
-            if (!eligibleFlights.includes(airman.flightName as any)) return false;
+            const airmanGroup = officeHasFlights ? airman.flightName : (airman.trade || airman.flightName);
+            if (!eligibleFlights.includes(airmanGroup as any)) return false;
           }
           if (eligibleRanks && eligibleRanks.length > 0) {
             if (!eligibleRanks.includes(airman.rank as any)) return false;
@@ -2150,13 +2165,20 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               {/* Duty Category Cards with Detailed Airmen List */}
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                 {(() => {
-                  const _storedMatrix = getStoredDutyMatrix(); const allDuties = DUTY_TYPES.filter((dt) => { if (!dt.isCountedAsDuty) return false; const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code); if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false; return true; });
+                  const _storedMatrix = getStoredDutyMatrix();
+                  const allDuties = DUTY_TYPES.filter((dt) => {
+                    if (!dt.isCountedAsDuty) return false;
+                    if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
+                    const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code);
+                    if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false;
+                    return true;
+                  });
                   const ratioFiltered = allDuties.filter((dt) => {
                     const req = getRequiredCountForDuty(dt.code);
                     const assignedCount = assignmentsList.filter(a => {
                       if (activeFlight !== 'All') {
                         const airman = airmanMap.get(a.airmanId);
-                        if (airman && airman.flightName !== activeFlight) return false;
+                        if (airman && !matchesAirmanGroup(airman, activeFlight)) return false;
                       }
                       if (dt.code === 'AIRPORT') {
                         return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
@@ -2180,7 +2202,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                         const fltQuota = getRequiredCountForDuty(dt.code, undefined, activeFlight as FlightName);
                         const fltAssigned = assignmentsList.filter(a => {
                           const airman = airmanMap.get(a.airmanId);
-                          if (!airman || airman.flightName !== activeFlight) return false;
+                          if (!airman || !matchesAirmanGroup(airman, activeFlight)) return false;
                           if (dt.code === 'AIRPORT') return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
                           if (dt.code === 'IDAC' || dt.code === 'IDA') return a.dutyCode === 'IDAC' || a.dutyCode === 'IDA';
                           return a.dutyCode === dt.code;
@@ -2513,13 +2535,13 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
           {/* 3. Flight Filter & Candidate Controls */}
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-200 dark:border-slate-800">
-            {/* Flight Tabs */}
+            {/* Flight / Trade Tabs */}
             <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
               <span className="text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 mr-1 flex items-center gap-1">
-                2. Flight:
+                2. {officeHasFlights ? 'Flight:' : 'Trade:'}
               </span>
 
-              {/* Flight Lock Toggle Button */}
+              {/* Flight/Trade Lock Toggle Button */}
               <button
                 type="button"
                 onClick={() => {
@@ -2530,7 +2552,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       window.sessionStorage.setItem('baf_duty_flight_locked', 'true');
                     }
                     if (activeFlight === 'All') {
-                      setActiveFlight('Avionics');
+                      setActiveFlight(unitGroupOptions[0] || ('Avionics' as FlightName));
                     }
                   } else {
                     if (typeof window !== 'undefined') {
@@ -2540,8 +2562,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                 }}
                 title={
                   isFlightLocked 
-                    ? `Flight is locked to ${activeFlight}. Click to unlock.` 
-                    : 'Click to lock this flight: Only shows duties for this flight, auto-advances duty on assign, and auto-advances date when complete.'
+                    ? `${officeHasFlights ? 'Flight' : 'Trade'} is locked to ${activeFlight}. Click to unlock.` 
+                    : `Click to lock this ${officeHasFlights ? 'flight' : 'trade'}: Only shows duties for this ${officeHasFlights ? 'flight' : 'trade'}, auto-advances duty on assign, and auto-advances date when complete.`
                 }
                 className={`p-1.5 text-xs font-bold rounded-lg border flex items-center justify-center transition-all cursor-pointer ${
                   isFlightLocked
@@ -2553,11 +2575,12 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                 {isFlightLocked ? <Lock className="w-3.5 h-3.5 stroke-[2.5]" /> : <Unlock className="w-3.5 h-3.5" />}
               </button>
 
-              {(['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'] as Array<FlightName | 'All'>).filter(flt => {
-                if (isAdmin && adminFlight) {
+              {(['All', ...unitGroupOptions] as Array<FlightName | 'All'>).filter(flt => {
+                if (officeHasFlights && isAdmin && adminFlight) {
                   return flt === adminFlight;
                 }
                 if (flt === 'All') return true;
+                if (!officeHasFlights) return true;
                 if (isFlightLocked || isDutyLocked) return true; // Keep all flights visible when locked so user can switch
                 const matrixConfig = getStoredDutyMatrix().find(t => t.dutyCode === activeDutyCode);
                 
@@ -2585,7 +2608,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
                 return true;
               }).map((flt) => {
-                const isDisabledFlt = flt !== 'All' && ((isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin));
+                const isDisabledFlt = flt !== 'All' && ((officeHasFlights && isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin));
                 const isSelected = activeFlight === flt;
                 return (
                 <button
@@ -2603,7 +2626,14 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                         if (selectionMode === 'None' || !activeDutyCode) {
                           setSelectionMode('FlightFirst');
                         }
-                        const _storedMatrix = getStoredDutyMatrix(); const allDuties = DUTY_TYPES.filter((dt) => { if (!dt.isCountedAsDuty) return false; const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code); if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false; return true; });
+                        const _storedMatrix = getStoredDutyMatrix();
+                        const allDuties = DUTY_TYPES.filter((dt) => {
+                          if (!dt.isCountedAsDuty) return false;
+                          if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
+                          const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code);
+                          if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false;
+                          return true;
+                        });
                         const ratioFiltered = allDuties.filter((dt) => getRequiredCountForDuty(dt.code, undefined, newFlt as FlightName) > 0);
                         if (!isDutyLocked && ratioFiltered.length > 0) {
                           if (!activeDutyCode || !ratioFiltered.some(d => d.code === activeDutyCode)) {

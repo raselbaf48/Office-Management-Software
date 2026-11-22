@@ -28,8 +28,8 @@ import {
  PenTool,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
-import { getAvailableTrades } from '../utils/tradeList';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 import {
   IdacSignatureModal,
   IdacSignatureDetails,
@@ -101,7 +101,8 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
  const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
- const tradesList = useMemo(() => ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))], [airmen]);
+ const is155Uasu = useMemo(() => isDefault155UasuOffice(), []);
+ const tradesList = useMemo(() => ['All', ...getBiodataTrades(airmen)], [airmen]);
  const flightsList: (FlightName | 'All')[] = ['All', 'Avionics', 'Mechanics', 'GCS', 'Admin'];
  const [flightFilter, setFlightFilter] = useState<FlightName | 'All'>('All');
  const [tradeFilter, setTradeFilter] = useState<string>('All');
@@ -775,6 +776,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <span>Base Duty</span>
  </button>
 
+ {is155Uasu && (
  <button
  onClick={() => setRosterMode('IDAC_DUTY')}
  className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl font-black text-xs transition-all shadow-xs ${
@@ -786,6 +788,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <Clock className="w-4 h-4" />
  <span>IDAC Duty</span>
  </button>
+ )}
  </div>
 
  {/* Flight Filter (when office has flights) OR Trade Filter (when office has no flights) */}

@@ -9,7 +9,7 @@ import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange, matchAirmanId } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
-import { getAvailableTrades } from '../utils/tradeList';
+import { getBiodataTrades } from '../utils/tradeList';
 interface LeaveRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -131,7 +131,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
   const todayStr = new Date().toISOString().split('T')[0];
   const officeHasFlights = doesOfficeHaveFlights(airmen);
   const tradesList = useMemo(
-    () => ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))],
+    () => ['All', ...getBiodataTrades(airmen)],
     [airmen]
   );
   const [selectedFlight, setSelectedFlight] = useState<FlightName | 'All'>(isAdmin && adminFlight ? adminFlight : 'All');

@@ -32,6 +32,8 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
   const [isAutoScheduling, setIsAutoScheduling] = useState<boolean>(false);
   const [autoScheduleDays, setAutoScheduleDays] = useState<number>(7);
   const [statusMessage, setStatusMessage] = useState<string>('');
+  const [errorMessage, setErrorMessage] = useState<string>('');
+  const [confirmAutoSchedule, setConfirmAutoSchedule] = useState<boolean>(false);
 
   const availableFlights = React.useMemo(() => {
     if (!shift) return [];
@@ -75,16 +77,17 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
   // Single Manual Assign
   const handleManualAssign = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage('');
     if (!shift) {
-      alert('Please select a shift');
+      setErrorMessage('Please select a shift.');
       return;
     }
     if (!selectedFlight) {
-      alert('Please select a flight');
+      setErrorMessage('Please select a flight.');
       return;
     }
     if (!selectedAirmanId) {
-      alert('Please select an airman');
+      setErrorMessage('Please select an airman.');
       return;
     }
 
@@ -112,10 +115,10 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
         }, 1000);
       } else {
         const data = await res.json().catch(() => ({}));
-        alert(data.error || 'Failed to assign duty.');
+        setErrorMessage(data.error || 'Failed to assign duty.');
       }
     } catch (err: any) {
-      alert('Network error while assigning duty.');
+      setErrorMessage('Network error while assigning duty.');
     } finally {
       setIsSubmitting(false);
     }
@@ -123,10 +126,14 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
 
   // Auto-Schedule IDAC Shifts maintaining Duty Ratio for X days
   const handleAutoSchedule = async () => {
-    if (!confirm(`Generate IDAC schedule for ${autoScheduleDays} days maintaining Flight Duty Ratio?`)) return;
-
+    if (!confirmAutoSchedule) {
+      setConfirmAutoSchedule(true);
+      return;
+    }
+    setConfirmAutoSchedule(false);
     setIsAutoScheduling(true);
     setStatusMessage('');
+    setErrorMessage('');
     try {
       const startDate = new Date(date);
       const assignmentsToPost: Array<{
@@ -204,10 +211,10 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
           onClose();
         }, 1500);
       } else {
-        alert('Failed to save generated roster.');
+        setErrorMessage('Failed to save generated roster.');
       }
     } catch (e: any) {
-      alert('Error during auto-scheduling: ' + e.message);
+      setErrorMessage('Error during auto-scheduling: ' + (e?.message || 'Unknown error'));
     } finally {
       setIsAutoScheduling(false);
     }
@@ -243,6 +250,11 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
         {statusMessage && (
           <div className="mx-6 mt-4 p-3 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 text-emerald-800 dark:text-emerald-200 text-xs font-bold rounded-2xl text-center">
             {statusMessage}
+          </div>
+        )}
+        {errorMessage && (
+          <div className="mx-6 mt-4 p-3 bg-rose-50 dark:bg-rose-950/60 border border-rose-300 text-rose-800 dark:text-rose-200 text-xs font-bold rounded-2xl text-center">
+            {errorMessage}
           </div>
         )}
 
@@ -397,6 +409,11 @@ export const IdacDutyAssignModal: React.FC<IdacDutyAssignModalProps> = ({
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   <span>Generating Schedule...</span>
+                </>
+              ) : confirmAutoSchedule ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Click Again to Confirm {autoScheduleDays}-Day Auto-Schedule</span>
                 </>
               ) : (
                 <>

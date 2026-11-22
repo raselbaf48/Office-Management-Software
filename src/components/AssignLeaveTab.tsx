@@ -9,6 +9,8 @@ import { getAirmanDisposalForRange, AirmanDisposalStatus } from '../utils/airman
 
 
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { doesOfficeHaveFlights } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 interface AssignLeaveTabProps {
   airmen: Airman[];
   initialFromDate?: string;
@@ -32,8 +34,14 @@ export const AssignLeaveTab: React.FC<AssignLeaveTabProps> = ({
   const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
   const todayStr = new Date().toISOString().split('T')[0];
 
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const unitGroupOptions = useMemo<FlightName[]>(() => {
+    if (officeHasFlights) return ['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[];
+    return getBiodataTrades(airmen) as unknown as FlightName[];
+  }, [officeHasFlights, airmen]);
+
   const [grantLeaveFlight, setGrantLeaveFlight] = useState<FlightName>(
-    initialFlight || (isAdmin && adminFlight ? adminFlight : 'Avionics')
+    initialFlight || (isAdmin && adminFlight ? adminFlight : (unitGroupOptions[0] || ('Avionics' as FlightName)))
   );
   const [leaveAirmanId, setLeaveAirmanId] = useState<string>('');
   const [leaveFromDate, setLeaveFromDate] = useState<string>(initialFromDate || todayStr);
@@ -52,16 +60,18 @@ export const AssignLeaveTab: React.FC<AssignLeaveTabProps> = ({
   const [leaveSuccessMsg, setLeaveSuccessMsg] = useState<string>('');
 
   useEffect(() => {
-    if (isAdmin && adminFlight) {
+    if (isAdmin && adminFlight && officeHasFlights) {
       setGrantLeaveFlight(adminFlight);
+    } else if (!officeHasFlights && unitGroupOptions.length > 0 && !unitGroupOptions.includes(grantLeaveFlight)) {
+      setGrantLeaveFlight(unitGroupOptions[0]);
     }
-  }, [isAdmin, adminFlight]);
+  }, [isAdmin, adminFlight, officeHasFlights, unitGroupOptions, grantLeaveFlight]);
 
   const grantAirmenList = useMemo(() => {
     return sortAirmenBySeniority(
       airmen.filter(
         (a) =>
-          a.flightName === grantLeaveFlight &&
+          (officeHasFlights ? a.flightName === grantLeaveFlight : (a.trade === grantLeaveFlight || a.flightName === grantLeaveFlight)) &&
           a.active !== false &&
           !['posted out', 'retired', 'dismissed', 'inactive'].includes(
             String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
@@ -70,7 +80,7 @@ export const AssignLeaveTab: React.FC<AssignLeaveTabProps> = ({
           (!a.dateJoined || a.dateJoined <= leaveFromDate)
       )
     );
-  }, [airmen, grantLeaveFlight, leaveFromDate]);
+  }, [airmen, grantLeaveFlight, leaveFromDate, officeHasFlights]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};
@@ -282,14 +292,14 @@ export const AssignLeaveTab: React.FC<AssignLeaveTabProps> = ({
         )}
 
         <form onSubmit={handleGrantLeaveSubmit} className="space-y-4">
-          {/* Flight Filter Selector */}
+          {/* Flight/Trade Filter Selector */}
           <div>
             <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-              Flight
+              {officeHasFlights ? 'Flight' : 'Trade'}
             </label>
             <div className="grid grid-cols-4 gap-1.5">
-              {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
-                const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight);
+              {unitGroupOptions.map((flt) => {
+                const isDisabledFlt = (officeHasFlights && isAdmin && adminFlight && flt !== adminFlight);
                 return (
                   <button
                     key={flt}

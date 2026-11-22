@@ -13,7 +13,8 @@ import {
 import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { exportHtmlToWord } from '../utils/htmlExport';
 import { formatDutyOnShortName, formatDutyOffShortName } from '../utils/dutyFormatter';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 import {
  Calendar,
  Printer,
@@ -145,11 +146,19 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  notes?: string;
  } | null>(null);
 
+ const officeHasFlights = doesOfficeHaveFlights(airmen);
+ const biodataTrades = getBiodataTrades(airmen);
+ const unitGroupOptions: FlightName[] = officeHasFlights
+   ? ['Avionics', 'Mechanics', 'GCS', 'Admin']
+   : ((biodataTrades.length > 0 ? biodataTrades : ['General']) as FlightName[]);
+
  // Add Disposal Modal State
  const todayStr = new Date().toISOString().split('T')[0];
  const [showAddDisposalModal, setShowAddDisposalModal] = useState<boolean>(false);
  const [disposalDateMode, setDisposalDateMode] = useState<'SINGLE' | 'MULTI'>('SINGLE');
- const [disposalFlight, setDisposalFlight] = useState<FlightName>(role === 'ADMIN' && userFlight ? userFlight as FlightName : 'Avionics');
+ const [disposalFlight, setDisposalFlight] = useState<FlightName>(
+   role === 'ADMIN' && userFlight ? (userFlight as FlightName) : (unitGroupOptions[0] || 'Avionics')
+ );
  const [disposalCategory, setDisposalCategory] = useState<string>('');
  const [disposalCustomTitle, setDisposalCustomTitle] = useState<string>('');
  const [selectedDisposalAirmenIds, setSelectedDisposalAirmenIds] = useState<string[]>([]);
@@ -171,7 +180,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const [isEditingDisposals, setIsEditingDisposals] = useState(false);
  const [historicalCustomCats, setHistoricalCustomCats] = useState<{code: string, label: string, customTitle: string}[]>(() => { try { const saved = localStorage.getItem('parade_historical_custom'); return saved ? JSON.parse(saved) : []; } catch { return []; } });
 
- const ALL_DISPOSAL_OPTIONS = [{"code":"TDY","label":"TDY"},{"code":"DETT","label":"Detachment"},{"code":"LEAVE","label":"Leave"},{"code":"ESSN","label":"Essn"},{"code":"CMH","label":"CMH"},{"code":"BNS","label":"BNS"},{"code":"BSH","label":"BSH"},{"code":"OTHERS","customTitle":"Quarantine","label":"Quarantine"},{"code":"SICK_REPORT","label":"Sick Report"},{"code":"ED","label":"ED"},{"code":"EX_PPGF","label":"Ex PPGF"},{"code":"CANTEEN","label":"Canteen"},{"code":"DUTY_OFF","label":"Security Duty Off"},{"code":"BAKE_N_BITE","label":"Bake & Bite"},{"code":"RECEPTION","label":"K/O & Reception"},{"code":"ADMIN_ORDER","label":"Admin Order"},{"code":"CLASS_TRG","label":"Class"},{"code":"OTHERS","customTitle":"Exam","label":"Exam"},{"code":"AIRPORT","label":"Airfield Duty"},{"code":"GAMES","label":"Games"},{"code":"GH","label":"Guard of Honor"},{"code":"AWL","label":"AWOL"},{"code":"ABSENT","label":"Detention"},{"code":"OTHERS","label":"✨ Custom..."}];
+ const ALL_DISPOSAL_OPTIONS = [{"code":"TDY","label":"TDY"},{"code":"DETT","label":"Detachment"},{"code":"LEAVE","label":"Leave"},{"code":"ESSN","label":"Essn"},{"code":"CMH","label":"CMH"},{"code":"BNS","label":"BNS"},{"code":"BSH","label":"BSH"},{"code":"OTHERS","customTitle":"Quarantine","label":"Quarantine"},{"code":"SICK_REPORT","label":"Sick Report"},{"code":"ED","label":"ED"},{"code":"EX_PPGF","label":"Ex PPGF"},{"code":"CANTEEN","label":"Canteen"},{"code":"DUTY_OFF","label":"Security Duty Off"},{"code":"BAKE_N_BITE","label":"Bake & Bite"},...(isDefault155UasuOffice() ? [{"code":"RECEPTION","label":"K/O & Reception"}] : []),{"code":"ADMIN_ORDER","label":"Admin Order"},{"code":"CLASS_TRG","label":"Class"},{"code":"OTHERS","customTitle":"Exam","label":"Exam"},{"code":"AIRPORT","label":"Airfield Duty"},{"code":"GAMES","label":"Games"},{"code":"GH","label":"Guard of Honor"},{"code":"AWL","label":"AWOL"},{"code":"ABSENT","label":"Detention"},{"code":"OTHERS","label":"✨ Custom..."}];
 
  const handleAddDisposalOption = (opt: any) => {
  if (opt.code === 'OTHERS' && !opt.customTitle) {
@@ -755,9 +764,19 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
       if (a.dateLeft && a.dateLeft < fromDate) return false;
       return true;
     });
-    const flightAirmen = fl === 'Overall' ? activeAirmen : activeAirmen.filter((a) => a.flightName === fl);
+    const flightAirmen =
+      fl === 'Overall'
+        ? activeAirmen
+        : activeAirmen.filter((a) =>
+            officeHasFlights ? a.flightName === fl : a.trade === fl || a.flightName === fl
+          );
  const rawPersonnel = singleParadeData?.personnelStatusList || [];
- const pList = fl === 'Overall' ? rawPersonnel : rawPersonnel.filter((p) => p.airman.flightName === fl);
+ const pList =
+   fl === 'Overall'
+     ? rawPersonnel
+     : rawPersonnel.filter((p) =>
+         officeHasFlights ? p.airman.flightName === fl : p.airman.trade === fl || p.airman.flightName === fl
+       );
 
  let detTdyCount = 0;
  let leaveCount = 0;
@@ -885,7 +904,12 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  };
 
  // Single-Day Categorization for Bottom Lists
- const targetAirmen = selectedFlight === 'Overall' ? airmen : airmen.filter((a) => a.flightName === selectedFlight);
+ const targetAirmen =
+   selectedFlight === 'Overall'
+     ? airmen
+     : airmen.filter((a) =>
+         officeHasFlights ? a.flightName === selectedFlight : a.trade === selectedFlight || a.flightName === selectedFlight
+       );
 
  const onPtList: { airman: Airman; note?: string }[] = [];
  const leaveList: { airman: Airman; note?: string }[] = [];
@@ -913,7 +937,11 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const statusList = rawList
  ? selectedFlight === 'Overall'
  ? rawList
- : rawList.filter((item) => item.airman.flightName === selectedFlight)
+ : rawList.filter((item) =>
+     officeHasFlights
+       ? item.airman.flightName === selectedFlight
+       : item.airman.trade === selectedFlight || item.airman.flightName === selectedFlight
+   )
  : null;
 
  if (statusList) {
@@ -1337,21 +1365,20 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
             </div>
           )}
 
-          {/* Flt Filter */}
+          {/* Flt / Trade Filter */}
           {!isOthersDocument && (
             <div className="flex items-center space-x-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700 text-xs font-bold">
               <Filter className="w-3.5 h-3.5 text-slate-400" />
-              <span className="text-slate-400 font-semibold">Flt:</span>
+              <span className="text-slate-400 font-semibold">{officeHasFlights ? 'Flt:' : 'Trade:'}</span>
               <select
                 value={selectedFlight}
                 onChange={(e) => setSelectedFlight(e.target.value as any)}
                 className="bg-slate-800 text-white font-black outline-none cursor-pointer"
               >
                 <option value="Overall">Overall</option>
-                <option value="Avionics">Avionics</option>
-                <option value="Mechanics">Mechanics</option>
-                <option value="GCS">GCS</option>
-                <option value="Admin">Admin</option>
+                {unitGroupOptions.map((grp) => (
+                  <option key={grp} value={grp}>{grp}</option>
+                ))}
               </select>
             </div>
           )}
@@ -2189,16 +2216,16 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  )}
  </div>
 
- {/* 3. Flight Filter & Airman Selection */}
+ {/* 3. Flight / Trade Filter & Airman Selection */}
  <div className="space-y-2">
  <div className="flex items-center justify-between">
  <label className="text-xs font-bold text-slate-800 dark:text-slate-200">
- 3. Select Flight & Personnel
+ {officeHasFlights ? '3. Select Flight & Personnel' : '3. Select Trade & Personnel'}
  </label>
  </div>
- <div className="grid grid-cols-4 gap-1.5">
- {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((fl) => {
- const isDisabledFlt = (role === 'ADMIN' && userFlight && fl !== userFlight) || (role === 'ADMIN' && selectedDate < todayStr);
+ <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+ {unitGroupOptions.map((fl) => {
+ const isDisabledFlt = (role === 'ADMIN' && userFlight && officeHasFlights && fl !== userFlight) || (role === 'ADMIN' && selectedDate < todayStr);
  return (
  <button
  key={fl}
@@ -2223,7 +2250,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
                 const flightAirmen = airmen.filter((a) => {
                   if (a.dateJoined && a.dateJoined > disposalFromDate) return false;
                   if (a.dateLeft && a.dateLeft < disposalFromDate) return false;
-                  return a.flightName === disposalFlight;
+                  return officeHasFlights ? a.flightName === disposalFlight : (a.trade === disposalFlight || a.flightName === disposalFlight);
                 });
 
  const getAirmanStatusLabel = (airmanId: string) => {

@@ -8,6 +8,8 @@ import { localDb } from '../services/localDatabase';
 import { getAirmanDisposalForRange, AirmanDisposalStatus } from '../utils/airmanDisposalHelper';
 
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { doesOfficeHaveFlights } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 interface AssignTdyTabProps {
   airmen: Airman[];
   initialFromDate?: string;
@@ -31,8 +33,14 @@ export const AssignTdyTab: React.FC<AssignTdyTabProps> = ({
   const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
   const todayStr = new Date().toISOString().split('T')[0];
 
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const unitGroupOptions = useMemo<FlightName[]>(() => {
+    if (officeHasFlights) return ['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[];
+    return getBiodataTrades(airmen) as unknown as FlightName[];
+  }, [officeHasFlights, airmen]);
+
   const [tdyFlight, setTdyFlight] = useState<FlightName>(
-    initialFlight || (isAdmin && adminFlight ? adminFlight : 'Avionics')
+    initialFlight || (isAdmin && adminFlight ? adminFlight : (unitGroupOptions[0] || ('Avionics' as FlightName)))
   );
   const [tdyAirmanId, setTdyAirmanId] = useState<string>('');
   
@@ -49,16 +57,18 @@ export const AssignTdyTab: React.FC<AssignTdyTabProps> = ({
   const [tdySuccessMsg, setTdySuccessMsg] = useState<string>('');
 
   useEffect(() => {
-    if (isAdmin && adminFlight) {
+    if (isAdmin && adminFlight && officeHasFlights) {
       setTdyFlight(adminFlight);
+    } else if (!officeHasFlights && unitGroupOptions.length > 0 && !unitGroupOptions.includes(tdyFlight)) {
+      setTdyFlight(unitGroupOptions[0]);
     }
-  }, [isAdmin, adminFlight]);
+  }, [isAdmin, adminFlight, officeHasFlights, unitGroupOptions, tdyFlight]);
 
   const tdyAirmenList = useMemo(() => {
     return sortAirmenBySeniority(
       airmen.filter(
         (a) =>
-          a.flightName === tdyFlight &&
+          (officeHasFlights ? a.flightName === tdyFlight : (a.trade === tdyFlight || a.flightName === tdyFlight)) &&
           a.active !== false &&
           !['posted out', 'retired', 'dismissed', 'inactive'].includes(
             String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
@@ -67,7 +77,7 @@ export const AssignTdyTab: React.FC<AssignTdyTabProps> = ({
           (!a.dateJoined || a.dateJoined <= tdyFromDate)
       )
     );
-  }, [airmen, tdyFlight, tdyFromDate]);
+  }, [airmen, tdyFlight, tdyFromDate, officeHasFlights]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};
@@ -209,14 +219,14 @@ export const AssignTdyTab: React.FC<AssignTdyTabProps> = ({
         )}
 
         <form onSubmit={handleGrantTdySubmit} className="space-y-4">
-          {/* Flight Filter Selector */}
+          {/* Flight/Trade Filter Selector */}
           <div>
             <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-              Flight
+              {officeHasFlights ? 'Flight' : 'Trade'}
             </label>
             <div className="grid grid-cols-4 gap-1.5">
-              {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
-                const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight);
+              {unitGroupOptions.map((flt) => {
+                const isDisabledFlt = (officeHasFlights && isAdmin && adminFlight && flt !== adminFlight);
                 return (
                   <button
                     key={flt}

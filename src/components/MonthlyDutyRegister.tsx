@@ -15,8 +15,8 @@ import { getCurrentUserSession } from '../utils/authSession';
 import { checkDutyPermission, isDateInPast } from '../utils/dutyPermissions';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, isAirmanInUnitForMonth } from '../utils/csvExport';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
-import { getAvailableTrades } from '../utils/tradeList';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 import { localDb } from '../services/localDatabase';
 interface RestoreItem {
   airmanId: string;
@@ -149,7 +149,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
   // Filters
   const hasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
-  const availableTrades = useMemo(() => getAvailableTrades(airmen.map(a => a.trade || '')), [airmen]);
+  const availableTrades = useMemo(() => getBiodataTrades(airmen), [airmen]);
   const [flightFilter, setFlightFilter] = useState<FlightName | 'All'>('All');
   const [tradeFilter, setTradeFilter] = useState<string>('All');
   const [search, setSearch] = useState('');
@@ -164,20 +164,26 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
     idaShift?: IDAShift;
     badgeBg: string;
   }> = [
-    { key: 'GD', dutyCode: 'GD', label: 'Security Duty (SY)', badgeBg: 'bg-red-100 text-red-900 border-red-300 dark:bg-red-950 dark:text-red-200 dark:border-red-800' },
+    { key: 'GD', dutyCode: 'GD', label: 'Base Security Duty (SY)', badgeBg: 'bg-red-100 text-red-900 border-red-300 dark:bg-red-950 dark:text-red-200 dark:border-red-800' },
     { key: 'BTF', dutyCode: 'BTF', label: 'Base Taskforce Duty (BTF)', badgeBg: 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950 dark:text-amber-200 dark:border-amber-800' },
     { key: 'NTF', dutyCode: 'NTF', label: 'Najirpara Taskforce Duty (NTF)', badgeBg: 'bg-orange-100 text-orange-900 border-orange-300 dark:bg-orange-950 dark:text-orange-200 dark:border-orange-800' },
     { key: 'HALISHAHAR', dutyCode: 'HALISHAHAR', label: 'Halishahar Duty', badgeBg: 'bg-cyan-100 text-cyan-900 border-cyan-300 dark:bg-cyan-950 dark:text-cyan-200 dark:border-cyan-800' },
     { key: 'AIRPORT', dutyCode: 'AIRPORT', label: 'Airfield Duty', badgeBg: 'bg-indigo-100 text-indigo-900 border-indigo-300 dark:bg-indigo-950 dark:text-indigo-200 dark:border-indigo-800' },
     { key: 'TDY', dutyCode: 'TDY', label: 'TDY', badgeBg: 'bg-amber-200 text-amber-950 border-amber-400 dark:bg-amber-900 dark:text-amber-100 dark:border-amber-700' },
-    { key: 'IDAC_MORNING', dutyCode: 'IDAC', label: 'IDA Center Duty (Morning)', idaShift: 'Morning', badgeBg: 'bg-sky-100 text-sky-900 border-sky-300 dark:bg-sky-950 dark:text-sky-200 dark:border-sky-800' },
-    { key: 'IDAC_AFTERNOON', dutyCode: 'IDAC', label: 'IDA Center Duty (Afternoon)', idaShift: 'Afternoon', badgeBg: 'bg-blue-100 text-blue-900 border-blue-300 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800' },
-    { key: 'IDAC_NIGHT', dutyCode: 'IDAC', label: 'IDA Center Duty (Night)', idaShift: 'Night', badgeBg: 'bg-indigo-200 text-indigo-950 border-indigo-400 dark:bg-indigo-950 dark:text-indigo-200 dark:border-indigo-800' },
+    ...(isDefault155UasuOffice()
+      ? [
+          { key: 'IDAC_MORNING', dutyCode: 'IDAC' as DutyCategoryCode, label: 'IDA Center Duty (Morning)', idaShift: 'Morning' as IDAShift, badgeBg: 'bg-sky-100 text-sky-900 border-sky-300 dark:bg-sky-950 dark:text-sky-200 dark:border-sky-800' },
+          { key: 'IDAC_AFTERNOON', dutyCode: 'IDAC' as DutyCategoryCode, label: 'IDA Center Duty (Afternoon)', idaShift: 'Afternoon' as IDAShift, badgeBg: 'bg-blue-100 text-blue-900 border-blue-300 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800' },
+          { key: 'IDAC_NIGHT', dutyCode: 'IDAC' as DutyCategoryCode, label: 'IDA Center Duty (Night)', idaShift: 'Night' as IDAShift, badgeBg: 'bg-indigo-200 text-indigo-950 border-indigo-400 dark:bg-indigo-950 dark:text-indigo-200 dark:border-indigo-800' },
+        ]
+      : []),
     { key: 'LEAVE', dutyCode: 'LEAVE', label: 'LEAVE', badgeBg: 'bg-rose-100 text-rose-900 border-rose-300 dark:bg-rose-950 dark:text-rose-200 dark:border-rose-800' },
     { key: 'BAKE_N_BITE', dutyCode: 'BAKE_N_BITE', label: 'Bake & Bite', badgeBg: 'bg-orange-200 text-orange-950 border-orange-400 dark:bg-orange-950 dark:text-orange-200 dark:border-orange-800' },
   ];
 
-  const flightsList: FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
+  const flightsList: FlightName[] = hasFlights
+    ? ['Avionics', 'Mechanics', 'GCS', 'Admin']
+    : ((availableTrades.length > 0 ? availableTrades : ['General']) as FlightName[]);
 
   // Popover State
   const [activeCell, setActiveCell] = useState<{
@@ -253,12 +259,14 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
       return;
     }
     const targetFlight = cellEditProxyFlight || cellEditModal.flight;
-    if (cellEditModal.assignedAirman && !cellEditProxyFlight && cellEditModal.assignedAirman.flightName === targetFlight) {
+    const matchUnitGroup = (a: Airman, grp: string) =>
+      hasFlights ? a.flightName === grp : a.trade === grp || a.flightName === grp;
+    if (cellEditModal.assignedAirman && !cellEditProxyFlight && matchUnitGroup(cellEditModal.assignedAirman, targetFlight)) {
       setSelectedReplacementAirmanId(cellEditModal.assignedAirman.id);
     } else {
       const flAirmen = airmen.filter(
         (a) =>
-          a.flightName === targetFlight &&
+          matchUnitGroup(a, targetFlight) &&
           a.active !== false &&
           !['posted out', 'retired', 'dismissed', 'inactive'].includes(
             String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
@@ -294,7 +302,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
     const targetDate = bulkFromDate || `${currentYear}-${currentMonth.toString().padStart(2, '0')}-01`;
     let count = 0;
     airmen.forEach((a) => {
-      if (bulkFlight !== 'All' && a.flightName !== bulkFlight) return;
+      if (bulkFlight !== 'All' && (hasFlights ? a.flightName !== bulkFlight : (a.trade !== bulkFlight && a.flightName !== bulkFlight))) return;
       const ass = assignmentMap.get(`${a.id}_${targetDate}`);
       if (ass && ass.dutyCode === dutyCode) {
         count++;
@@ -368,8 +376,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
       const reasonLower = String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim();
       if (['posted out', 'retired', 'dismissed', 'inactive'].includes(reasonLower)) return false;
       if (a.dateLeft && (!bulkFromDate || a.dateLeft <= bulkFromDate)) return false;
-      // 1. Flight match
-      if (bulkFlight !== 'All' && a.flightName !== bulkFlight) {
+      // 1. Flight / Trade match
+      if (bulkFlight !== 'All' && (hasFlights ? a.flightName !== bulkFlight : (a.trade !== bulkFlight && a.flightName !== bulkFlight))) {
         return false;
       }
 
@@ -1234,7 +1242,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                     Duty Name
                   </th>
                   <th className="py-2.5 px-2 w-24 sticky left-48 z-30 bg-slate-900 border-r border-slate-800 text-center">
-                    Flight
+                    {hasFlights ? 'Flight' : 'Trade'}
                   </th>
 
                   {daysArray
@@ -1283,7 +1291,9 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
                   return bafDutyCategories.map((cat) => {
                     return activeFlights.map((fl, flIdx) => {
-                      const flightAirmen = airmen.filter((a) => a.flightName === fl);
+                      const flightAirmen = airmen.filter((a) =>
+                        hasFlights ? a.flightName === fl : a.trade === fl || a.flightName === fl
+                      );
 
                       return (
                         <tr
@@ -1791,32 +1801,32 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
             {/* Form */}
             <form onSubmit={handleBulkAssignRange} className="space-y-4">
-              {/* 1. Select Flight (Flt) */}
+              {/* 1. Select Flight / Trade */}
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between">
-                  <span>1. Select Flight (Flt)</span>
+                  <span>{hasFlights ? '1. Select Flight (Flt)' : '1. Select Trade'}</span>
                   <span className="text-[11px] text-slate-500 font-medium">
-                    {bulkFlight === 'All' ? 'All Unit Flights' : `${bulkFlight} Flight`}
+                    {bulkFlight === 'All' ? (hasFlights ? 'All Unit Flights' : 'All Unit Trades') : `${bulkFlight} ${hasFlights ? 'Flight' : 'Trade'}`}
                   </span>
                 </label>
-                <div className="grid grid-cols-5 gap-1.5">
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
                   <button
                     type="button"
-                    disabled={isAdmin && !!adminFlight}
+                    disabled={isAdmin && !!adminFlight && hasFlights}
                     onClick={() => setBulkFlight('All')}
-                    title={isAdmin && adminFlight ? `Admins can only detail duties for ${adminFlight} flight` : undefined}
+                    title={isAdmin && adminFlight && hasFlights ? `Admins can only detail duties for ${adminFlight} flight` : undefined}
                     className={`py-1.5 px-2 text-xs font-bold rounded-xl border text-center transition-all ${
-                      isAdmin && adminFlight
+                      isAdmin && adminFlight && hasFlights
                         ? 'opacity-40 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-200 dark:border-slate-700'
                         : bulkFlight === 'All'
                         ? 'bg-slate-900 text-white border-slate-900 shadow-xs cursor-pointer'
                         : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-slate-400 cursor-pointer'
                     }`}
                   >
-                    All Flt
+                    {hasFlights ? 'All Flt' : 'All Trade'}
                   </button>
                   {flightsList.map((fl) => {
-                    const isFltDisabled = isAdmin && !!adminFlight && fl !== adminFlight;
+                    const isFltDisabled = isAdmin && !!adminFlight && hasFlights && fl !== adminFlight;
                     return (
                       <button
                         key={fl}
@@ -1882,7 +1892,9 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
                   {(() => {
-                    const allDuties = DUTY_TYPES.filter((dt) => dt.code !== 'ON_PARADE');
+                    const allDuties = DUTY_TYPES.filter(
+                      (dt) => dt.code !== 'ON_PARADE' && (isDefault155UasuOffice() || !['IDAC', 'IDA', 'RECEPTION'].includes(String(dt.code).toUpperCase()))
+                    );
                     const ratioFiltered = allDuties.filter((dt) => getRequiredCountForDuty(dt.code) > 0);
                     const dutiesToRender = filterByRatio && ratioFiltered.length > 0 ? ratioFiltered : allDuties;
 
@@ -2040,10 +2052,10 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                       else if (avail.status === 'TDY') disposalText = 'TDY';
                       else if (avail.status === 'DUTY') disposalText = avail.dutyName;
 
-                      const flightSuffix = bulkFlight === 'All' ? ` (${a.flightName})` : '';
+                      const groupSuffix = bulkFlight === 'All' ? ` (${hasFlights ? a.flightName : (a.trade || a.flightName)})` : '';
                       const label = disposalText
-                        ? `${formatAirmanName(a.rank)} ${a.name}${flightSuffix} - ${disposalText}`
-                        : `${formatAirmanName(a.rank)} ${a.name}${flightSuffix}`;
+                        ? `${formatAirmanName(a.rank)} ${a.name}${groupSuffix} - ${disposalText}`
+                        : `${formatAirmanName(a.rank)} ${a.name}${groupSuffix}`;
 
                       return (
                         <option
@@ -2371,7 +2383,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                   </div>
                 )}
 
-                {/* Proxy Flight Selection (Optional) */}
+                {/* Proxy Flight / Trade Selection (Optional) */}
                 {!isAdmin && (
                   <div className="space-y-1 bg-amber-50/60 dark:bg-amber-950/30 p-2.5 rounded-xl border border-amber-200 dark:border-amber-800/80">
                     <div className="flex items-center justify-between">
@@ -2379,7 +2391,7 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                         Proxy Personnel (Optional)
                       </label>
                       <span className="text-[10px] text-amber-700 dark:text-amber-400">
-                        {cellEditProxyFlight ? `Covering by ${cellEditProxyFlight} Flight` : 'Assigned from own flight'}
+                        {cellEditProxyFlight ? `Covering by ${cellEditProxyFlight}` : `Assigned from own ${hasFlights ? 'flight' : 'trade'}`}
                       </span>
                     </div>
                     <select
@@ -2388,12 +2400,12 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                       onChange={(e) => setCellEditProxyFlight(e.target.value as FlightName | '')}
                       className="w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none focus:border-amber-500 cursor-pointer disabled:opacity-50"
                     >
-                      <option value="">No Proxy (Assign from {cellEditModal.flight} Flight)</option>
-                      {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[])
+                      <option value="">No Proxy (Assign from {cellEditModal.flight})</option>
+                      {flightsList
                         .filter((fl) => fl !== cellEditModal.flight)
                         .map((fl) => (
                           <option key={fl} value={fl}>
-                            Proxy from {fl} Flight
+                            Proxy from {fl}
                           </option>
                         ))}
                     </select>
@@ -2404,10 +2416,10 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                     {cellEditProxyFlight
-                      ? `Select Proxy Airman (from ${cellEditProxyFlight} Flight):`
+                      ? `Select Proxy Airman (from ${cellEditProxyFlight}):`
                       : cellEditModal.assignedAirman
-                      ? `Replace Airman (from ${cellEditModal.flight} Flight):`
-                      : `Select Airman (from ${cellEditModal.flight} Flight):`}
+                      ? `Replace Airman (from ${cellEditModal.flight}):`
+                      : `Select Airman (from ${cellEditModal.flight}):`}
                   </label>
                   <select
                     disabled={isCellReadOnly}
@@ -2419,7 +2431,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                     <option value="">-- Choose Airman ({cellEditProxyFlight || cellEditModal.flight}) --</option>
                     {airmen
                       .filter((a) => {
-                        if (a.flightName !== (cellEditProxyFlight || cellEditModal.flight)) return false;
+                        const targetGrp = cellEditProxyFlight || cellEditModal.flight;
+                        if (hasFlights ? a.flightName !== targetGrp : (a.trade !== targetGrp && a.flightName !== targetGrp)) return false;
                         // Base Security Duty (GD) is strictly for Cpl & Below (Cpl, LAC, AC1, AC2)
                         if (cellEditModal.dutyCode === 'GD') {
                           const rankLower = a.rank.toLowerCase();

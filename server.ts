@@ -776,6 +776,86 @@ async function startServer() {
     res.json(db.airmen || []);
   });
 
+  app.post('/api/airmen', express.json(), (req, res) => {
+    const data = req.body || {};
+    const db = loadDatabase();
+    if (!Array.isArray(db.airmen)) db.airmen = [];
+    const newId = data.id || `BD/${String(data.bdNo || Date.now()).replace(/^BD\/?/i, '')}`;
+    const record = { ...data, id: newId, active: data.active !== false, updatedAt: new Date().toISOString() };
+    const existingIdx = db.airmen.findIndex((a: any) => a.id === newId || (data.bdNo && a.bdNo === data.bdNo));
+    if (existingIdx >= 0) {
+      db.airmen[existingIdx] = { ...db.airmen[existingIdx], ...record };
+    } else {
+      db.airmen.push(record);
+    }
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.status(201).json(record);
+  });
+
+  app.post('/api/airmen/bulk', express.json({ limit: '25mb' }), (req, res) => {
+    const list = Array.isArray(req.body) ? req.body : req.body?.airmen;
+    if (!Array.isArray(list)) {
+      return res.status(400).json({ error: 'Expected array of airmen' });
+    }
+    const db = loadDatabase();
+    if (!Array.isArray(db.airmen)) db.airmen = [];
+    let addedCount = 0;
+    for (const item of list) {
+      if (!item) continue;
+      const newId = item.id || `BD/${String(item.bdNo || Date.now()).replace(/^BD\/?/i, '')}`;
+      const record = { ...item, id: newId, active: item.active !== false, updatedAt: new Date().toISOString() };
+      const idx = db.airmen.findIndex((a: any) => a.id === newId || (item.bdNo && a.bdNo === item.bdNo));
+      if (idx >= 0) {
+        db.airmen[idx] = { ...db.airmen[idx], ...record };
+      } else {
+        db.airmen.push(record);
+        addedCount++;
+      }
+    }
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.status(201).json({ success: true, addedCount, airmen: db.airmen });
+  });
+
+  app.put('/api/airmen/:id', express.json(), (req, res) => {
+    const rawId = decodeURIComponent(req.params.id || '');
+    const data = req.body || {};
+    const db = loadDatabase();
+    if (!Array.isArray(db.airmen)) db.airmen = [];
+    const targetDigits = String(rawId).replace(/\D/g, '');
+    const idx = db.airmen.findIndex((a: any) => {
+      if (a.id === rawId || a.bdNo === rawId) return true;
+      const d = String(a.bdNo || a.id || '').replace(/\D/g, '');
+      return Boolean(targetDigits && d && d === targetDigits);
+    });
+    if (idx === -1) {
+      const created = { ...data, id: data.id || rawId, updatedAt: new Date().toISOString() };
+      db.airmen.push(created);
+      saveDatabase(db, 'DATABASE_UPDATED');
+      return res.json(created);
+    }
+    db.airmen[idx] = { ...db.airmen[idx], ...data, updatedAt: new Date().toISOString() };
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.json(db.airmen[idx]);
+  });
+
+  app.delete('/api/airmen/:id', (req, res) => {
+    const rawId = decodeURIComponent(req.params.id || '');
+    const targetDigits = String(rawId).replace(/\D/g, '');
+    if (targetDigits === '48456') {
+      return res.status(403).json({ error: 'Protected Master Owner record cannot be deleted' });
+    }
+    const db = loadDatabase();
+    if (Array.isArray(db.airmen)) {
+      db.airmen = db.airmen.filter((a: any) => {
+        if (a.id === rawId || a.bdNo === rawId) return false;
+        const d = String(a.bdNo || a.id || '').replace(/\D/g, '');
+        return !(targetDigits && d && d === targetDigits);
+      });
+      saveDatabase(db, 'DATABASE_UPDATED');
+    }
+    res.json({ success: true });
+  });
+
   app.get('/api/database', (req, res) => {
     const db = loadDatabase();
     res.json(db);
@@ -1212,7 +1292,46 @@ async function startServer() {
       const idx = db.activityHistory.findIndex((h: any) => h.id === historyId);
       if (idx !== -1) {
         db.activityHistory.splice(idx, 1);
-        fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+        saveDatabase(db, 'DATABASE_UPDATED');
+      }
+    }
+    res.json({ success: true });
+  });
+
+  app.post('/api/roster/undo-history', express.json(), (req, res) => {
+    const { historyId } = req.body || {};
+    if (!historyId) return res.status(400).json({ error: 'Missing historyId' });
+    const db = loadDatabase();
+    if (Array.isArray(db.activityHistory)) {
+      const idx = db.activityHistory.findIndex((h: any) => h.id === historyId);
+      if (idx !== -1) {
+        const item = db.activityHistory[idx];
+        if (Array.isArray(item.previousAssignments)) {
+          if (!db.assignments) db.assignments = {};
+          for (const prev of item.previousAssignments) {
+            if (!prev?.date || !prev?.airmanId) continue;
+            const mKey = prev.date.slice(0, 7);
+            if (!db.assignments[mKey]) db.assignments[mKey] = [];
+            const list = db.assignments[mKey];
+            const existingIdx = list.findIndex((a: any) => a.airmanId === prev.airmanId && a.date === prev.date);
+            if (prev.dutyCode) {
+              const restored = {
+                airmanId: prev.airmanId,
+                date: prev.date,
+                dutyCode: prev.dutyCode,
+                idaShift: prev.idaShift,
+                notes: prev.notes || '',
+                updatedAt: new Date().toISOString()
+              };
+              if (existingIdx >= 0) list[existingIdx] = restored;
+              else list.push(restored);
+            } else if (existingIdx >= 0) {
+              list.splice(existingIdx, 1);
+            }
+          }
+        }
+        db.activityHistory.splice(idx, 1);
+        saveDatabase(db, 'DATABASE_UPDATED');
       }
     }
     res.json({ success: true });
@@ -1220,9 +1339,9 @@ async function startServer() {
 
   function getDatesInRange(fromDateStr: string, toDateStr: string): string[] {
     const dates: string[] = [];
-    const [fY, fM, fD] = fromDateStr.split('-').map(Number);
-    const [tY, tM, tD] = toDateStr.split('-').map(Number);
-    if (!fY || !fM || !fD || !tY || !tM || !tD) return [fromDateStr];
+    const [fY, fM, fD] = String(fromDateStr || '').split('-').map(Number);
+    const [tY, tM, tD] = String(toDateStr || fromDateStr || '').split('-').map(Number);
+    if (!fY || !fM || !fD || !tY || !tM || !tD) return fromDateStr ? [fromDateStr] : [];
     const current = new Date(Date.UTC(fY, fM - 1, fD));
     const end = new Date(Date.UTC(tY, tM - 1, tD));
     while (current <= end) {
@@ -1343,14 +1462,15 @@ async function startServer() {
     res.json({ success: true, count: dates.length, assignedDates: dates });
   });
 
-  app.post('/api/roster/delete-range', express.json(), (req, res) => {
-    const { airmanId, fromDate, toDate, dutyCode, idaShift, disposalScope } = req.body || {};
-    if (!airmanId || !fromDate) {
-      return res.status(400).json({ error: 'Missing required parameters: airmanId, fromDate' });
+  const handleDeleteRangeOrSingle = (req: any, res: any) => {
+    const { airmanId, date, fromDate, toDate, dutyCode, idaShift, disposalScope } = req.body || {};
+    const start = fromDate || date;
+    if (!airmanId || !start) {
+      return res.status(400).json({ error: 'Missing required parameters: airmanId, date/fromDate' });
     }
     const db = loadDatabase();
     if (!db.assignments) db.assignments = {};
-    const dates = getDatesInRange(fromDate, toDate || fromDate);
+    const dates = getDatesInRange(start, toDate || start);
 
     const cleanTargetDigits = String(airmanId).replace(/\D/g, '');
     const matchAirmanId = (itemAirmanId: any) => {
@@ -1394,58 +1514,148 @@ async function startServer() {
 
     saveDatabase(db, 'DATABASE_UPDATED');
     res.json({ success: true });
-  });
+  };
 
-  app.post('/api/roster/assign', express.json(), (req, res) => {
-    const { monthKey, assignment } = req.body || {};
+  app.post('/api/roster/delete-range', express.json(), handleDeleteRangeOrSingle);
+  app.post('/api/roster/delete-assignment', express.json(), handleDeleteRangeOrSingle);
+
+  const handleSingleAssign = (req: any, res: any) => {
+    const body = req.body || {};
+    const assignment = body.assignment || (body.airmanId && body.date ? body : null);
     if (!assignment || !assignment.airmanId || !assignment.date) {
       return res.status(400).json({ error: 'Missing assignment details' });
     }
-    const targetMonth = monthKey || assignment.date.slice(0, 7);
+    const targetMonth = body.monthKey || String(assignment.date).slice(0, 7);
     const db = loadDatabase();
     if (!db.assignments) db.assignments = {};
     if (!db.assignments[targetMonth]) db.assignments[targetMonth] = [];
 
     const list = db.assignments[targetMonth];
-    const idx = list.findIndex((a: any) => a.airmanId === assignment.airmanId && a.date === assignment.date && a.dutyCode === assignment.dutyCode);
+    const scope = assignment.disposalScope || 'ALL';
+    const idx = list.findIndex(
+      (a: any) =>
+        a.airmanId === assignment.airmanId &&
+        a.date === assignment.date &&
+        (a.disposalScope || 'ALL') === scope &&
+        (scope !== 'ALL' || a.dutyCode === assignment.dutyCode)
+    );
+    const savedObj = {
+      ...assignment,
+      disposalScope: scope,
+      updatedAt: new Date().toISOString()
+    };
     if (idx >= 0) {
-      list[idx] = { ...list[idx], ...assignment, updatedAt: new Date().toISOString() };
+      list[idx] = { ...list[idx], ...savedObj };
     } else {
-      list.push({ ...assignment, updatedAt: new Date().toISOString() });
+      list.push(savedObj);
     }
 
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-    res.json({ success: true, assignment });
-  });
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.json({ success: true, assignment: savedObj });
+  };
 
-  app.post('/api/roster/batch-assign', express.json(), (req, res) => {
-    const { assignments: batchList, fromDate, toDate } = req.body || {};
+  app.post('/api/roster/assign', express.json(), handleSingleAssign);
+  app.put('/api/roster/assign', express.json(), handleSingleAssign);
+
+  const handleBatchOrBulkAssign = (req: any, res: any) => {
+    const { assignments: batchList, fromDate, toDate, removedAirmanIds } = req.body || {};
     if (!Array.isArray(batchList)) {
       return res.status(400).json({ error: 'Expected assignments array' });
     }
     const db = loadDatabase();
     if (!db.assignments) db.assignments = {};
-    for (const item of batchList) {
-      if (!item.airmanId || !item.date) continue;
-      const mKey = item.date.slice(0, 7);
-      if (!db.assignments[mKey]) db.assignments[mKey] = [];
-      const list = db.assignments[mKey];
-      const idx = list.findIndex((a: any) => a.airmanId === item.airmanId && a.date === item.date && a.dutyCode === item.dutyCode);
-      if (idx >= 0) {
-        list[idx] = { ...list[idx], ...item, updatedAt: new Date().toISOString() };
-      } else {
-        list.push({ ...item, updatedAt: new Date().toISOString() });
+    const rangeDates = fromDate ? getDatesInRange(fromDate, toDate || fromDate) : [];
+    const assignedDatesSet = new Set<string>(rangeDates);
+
+    if (Array.isArray(removedAirmanIds) && removedAirmanIds.length > 0 && rangeDates.length > 0) {
+      for (const dateStr of rangeDates) {
+        const mKey = dateStr.slice(0, 7);
+        if (db.assignments[mKey]) {
+          db.assignments[mKey] = db.assignments[mKey].filter(
+            (a: any) => !(removedAirmanIds.includes(a.airmanId) && a.date === dateStr)
+          );
+        }
       }
     }
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-    res.json({ success: true, count: batchList.length });
+
+    let count = 0;
+    for (const item of batchList) {
+      if (!item || !item.airmanId || !item.dutyCode) continue;
+      const targetDates = item.date ? [item.date] : rangeDates;
+      for (const dateStr of targetDates) {
+        if (!dateStr) continue;
+        assignedDatesSet.add(dateStr);
+        const mKey = dateStr.slice(0, 7);
+        if (!db.assignments[mKey]) db.assignments[mKey] = [];
+        const list = db.assignments[mKey];
+        const scope = item.disposalScope || 'ALL';
+        const idx = list.findIndex(
+          (a: any) =>
+            a.airmanId === item.airmanId &&
+            a.date === dateStr &&
+            (a.disposalScope || 'ALL') === scope &&
+            a.dutyCode === item.dutyCode
+        );
+        const entry = {
+          ...item,
+          date: dateStr,
+          disposalScope: scope,
+          updatedAt: new Date().toISOString()
+        };
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], ...entry };
+        } else {
+          list.push(entry);
+        }
+        count++;
+      }
+    }
+
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.json({ success: true, count, assignedDates: Array.from(assignedDatesSet).sort() });
+  };
+
+  app.post('/api/roster/batch-assign', express.json(), handleBatchOrBulkAssign);
+  app.post('/api/roster/bulk-assign', express.json(), handleBatchOrBulkAssign);
+
+  app.post('/api/roster/restore-assignments', express.json(), (req, res) => {
+    const { restoreItems } = req.body || {};
+    const db = loadDatabase();
+    if (!db.assignments) db.assignments = {};
+    if (Array.isArray(restoreItems)) {
+      for (const item of restoreItems) {
+        if (!item?.airmanId || !item?.date) continue;
+        const mKey = String(item.date).slice(0, 7);
+        if (!db.assignments[mKey]) db.assignments[mKey] = [];
+        if (item.assignment === null) {
+          db.assignments[mKey] = db.assignments[mKey].filter(
+            (a: any) => !(a.airmanId === item.airmanId && a.date === item.date)
+          );
+        } else if (item.assignment) {
+          const list = db.assignments[mKey];
+          const idx = list.findIndex((a: any) => a.airmanId === item.airmanId && a.date === item.date);
+          const restored = { ...item.assignment, updatedAt: new Date().toISOString() };
+          if (idx >= 0) list[idx] = restored;
+          else list.push(restored);
+        }
+      }
+      saveDatabase(db, 'DATABASE_UPDATED');
+    }
+    res.json({ success: true, count: Array.isArray(restoreItems) ? restoreItems.length : 0 });
   });
 
   app.post('/api/roster/clear-all', express.json(), (req, res) => {
     const db = loadDatabase();
     db.assignments = {};
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+    saveDatabase(db, 'DATABASE_UPDATED');
     res.json({ success: true, message: 'All duties cleared' });
+  });
+
+  app.post('/api/roster/reset-official', express.json(), (req, res) => {
+    const db = loadDatabase();
+    db.assignments = {};
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.json({ success: true, message: 'Reset to official parade state data' });
   });
 
   app.post('/api/roster/clear-month', express.json(), (req, res) => {
@@ -1454,9 +1664,39 @@ async function startServer() {
     const db = loadDatabase();
     if (db.assignments && db.assignments[monthKey]) {
       db.assignments[monthKey] = [];
-      fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+      saveDatabase(db, 'DATABASE_UPDATED');
     }
     res.json({ success: true, message: `Month ${monthKey} cleared` });
+  });
+
+  app.post('/api/system/log-action', express.json(), (req, res) => {
+    const { airmanId, airmanName, notes } = req.body || {};
+    const db = loadDatabase();
+    if (!Array.isArray(db.activityHistory)) db.activityHistory = [];
+    db.activityHistory.unshift({
+      id: `hist_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      actionType: 'SYSTEM_ACTION',
+      airmanId: airmanId || 'SYSTEM',
+      airmanName: airmanName || 'System Configuration',
+      dutyCode: 'GD',
+      fromDate: '',
+      toDate: '',
+      notes: notes || ''
+    });
+    saveDatabase(db, 'DATABASE_UPDATED');
+    res.json({ success: true });
+  });
+
+  app.post('/api/auth/change-passcode', express.json(), (req, res) => {
+    const { newPasscode } = req.body || {};
+    if (newPasscode && String(newPasscode).length === 4) {
+      const db = loadDatabase();
+      db.adminPasscode = String(newPasscode);
+      saveDatabase(db, 'DATABASE_UPDATED');
+      return res.json({ success: true });
+    }
+    res.status(400).json({ error: 'Invalid passcode' });
   });
 
   // Dedicated App Settings Endpoints

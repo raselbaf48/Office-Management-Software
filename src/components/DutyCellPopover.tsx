@@ -3,6 +3,9 @@ import { DutyCategoryCode, IDAShift, FlightName } from '../types';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { getIdacShiftsForDateAndFlight } from '../data/officialDutyRatioMatrix';
 import { X, Check } from 'lucide-react';
+import { isDefault155UasuOffice, doesOfficeHaveFlights } from '../firebase';
+import { localDb } from '../services/localDatabase';
+import { getBiodataTrades } from '../utils/tradeList';
 
 interface DutyCellPopoverProps {
   airmanName: string;
@@ -33,6 +36,19 @@ export const DutyCellPopover: React.FC<DutyCellPopoverProps> = ({
 }) => {
   const [selectedCode, setSelectedCode] = React.useState<DutyCategoryCode>(currentCode);
   const [proxyForFlight, setProxyForFlight] = React.useState<FlightName | ''>(currentProxyForFlight || '');
+  const officeAirmen = React.useMemo(() => localDb.getAirmen(), []);
+  const officeHasFlights = React.useMemo(() => doesOfficeHaveFlights(officeAirmen), [officeAirmen]);
+  const unitGroupOptions = React.useMemo<FlightName[]>(() => {
+    if (officeHasFlights) return ['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[];
+    return getBiodataTrades(officeAirmen) as unknown as FlightName[];
+  }, [officeHasFlights, officeAirmen]);
+  const availableDutyTypes = React.useMemo(() => {
+    const is155 = isDefault155UasuOffice();
+    return DUTY_TYPES.filter((dt) => {
+      if (!is155 && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
+      return true;
+    });
+  }, []);
   const availableShifts = React.useMemo(() => {
     return getIdacShiftsForDateAndFlight(date, flightName);
   }, [date, flightName]);
@@ -87,7 +103,7 @@ export const DutyCellPopover: React.FC<DutyCellPopoverProps> = ({
             Select Duty Category
           </label>
           <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto p-1">
-            {DUTY_TYPES.map((dt) => {
+            {availableDutyTypes.map((dt) => {
               const isSelected = selectedCode === dt.code;
               return (
                 <button
@@ -173,12 +189,12 @@ export const DutyCellPopover: React.FC<DutyCellPopoverProps> = ({
               </button>
             ) : (
               <span className="text-[10px] text-amber-700 dark:text-amber-400">
-                Cover other flight
+                Cover other {officeHasFlights ? 'flight' : 'trade'}
               </span>
             )}
           </div>
           <div className="grid grid-cols-3 gap-1.5">
-            {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[])
+            {unitGroupOptions
               .filter((fl) => fl !== (airmanFlight || flightName))
               .map((fl) => (
                 <button

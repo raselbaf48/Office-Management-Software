@@ -14,7 +14,8 @@ import { FlightDutyRatioModal } from './FlightDutyRatioModal';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { AssignDutyModal } from './AssignDutyModal';
 import { SignatureConfigModal } from './SignatureConfigModal';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 
 interface DashboardParadeStateProps {
   role?: UserRole;
@@ -148,13 +149,11 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
   const dateDisplay = dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).replace(/Sept/gi, 'Sep');
   const yearDisplay = String(dateObj.getFullYear()).slice(-2);
 
-  const flightsList: (FlightName | 'Overall')[] = [
-    'Overall',
-    'Avionics',
-    'Mechanics',
-    'GCS',
-    'Admin',
-  ];
+  const effectiveAirmen = airmen || data?.personnelStatusList?.map((p) => p.airman) || [];
+  const officeHasFlights = doesOfficeHaveFlights(effectiveAirmen);
+  const flightsList: (FlightName | 'Overall')[] = officeHasFlights
+    ? ['Overall', 'Avionics', 'Mechanics', 'GCS', 'Admin']
+    : (['Overall', ...getBiodataTrades(effectiveAirmen)] as (FlightName | 'Overall')[]);
 
   return (
     <div className="space-y-6">
@@ -499,7 +498,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Date: <strong>{selectedDate}</strong> {selectedFlight !== 'Overall' ? `• Flight: ${selectedFlight}` : '• Entire Unit'}
+                    Date: <strong>{selectedDate}</strong> {selectedFlight !== 'Overall' ? `• ${officeHasFlights ? 'Flight' : 'Trade'}: ${selectedFlight}` : '• Entire Unit'}
                   </p>
                 </div>
               </div>
@@ -564,7 +563,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
                         <th className="py-2 px-3">Rank</th>
                         <th className="py-2 px-3">Name</th>
                         <th className="py-2 px-3">Trade</th>
-                        <th className="py-2 px-3">Flight</th>
+                        {officeHasFlights && <th className="py-2 px-3">Flight</th>}
                         <th className="py-2 px-3">Status / Duty</th>
                       </tr>
                     </thead>
@@ -599,11 +598,13 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
                             <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
                               {item.airman.trade}
                             </td>
-                            <td className="py-2 px-3">
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                                {item.airman.flightName}
-                              </span>
-                            </td>
+                            {officeHasFlights && (
+                              <td className="py-2 px-3">
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                  {item.airman.flightName}
+                                </span>
+                              </td>
+                            )}
                             <td className="py-2 px-3">
                               <span className={`px-2.5 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-1.5 ${
                                 item.dutyCode === 'BAKE_N_BITE'

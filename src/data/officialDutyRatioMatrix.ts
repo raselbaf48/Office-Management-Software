@@ -284,6 +284,28 @@ function getMatrixMetadataStorageKey(): string {
   return getOfficeScopedStorageKey('baf_duty_matrix_metadata');
 }
 
+const NEW_OFFICE_EXCLUDED_DUTY_IDS = new Set([
+  'idac_mor',
+  'idac_an',
+  'idac_nt',
+  'reception_duty',
+]);
+const NEW_OFFICE_EXCLUDED_DUTY_CODES = new Set([
+  'IDAC',
+  'RECEPTION',
+]);
+
+export function isDutyExcludedForNewOffice(tableOrCode: { id?: string; dutyCode?: string } | string): boolean {
+  if (isDefault155UasuOffice()) return false;
+  if (typeof tableOrCode === 'string') {
+    const code = tableOrCode.trim();
+    return NEW_OFFICE_EXCLUDED_DUTY_IDS.has(code.toLowerCase()) || NEW_OFFICE_EXCLUDED_DUTY_CODES.has(code.toUpperCase());
+  }
+  const idLower = String(tableOrCode?.id || '').trim().toLowerCase();
+  const codeUpper = String(tableOrCode?.dutyCode || '').trim().toUpperCase();
+  return NEW_OFFICE_EXCLUDED_DUTY_IDS.has(idLower) || NEW_OFFICE_EXCLUDED_DUTY_CODES.has(codeUpper);
+}
+
 export function getInitialDutyMatrixForActiveOffice(): DutyRatioTable[] {
   if (isDefault155UasuOffice()) {
     return INITIAL_OFFICIAL_DUTY_MATRIX.map((t) => ({
@@ -296,19 +318,30 @@ export function getInitialDutyMatrixForActiveOffice(): DutyRatioTable[] {
       },
     }));
   }
-  // Brand-new office: keep the table format & columns, start all daily quotas at 0
-  return INITIAL_OFFICIAL_DUTY_MATRIX.map((t) => ({
-    ...t,
-    totalRequiredMonth: 0,
-    totalRequiredDaily: 0,
-    dailyRequirements: t.dailyRequirements ? Array(31).fill(0) : undefined,
-    data: {
-      Mechanics: Array(31).fill(0),
-      Avionics: Array(31).fill(0),
-      GCS: Array(31).fill(0),
-      Admin: Array(31).fill(0),
-    },
-  }));
+  // Brand-new office: include only the 5 standard duties (Base Security Duty, Base Taskforce Duty, Najirpara Taskforce Duty, Airfield Duty, Halishahar Duty)
+  const newOfficeTitles: Record<string, string> = {
+    security_duty: 'BASE SECURITY DUTY',
+    base_tf: 'BASE TASKFORCE DUTY',
+    nazirpara_tf: 'NAJIRPARA TASKFORCE DUTY',
+    airport_duty: 'AIRFIELD DUTY',
+    halishahar_tf_duty: 'HALISHAHAR DUTY',
+  };
+  return INITIAL_OFFICIAL_DUTY_MATRIX
+    .filter((t) => !isDutyExcludedForNewOffice(t))
+    .map((t, idx) => ({
+      ...t,
+      serNo: idx + 1,
+      title: newOfficeTitles[t.id] || t.title,
+      totalRequiredMonth: 0,
+      totalRequiredDaily: 0,
+      dailyRequirements: t.dailyRequirements ? Array(31).fill(0) : undefined,
+      data: {
+        Mechanics: Array(31).fill(0),
+        Avionics: Array(31).fill(0),
+        GCS: Array(31).fill(0),
+        Admin: Array(31).fill(0),
+      },
+    }));
 }
 
 export function normalizeDateToISOStr(val: any): string {
@@ -383,7 +416,9 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
         const defaultsMap = new Map(activeDefaults.map((t) => [t.id, t]));
-        const updatedParsed = parsed.map((t: DutyRatioTable) => {
+        const updatedParsed = parsed
+          .filter((t: DutyRatioTable) => !isDutyExcludedForNewOffice(t))
+          .map((t: DutyRatioTable) => {
           const defT = defaultsMap.get(t.id);
           let title = t.title || defT?.title || '';
           if (defT) {
@@ -399,7 +434,8 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
               cleanT === 'idacmor31' ||
               cleanT === 'idacan31' ||
               cleanT === 'idacnt62' ||
-              cleanT === 'halishahartf'
+              cleanT === 'halishahartf' ||
+              (!isDefault155UasuOffice() && (cleanT === 'halishahartaskforceduty' || cleanT === 'nazirparataskforceduty'))
             ) {
               title = defT.title;
             }
@@ -432,11 +468,14 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
         const officialIds = new Set(activeDefaults.map(t => t.id));
         
         let finalMatrix: DutyRatioTable[] = updatedParsed.filter(t =>
-          officialIds.has(t.id) ||
-          validCustomKeys.has(t.id) ||
-          validCustomKeys.has(String(t.id || '').toLowerCase()) ||
-          validCustomKeys.has(String(t.dutyCode || '')) ||
-          validCustomKeys.has(String(t.dutyCode || '').toLowerCase())
+          !isDutyExcludedForNewOffice(t) &&
+          (
+            officialIds.has(t.id) ||
+            validCustomKeys.has(t.id) ||
+            validCustomKeys.has(String(t.id || '').toLowerCase()) ||
+            validCustomKeys.has(String(t.dutyCode || '')) ||
+            validCustomKeys.has(String(t.dutyCode || '').toLowerCase())
+          )
         );
         
         if (missing.length > 0) {
@@ -620,6 +659,15 @@ export function getDutyRatioHistory(): DutyRatioVersion[] {
           if (item && item.title && (item.title === 'Base Duty Ratio' || item.title === 'Base Duty Ratio (Default)' || item.title.startsWith('Base Duty Ratio'))) {
             item.title = 'All Duty Ratio';
             hasModified = true;
+          }
+          if (item && Array.isArray(item.matrix) && !isDefault155UasuOffice()) {
+            const beforeLen = item.matrix.length;
+            item.matrix = item.matrix
+              .filter((t: DutyRatioTable) => !isDutyExcludedForNewOffice(t))
+              .map((t: DutyRatioTable, idx: number) => ({ ...t, serNo: idx + 1 }));
+            if (item.matrix.length !== beforeLen) {
+              hasModified = true;
+            }
           }
         });
         if (hasModified) {

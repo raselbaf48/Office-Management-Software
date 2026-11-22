@@ -13,7 +13,7 @@ import { formatShortDate, normalizeDateToISO } from '../utils/csvExport';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { getActiveOfficeIdentity, isDefault155UasuOffice, doesOfficeHaveFlights } from '../firebase';
-import { getAvailableTrades } from '../utils/tradeList';
+import { getBiodataTrades } from '../utils/tradeList';
 interface NominalRollProps {
   variant?: 'nominal' | 'biodata';
   airmen: Airman[];
@@ -46,7 +46,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
   const [rankFilter, setRankFilter] = useState<Rank | 'All' | ''>('All');
   const [statusFilter, setStatusFilter] = useState<'Total' | 'Active' | 'Previous Airmen'>('Active');
   const officeHasFlights = doesOfficeHaveFlights(airmen);
-  const tradesList = ['All', ...getAvailableTrades(airmen.map((a) => a.trade || ''))];
+  const tradesList = ['All', ...getBiodataTrades(airmen)];
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);

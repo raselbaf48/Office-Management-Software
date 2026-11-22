@@ -10,7 +10,7 @@ import { EntryHistoryModal } from './EntryHistoryModal';
 import { getAirmanDisposalForRange, matchAirmanId } from '../utils/airmanDisposalHelper';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
-import { getAvailableTrades } from '../utils/tradeList';
+import { getBiodataTrades } from '../utils/tradeList';
 interface DeploymentRegisterViewProps {
   role?: UserRole;
   airmen: Airman[];
@@ -38,7 +38,7 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
 }) => {
   const airmen = React.useMemo(() => rawAirmen.filter(a => a.active !== false), [rawAirmen]);
   const hasFlights = React.useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
-  const availableTrades = React.useMemo(() => getAvailableTrades(airmen.map(a => a.trade || '')), [airmen]);
+  const availableTrades = React.useMemo(() => getBiodataTrades(airmen), [airmen]);
   const session = getCurrentUserSession();
   const isAdmin = session?.assignedRole === 'ADMIN';
   const isSuperAdmin = (role === 'SUPER_ADMIN' || role === 'OWNER');

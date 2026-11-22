@@ -8,6 +8,8 @@ import { localDb } from '../services/localDatabase';
 import { getAirmanDisposalForRange, AirmanDisposalStatus } from '../utils/airmanDisposalHelper';
 
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
+import { doesOfficeHaveFlights } from '../firebase';
+import { getBiodataTrades } from '../utils/tradeList';
 
 interface AssignDeploymentTabProps {
   airmen: Airman[];
@@ -32,8 +34,14 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
   const isSuperAdmin = ((session?.assignedRole === 'SUPER_ADMIN' || session?.assignedRole === 'OWNER') || session?.assignedRole === 'OWNER');
   const todayStr = new Date().toISOString().split('T')[0];
 
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const unitGroupOptions = useMemo<FlightName[]>(() => {
+    if (officeHasFlights) return ['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[];
+    return getBiodataTrades(airmen) as unknown as FlightName[];
+  }, [officeHasFlights, airmen]);
+
   const [deploymentFlight, setDeploymentFlight] = useState<FlightName>(
-    initialFlight || (isAdmin && adminFlight ? adminFlight : 'Avionics')
+    initialFlight || (isAdmin && adminFlight ? adminFlight : (unitGroupOptions[0] || ('Avionics' as FlightName)))
   );
   const [deploymentAirmanId, setDeploymentAirmanId] = useState<string>('');
   const [deploymentFromDate, setDeploymentFromDate] = useState<string>(initialFromDate || todayStr);
@@ -47,16 +55,18 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
   const [deploymentSuccessMsg, setDeploymentSuccessMsg] = useState<string>('');
 
   useEffect(() => {
-    if (isAdmin && adminFlight) {
+    if (isAdmin && adminFlight && officeHasFlights) {
       setDeploymentFlight(adminFlight);
+    } else if (!officeHasFlights && unitGroupOptions.length > 0 && !unitGroupOptions.includes(deploymentFlight)) {
+      setDeploymentFlight(unitGroupOptions[0]);
     }
-  }, [isAdmin, adminFlight]);
+  }, [isAdmin, adminFlight, officeHasFlights, unitGroupOptions, deploymentFlight]);
 
   const deploymentAirmenList = useMemo(() => {
     return sortAirmenBySeniority(
       airmen.filter(
         (a) =>
-          a.flightName === deploymentFlight &&
+          (officeHasFlights ? a.flightName === deploymentFlight : (a.trade === deploymentFlight || a.flightName === deploymentFlight)) &&
           a.active !== false &&
           !['posted out', 'retired', 'dismissed', 'inactive'].includes(
             String((a as any).leaveReason || (a as any).status || '').toLowerCase().trim()
@@ -65,7 +75,7 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
           (!a.dateJoined || a.dateJoined <= deploymentFromDate)
       )
     );
-  }, [airmen, deploymentFlight, deploymentFromDate]);
+  }, [airmen, deploymentFlight, deploymentFromDate, officeHasFlights]);
 
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, DutyAssignment[]>>(() => {
     return localDb.getDb()?.assignments || {};
@@ -207,14 +217,14 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
         )}
 
         <form onSubmit={handleGrantDeploymentSubmit} className="space-y-4">
-          {/* Flight Filter Selector */}
+          {/* Flight/Trade Filter Selector */}
           <div>
             <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-              Flight
+              {officeHasFlights ? 'Flight' : 'Trade'}
             </label>
             <div className="grid grid-cols-4 gap-1.5">
-              {(['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]).map((flt) => {
-                const isDisabledFlt = (isAdmin && adminFlight && flt !== adminFlight);
+              {unitGroupOptions.map((flt) => {
+                const isDisabledFlt = (officeHasFlights && isAdmin && adminFlight && flt !== adminFlight);
                 return (
                   <button
                     key={flt}

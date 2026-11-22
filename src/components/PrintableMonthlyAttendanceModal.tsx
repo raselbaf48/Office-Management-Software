@@ -13,8 +13,9 @@ import {
   getAirmanLeftDateISO,
   isAirmanInUnitForMonth,
 } from '../utils/csvExport';
-import { getActiveOfficeIdentity } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
 import { localDb } from '../services/localDatabase';
+import { getBiodataTrades } from '../utils/tradeList';
 
 interface PrintableMonthlyAttendanceModalProps {
   isOpen: boolean;
@@ -37,10 +38,12 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   flightFilter = 'All',
   onMonthChange,
 }) => {
+  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
+  const biodataTrades = useMemo(() => getBiodataTrades(airmen), [airmen]);
   const [selectedYear, setSelectedYear] = useState<number>(year);
   const [selectedMonth, setSelectedMonth] = useState<number>(month);
   const [selectedFlight, setSelectedFlight] = useState<string>(
-    flightFilter === 'All' ? 'All' : formatFlightFullName(flightFilter)
+    flightFilter === 'All' ? 'All' : (officeHasFlights ? formatFlightFullName(flightFilter) : flightFilter)
   );
   const [selectedRank, setSelectedRank] = useState<string>('All');
   const [dbRefreshTick, setDbRefreshTick] = useState<number>(0);
@@ -52,11 +55,11 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
 
   useEffect(() => {
     if (flightFilter && flightFilter !== 'All') {
-      setSelectedFlight(formatFlightFullName(flightFilter));
+      setSelectedFlight(officeHasFlights ? formatFlightFullName(flightFilter) : flightFilter);
     } else if (flightFilter === 'All') {
       setSelectedFlight('All');
     }
-  }, [flightFilter]);
+  }, [flightFilter, officeHasFlights]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -144,8 +147,12 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
         return false;
       }
       if (selectedFlight !== 'All') {
-        const fltFull = formatFlightFullName(a.flightName);
-        if (fltFull !== selectedFlight && a.flightName !== selectedFlight) return false;
+        if (officeHasFlights) {
+          const fltFull = formatFlightFullName(a.flightName);
+          if (fltFull !== selectedFlight && a.flightName !== selectedFlight) return false;
+        } else {
+          if (a.trade !== selectedFlight && a.flightName !== selectedFlight) return false;
+        }
       }
       if (selectedRank !== 'All') {
         const selectedTier = getRankTier(selectedRank);
@@ -154,7 +161,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       }
       return true;
     });
-  }, [airmen, selectedFlight, selectedRank, selectedYear, selectedMonth]);
+  }, [airmen, selectedFlight, selectedRank, selectedYear, selectedMonth, officeHasFlights]);
 
   const assignmentMap = useMemo(() => {
     const map = new Map<string, DutyAssignment>();
@@ -395,19 +402,29 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
             </button>
           </div>
 
-          {/* Flight Dropdown */}
+          {/* Flight/Trade Dropdown */}
           <div className="flex items-center space-x-1">
-            <label className="text-[11px] text-slate-400 font-medium">Flt:</label>
+            <label className="text-[11px] text-slate-400 font-medium">{officeHasFlights ? 'Flt:' : 'Trade:'}</label>
             <select
               value={selectedFlight}
               onChange={(e) => setSelectedFlight(e.target.value)}
               className="bg-slate-900 text-xs font-bold text-white border border-slate-600 rounded-lg px-2 py-1 outline-hidden focus:border-emerald-500 cursor-pointer"
             >
-              <option value="All">All Flights</option>
-              <option value="Admin">Admin</option>
-              <option value="Mechanics">Mechanics</option>
-              <option value="Avionics">Avionics</option>
-              <option value="GCS">GCS</option>
+              <option value="All">{officeHasFlights ? 'All Flights' : 'All Trades'}</option>
+              {officeHasFlights ? (
+                <>
+                  <option value="Admin">Admin</option>
+                  <option value="Mechanics">Mechanics</option>
+                  <option value="Avionics">Avionics</option>
+                  <option value="GCS">GCS</option>
+                </>
+              ) : (
+                biodataTrades.map((tr) => (
+                  <option key={tr} value={tr}>
+                    {tr}
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
