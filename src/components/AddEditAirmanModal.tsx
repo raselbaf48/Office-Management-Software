@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Airman, FlightName, Rank } from '../types';
-import { X, Check, Building2, Home, MapPin, User, Phone, Shield, AlertCircle, Mail } from 'lucide-react';
+import { X, Check, Building2, Home, MapPin, User, Phone, Shield, AlertCircle, Mail, Trash2 } from 'lucide-react';
 import { getRankSeniorityRange, resolveTargetSeniority, isJcoRank } from '../utils/seniority';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { getActiveOfficeIdentity, isDefault155UasuOffice, doesOfficeHaveFlights, findOfficeByUserId } from '../firebase';
@@ -11,6 +11,7 @@ interface AddEditAirmanModalProps {
   airmanToEdit?: Airman | null;
   existingAirmen?: Airman[];
   onSave: (airmanData: Partial<Airman>) => void;
+  onRemoveAirman?: (airmanId: string) => void;
   onClose: () => void;
 }
 
@@ -19,6 +20,7 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   airmanToEdit,
   existingAirmen = [],
   onSave,
+  onRemoveAirman,
   onClose,
 }) => {
   const initialMatch = useMemo(() => {
@@ -86,6 +88,14 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     return '';
   });
   const [validationError, setValidationError] = useState<string>('');
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState<boolean>(false);
+
+  const canRemoveAirman = Boolean(
+    airmanToEdit &&
+      onRemoveAirman &&
+      String(airmanToEdit.bdNo || '').replace(/\D/g, '') !== '48456' &&
+      !airmanToEdit.isProtected
+  );
 
   const rankRange = useMemo(() => {
     const effectiveRank = rank || airmanToEdit?.rank || 'LAC';
@@ -321,12 +331,15 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
               <p className="text-xs text-emerald-300/80">{getActiveOfficeIdentity().officeName} • Personnel Registry</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center space-x-1.5">
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Form Body */}
@@ -916,24 +929,86 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
           
 
           {/* Modal Footer Buttons */}
-          <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-end space-x-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2.5 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center space-x-1.5 transition-all cursor-pointer"
-            >
-              <Check className="w-4 h-4" />
-              <span>{airmanToEdit ? 'Update Airman' : `Add to ${variant === 'biodata' ? 'Biodata Register' : 'Nominal Roll'}`}</span>
-            </button>
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+            <div>
+              {canRemoveAirman && (
+                <button
+                  type="button"
+                  onClick={() => setShowRemoveConfirm(true)}
+                  className="px-3.5 py-2.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-600 dark:text-red-400 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition-all cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Remove</span>
+                </button>
+              )}
+            </div>
+            <div className="flex items-center space-x-3">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center space-x-1.5 transition-all cursor-pointer"
+              >
+                <Check className="w-4 h-4" />
+                <span>{airmanToEdit ? 'Update Airman' : `Add to ${variant === 'biodata' ? 'Biodata Register' : 'Nominal Roll'}`}</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>
+
+      {/* Remove Confirmation Popup Modal */}
+      {showRemoveConfirm && airmanToEdit && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-red-200 dark:border-red-900/50 space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-red-500/15 border border-red-500/30 text-red-500 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Remove Airman?
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Are you sure you want to completely remove{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    {airmanToEdit.rank} {airmanToEdit.fullName || airmanToEdit.name}
+                  </strong>{' '}
+                  (BD/{airmanToEdit.bdNo})? This action cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2.5 justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRemoveConfirm(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onRemoveAirman) {
+                    onRemoveAirman(airmanToEdit.id);
+                  }
+                  setShowRemoveConfirm(false);
+                  onClose();
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 text-white shadow-sm shadow-red-600/20 flex items-center space-x-1.5 transition-all cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Confirm Remove</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -52,6 +52,7 @@ export function installApiInterceptor() {
         urlObj.pathname === '/api/analytics' ||
         urlObj.pathname === '/api/roster/history' ||
         urlObj.pathname === '/api/airmen' ||
+        urlObj.pathname.startsWith('/api/airmen/') ||
         urlObj.pathname === '/api/duty-types' ||
         urlObj.pathname === '/api/duty-assignments' ||
         urlObj.pathname.startsWith('/api/roster')
@@ -163,13 +164,16 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
     }
 
     if (pathname.startsWith('/api/airmen/')) {
-      const id = (pathname || "").replace('/api/airmen/', '');
+      const id = decodeURIComponent((pathname || "").replace('/api/airmen/', ''));
       if (method === 'PUT') {
         const updated = await localDb.updateAirman(id, body);
         return updated ? jsonResponse(updated) : jsonResponse({ error: 'Airman not found' }, 404);
       }
       if (method === 'DELETE') {
-        const target = localDb.db.airmen.find(a => a.id === id);
+        const cleanIdDigits = String(id || '').replace(/^BD\/?/i, '').replace(/\D/g, '');
+        const target = localDb.db.airmen.find(
+          (a) => a.id === id || (cleanIdDigits && String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '') === cleanIdDigits)
+        );
         const ok = localDb.deleteAirman(id);
         if (ok) {
            try {

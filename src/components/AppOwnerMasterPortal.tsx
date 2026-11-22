@@ -795,7 +795,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
           <div className="flex justify-center">
             <Logo155UASU
               size="lg"
-              logoOverride="/office-management-logo.png?v=15"
+              logoOverride="/office-management-logo.png?v=25"
               title="Master Control Center"
             />
           </div>
@@ -1580,10 +1580,10 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                             </div>
 
                             {/* Middle (Same Row): Requester Details */}
-                            <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 text-[11px]">
+                            <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 text-[11px]">
                               <div className="min-w-0">
                                 <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  User ID (BD No)
+                                  USER ID (BD NO)
                                 </p>
                                 <p className="font-mono font-black text-emerald-600 dark:text-emerald-400 truncate">
                                   BD/{req.bdNo}
@@ -1591,23 +1591,23 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                               </div>
                               <div className="min-w-0">
                                 <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  Full Name
+                                  RANK
                                 </p>
-                                <p className="font-bold text-slate-900 dark:text-white truncate" title={req.fullName}>
-                                  {req.fullName}
-                                </p>
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  Surname
-                                </p>
-                                <p className="font-bold text-slate-800 dark:text-slate-200 truncate">
-                                  {req.surname}
+                                <p className="font-bold text-slate-900 dark:text-white truncate">
+                                  {req.rank || 'LAC'}
                                 </p>
                               </div>
                               <div className="min-w-0">
                                 <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  Trade
+                                  NAME
+                                </p>
+                                <p className="font-bold text-slate-900 dark:text-white truncate" title={req.surname || req.fullName}>
+                                  {req.surname || req.fullName}
+                                </p>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
+                                  TRADE
                                 </p>
                                 <p className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 truncate">
                                   <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
@@ -1616,7 +1616,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                               </div>
                               <div className="min-w-0">
                                 <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  User Role
+                                  USER ROLE
                                 </p>
                                 <p className="font-black text-amber-600 dark:text-amber-400 truncate">
                                   {req.userRole === 'SUPER_ADMIN'
@@ -1628,7 +1628,15 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                               </div>
                               <div className="min-w-0">
                                 <p className="text-[9px] font-bold uppercase text-slate-400">
-                                  Contact No
+                                  PRESENT ADDRESS
+                                </p>
+                                <p className="font-semibold text-slate-700 dark:text-slate-300 truncate" title={req.presentAddress || req.officeBase}>
+                                  {req.presentAddress || req.officeBase || 'N/A'}
+                                </p>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
+                                  CONTACT NO
                                 </p>
                                 <p className="font-mono font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 truncate">
                                   <Phone className="w-3 h-3 text-slate-400 shrink-0" />

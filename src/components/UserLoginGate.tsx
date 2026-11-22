@@ -58,7 +58,12 @@ import {
   isOfficeDisabled,
 } from '../firebase';
 import { localDb } from '../services/localDatabase';
-import { getAvailableTrades, addCustomTradeToList } from '../utils/tradeList';
+import {
+  getAvailableTrades,
+  addCustomTradeToList,
+  getAvailableBases,
+  addCustomBaseToList,
+} from '../utils/tradeList';
 
 import { AppUpdateModal } from './AppUpdateModal';
 
@@ -243,16 +248,27 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   // Step 1: Office Info (all empty by default)
   const [regUnit, setRegUnit] = useState<string>('');
   const [regBase, setRegBase] = useState<string>('');
+  const [regCustomBase, setRegCustomBase] = useState<string>('');
+  const [availableBases, setAvailableBases] = useState<string[]>(() => getAvailableBases());
   const [regSlogan, setRegSlogan] = useState<string>('');
-  const [regLogo, setRegLogo] = useState<string>('/office-management-logo.png?v=15');
-  // Step 2: User Info (ONLY the 6 requested fields, all empty by default)
+  const [regLogo, setRegLogo] = useState<string>('/office-management-logo.png?v=25');
+  // Step 2: User Info (USER ID (BD NO), RANK, NAME, TRADE, USER ROLE, PRESENT ADDRESS, CONTACT NO)
   const [regBdNo, setRegBdNo] = useState<string>('');
-  const [regFullName, setRegFullName] = useState<string>('');
-  const [regSurname, setRegSurname] = useState<string>('');
+  const [regRank, setRegRank] = useState<Rank | ''>('');
+  const [regName, setRegName] = useState<string>('');
   const [regTrade, setRegTrade] = useState<string>('');
   const [regCustomTrade, setRegCustomTrade] = useState<string>('');
   const [availableTrades, setAvailableTrades] = useState<string[]>(() => getAvailableTrades());
   const [regUserRole, setRegUserRole] = useState<string>('');
+  const [regPin, setRegPin] = useState<string>('');
+  const [isRegPinCustom, setIsRegPinCustom] = useState<boolean>(false);
+  const [isRegAddressOpen, setIsRegAddressOpen] = useState<boolean>(false);
+  const [regLivingType, setRegLivingType] = useState<'L_IN' | 'L_OUT' | ''>('');
+  const [regMessType, setRegMessType] = useState<"Sgt's Mess" | "Airmen's Mess" | ''>('');
+  const [regBlockNo, setRegBlockNo] = useState<string>('');
+  const [regLivingOutType, setRegLivingOutType] = useState<'INSIDE_BASE' | 'OUTSIDE_BASE' | ''>('');
+  const [regSvcQtrNo, setRegSvcQtrNo] = useState<string>('');
+  const [regOutsideBaseAddr, setRegOutsideBaseAddr] = useState<string>('');
   const [regContactNo, setRegContactNo] = useState<string>('');
   const [isRegistering, setIsRegistering] = useState<boolean>(false);
   const [submittedRequestRecord, setSubmittedRequestRecord] = useState<PendingOfficeRegistrationRequest | null>(null);
@@ -329,7 +345,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   const displayedOfficeLogo = useMemo(() => {
-    if (!cleanTypedBd) return '/office-management-logo.png?v=15';
+    if (!cleanTypedBd) return '/office-management-logo.png?v=25';
     if (isMasterUserTyped) {
       return selectedMasterOffice?.officeLogo || '/155-uasu-baf-logo.png';
     }
@@ -339,12 +355,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     if (matchedPendingRequest?.officeLogo) {
       return matchedPendingRequest.officeLogo;
     }
-    return '/office-management-logo.png?v=15';
+    return '/office-management-logo.png?v=25';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   // While on Login Portal (unauthenticated), keep Browser Address Bar synced to Default Office Management Application
   useEffect(() => {
-    syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
   }, []);
 
   const displayedOfficeSubtitle = useMemo(() => {
@@ -899,7 +915,8 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   };
 
   // Step-by-Step Navigation & Live Validations for Register a New Office
-  const resolvedRegUnitName = regUnit.trim();
+  const resolvedRegUnitName = regUnit.trim().toUpperCase();
+  const resolvedRegBase = (regBase === '__CUSTOM__' ? regCustomBase : regBase).trim();
 
   const isRegOfficeDuplicate = useMemo(() => {
     if (!resolvedRegUnitName) return false;
@@ -926,7 +943,27 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, [cleanRegBdDigits, airmen, directoryTick]);
 
   const resolvedRegTrade = (regTrade === '__CUSTOM__' ? regCustomTrade : regTrade).trim();
+  const resolvedRegPin = (isRegPinCustom ? regPin : regPin || cleanRegBdDigits).trim();
   const isRegContactValid = /^01\d{9}$/.test(regContactNo.trim());
+  const regRanksList: Rank[] = ['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2'];
+
+  const resolvedRegPresentAddress = useMemo(() => {
+    if (regLivingType === 'L_IN') {
+      if (!regMessType) return '';
+      const cleanBlk = regBlockNo.trim();
+      return cleanBlk ? `${regMessType}, Block No: ${cleanBlk}` : regMessType;
+    }
+    if (regLivingType === 'L_OUT') {
+      if (regLivingOutType === 'INSIDE_BASE') {
+        const cleanQtr = regSvcQtrNo.trim();
+        return cleanQtr ? `Svc Qtr No: ${cleanQtr}` : '';
+      }
+      if (regLivingOutType === 'OUTSIDE_BASE') {
+        return regOutsideBaseAddr.trim();
+      }
+    }
+    return '';
+  }, [regLivingType, regMessType, regBlockNo, regLivingOutType, regSvcQtrNo, regOutsideBaseAddr]);
 
   const formatUserRoleLabel = (roleValue: string) => {
     if (roleValue === 'SUPER_ADMIN') return 'Super Admin';
@@ -941,16 +978,23 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
     if (registerStep === 1) {
       if (!resolvedRegUnitName) {
-        setErrorMsg('Please enter Office Name.');
+        setErrorMsg('Please enter OFFICE NAME.');
         return;
       }
       if (isRegOfficeDuplicate) {
         setErrorMsg('Already Registered: This Office Name is already registered.');
         return;
       }
-      if (!regBase.trim()) {
-        setErrorMsg('Please enter BASE name.');
+      if (!resolvedRegBase) {
+        setErrorMsg(regBase === '__CUSTOM__' ? 'Please enter Custom Base name.' : 'Please select BASE.');
         return;
+      }
+      if (regBase === '__CUSTOM__' && regCustomBase.trim()) {
+        const finalCustomBase = regCustomBase.trim().toUpperCase();
+        const updatedBases = addCustomBaseToList(finalCustomBase);
+        setAvailableBases(updatedBases);
+        setRegBase(finalCustomBase);
+        setRegCustomBase('');
       }
       setRegisterStep(2);
       return;
@@ -958,7 +1002,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
 
     if (registerStep === 2) {
       if (!cleanRegBdDigits) {
-        setErrorMsg('Please enter User ID (BD No).');
+        setErrorMsg('Please enter USER ID (BD NO).');
         return;
       }
       if (existingActiveMemberOffice) {
@@ -967,25 +1011,63 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         );
         return;
       }
-      if (!regFullName.trim()) {
-        setErrorMsg('Please enter Full Name.');
+      if (!regRank) {
+        setErrorMsg('Please select RANK.');
         return;
       }
-      if (!regSurname.trim()) {
-        setErrorMsg('Please enter Surname.');
+      if (!regName.trim()) {
+        setErrorMsg('Please enter NAME.');
         return;
       }
       if (!resolvedRegTrade) {
-        setErrorMsg(regTrade === '__CUSTOM__' ? 'Please enter Custom Trade name.' : 'Please select Trade.');
+        setErrorMsg(regTrade === '__CUSTOM__' ? 'Please enter Custom Trade name.' : 'Please select TRADE.');
         return;
       }
       if (!regUserRole.trim()) {
-        setErrorMsg('Please select User Role.');
+        setErrorMsg('Please select USER ROLE.');
+        return;
+      }
+      if (!resolvedRegPin) {
+        setErrorMsg('Please enter PIN.');
         return;
       }
       if (!isRegContactValid) {
-        setErrorMsg('Contact No must be 11 digits and start with 01.');
+        setErrorMsg('CONTACT NO must be 11 digits and start with 01.');
         return;
+      }
+      if (!regLivingType) {
+        setErrorMsg('Please select PRESENT ADDRESS (Living In or Living Out).');
+        setIsRegAddressOpen(true);
+        return;
+      }
+      if (regLivingType === 'L_IN') {
+        if (!regMessType) {
+          setErrorMsg("Please select Sgt's Mess or Airmen's Mess under Living In.");
+          setIsRegAddressOpen(true);
+          return;
+        }
+        if (regMessType === "Airmen's Mess" && !regBlockNo.trim()) {
+          setErrorMsg("Please enter Block No under Airmen's Mess.");
+          setIsRegAddressOpen(true);
+          return;
+        }
+      }
+      if (regLivingType === 'L_OUT') {
+        if (!regLivingOutType) {
+          setErrorMsg('Please select Inside Base or Outside Base under Living Out.');
+          setIsRegAddressOpen(true);
+          return;
+        }
+        if (regLivingOutType === 'INSIDE_BASE' && !regSvcQtrNo.trim()) {
+          setErrorMsg('Please enter Svc Qtr No under Inside Base.');
+          setIsRegAddressOpen(true);
+          return;
+        }
+        if (regLivingOutType === 'OUTSIDE_BASE' && !regOutsideBaseAddr.trim()) {
+          setErrorMsg('Please enter Outside Base address.');
+          setIsRegAddressOpen(true);
+          return;
+        }
       }
 
       // If a Custom Trade was entered, persist it to the end of the Trade list and select it
@@ -1032,21 +1114,28 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         setAvailableTrades(updatedList);
       }
 
+      const cleanName = regName.trim();
+      const finalBase = (resolvedRegBase || 'BAF BASE ZHR').toUpperCase();
+      if (regBase === '__CUSTOM__' && regCustomBase.trim()) {
+        const updatedBases = addCustomBaseToList(finalBase);
+        setAvailableBases(updatedBases);
+      }
       const request = await submitOfficeRegistrationRequest({
         officeName: resolvedRegUnitName,
         wing: '',
-        officeBase: regBase.trim(),
+        officeBase: finalBase,
         officeSlogan: regSlogan.trim(),
-        officeLogo: regLogo || '/office-management-logo.png?v=15',
+        officeLogo: regLogo || '/office-management-logo.png?v=25',
         bdNo: cleanRegBdDigits,
-        rank: 'LAC' as Rank,
-        fullName: regFullName.trim(),
-        surname: regSurname.trim(),
+        rank: (regRank || 'LAC') as Rank,
+        fullName: cleanName,
+        surname: cleanName,
         trade: finalTrade,
         flightName: '' as FlightName,
         userRole: (regUserRole.trim() || 'SUPER_ADMIN') as UserRole,
+        presentAddress: resolvedRegPresentAddress || finalBase,
         contactNo: regContactNo.trim(),
-        pin: cleanRegBdDigits,
+        pin: resolvedRegPin || cleanRegBdDigits,
       });
 
       await loadOfficesAndPendingRequests();
@@ -1115,7 +1204,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                     ? registerStep === 1
                       ? 'Step 1: Office Information (Office Name, Base, Slogan & Logo)'
                       : registerStep === 2
-                      ? 'Step 2: User Information (User ID, Full Name, Surname, Trade, User Role, Contact No)'
+                      ? 'Step 2: User Information (USER ID (BD NO), RANK, NAME, TRADE, USER ROLE, PIN, CONTACT NO, PRESENT ADDRESS)'
                       : registerStep === 3
                       ? 'Step 3: Review & Submit for Master Admin Approval'
                       : 'Registration Request Submitted for Approval'
@@ -1255,7 +1344,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-                      {/* Box: Office Name (Plain Text Input, Mandatory, Live Duplicate Check) */}
+                      {/* Box: OFFICE NAME (ALL CAPITAL LETTERS, Mandatory, Live Duplicate Check) */}
                       {(() => {
                         const isFocused = focusedRegField === 'regUnit';
                         const isFloating = isFocused || regUnit.trim().length > 0;
@@ -1267,14 +1356,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                 type="text"
                                 value={regUnit}
                                 onChange={(e) => {
-                                  setRegUnit(e.target.value);
+                                  setRegUnit(e.target.value.toUpperCase());
                                   setErrorMsg('');
                                 }}
                                 onFocus={() => setFocusedRegField('regUnit')}
                                 onBlur={() => setFocusedRegField((prev) => (prev === 'regUnit' ? null : prev))}
                                 placeholder=""
                                 required
-                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold uppercase text-slate-900 dark:text-white outline-none transition-all duration-200 ${
                                   isRegOfficeDuplicate
                                     ? 'border-red-500 ring-2 ring-red-500/20'
                                     : isFocused
@@ -1284,9 +1373,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               />
                               <label
                                 htmlFor="reg-office-name"
-                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                   isFloating
-                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                       (isRegOfficeDuplicate
                                         ? 'text-red-500 dark:text-red-400'
                                         : isFocused
@@ -1295,7 +1384,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                     : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                                 }`}
                               >
-                                Office Name *
+                                OFFICE NAME *
                               </label>
                             </div>
                             {isRegOfficeDuplicate && (
@@ -1308,15 +1397,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         );
                       })()}
 
-                      {/* Box: BASE (Mandatory) */}
+                      {/* Box: BASE (Dropdown List: BAF BASE AKR, BSR, ZHR, MTR, CXB, SMD + Custom) */}
                       {(() => {
                         const isFocused = focusedRegField === 'regBase';
                         const isFloating = isFocused || regBase.trim().length > 0;
                         return (
                           <div className="relative">
-                            <input
+                            <select
                               id="reg-base"
-                              type="text"
                               value={regBase}
                               onChange={(e) => {
                                 setRegBase(e.target.value);
@@ -1324,19 +1412,37 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               }}
                               onFocus={() => setFocusedRegField('regBase')}
                               onBlur={() => setFocusedRegField((prev) => (prev === 'regBase' ? null : prev))}
-                              placeholder=""
                               required
-                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold outline-none transition-all duration-200 cursor-pointer ${
+                                !regBase ? 'text-transparent' : 'text-slate-900 dark:text-white'
+                              } ${
                                 isFocused
                                   ? 'border-emerald-500 ring-2 ring-emerald-500/20'
                                   : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
                               }`}
-                            />
+                            >
+                              <option value="" disabled hidden></option>
+                              {availableBases.map((b) => (
+                                <option
+                                  key={b}
+                                  value={b}
+                                  className="text-slate-900 dark:text-white bg-white dark:bg-slate-900"
+                                >
+                                  {b}
+                                </option>
+                              ))}
+                              <option
+                                value="__CUSTOM__"
+                                className="text-emerald-600 dark:text-emerald-400 font-bold bg-white dark:bg-slate-900"
+                              >
+                                Custom
+                              </option>
+                            </select>
                             <label
                               htmlFor="reg-base"
-                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                 isFloating
-                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                     (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
                                   : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                               }`}
@@ -1346,6 +1452,55 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                           </div>
                         );
                       })()}
+
+                      {/* Custom Base Input (Appears when Custom is chosen in Base dropdown) */}
+                      {regBase === '__CUSTOM__' &&
+                        (() => {
+                          const isFocused = focusedRegField === 'regCustomBase';
+                          const isFloating = isFocused || regCustomBase.trim().length > 0;
+                          return (
+                            <div className="relative sm:col-span-2">
+                              <input
+                                id="reg-custom-base"
+                                type="text"
+                                value={regCustomBase}
+                                onChange={(e) => {
+                                  setRegCustomBase(e.target.value.toUpperCase());
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regCustomBase')}
+                                onBlur={() => {
+                                  setFocusedRegField((prev) => (prev === 'regCustomBase' ? null : prev));
+                                  if (regCustomBase.trim()) {
+                                    const saved = regCustomBase.trim().toUpperCase();
+                                    const nextBases = addCustomBaseToList(saved);
+                                    setAvailableBases(nextBases);
+                                    setRegBase(saved);
+                                    setRegCustomBase('');
+                                  }
+                                }}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold uppercase text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-custom-base"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                CUSTOM BASE *
+                              </label>
+                            </div>
+                          );
+                        })()}
                     </div>
 
                     {/* Box: OFFICE SLOGAN */}
@@ -1444,7 +1599,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                 </form>
               )}
 
-              {/* STEP 2: USER INFORMATION (EXACTLY 6 FLOATING-LABEL BOXES, NO DEFAULTS) */}
+              {/* STEP 2: USER INFORMATION (ALL CAPITAL LETTER LABELS & PRESENT ADDRESS BUILDER) */}
               {registerStep === 2 && (
                 <form onSubmit={handleRegisterStepNext} className="space-y-3.5">
                   <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#070b14]/90 border border-slate-200 dark:border-slate-800 space-y-3.5">
@@ -1453,14 +1608,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         <UserCheck className="w-4 h-4" />
                         <span>Step 2: User Information</span>
                       </div>
-                      <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                      <span className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400">
                         {resolvedRegUnitName}
                       </span>
                     </div>
 
-                    {/* 6 Floating-Label Boxes (Login Portal Style) */}
+                    {/* 7 Floating-Label Boxes (ALL CAPITAL LETTERS) */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-                      {/* 1. User ID (BD No) - Cannot match an Active member in any existing office */}
+                      {/* 1. USER ID (BD NO) */}
                       {(() => {
                         const isFocused = focusedRegField === 'regBdNo';
                         const isFloating = isFocused || regBdNo.trim().length > 0;
@@ -1474,7 +1629,11 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                 inputMode="numeric"
                                 value={regBdNo}
                                 onChange={(e) => {
-                                  setRegBdNo(e.target.value.replace(/[^0-9]/g, ''));
+                                  const nextBd = e.target.value.replace(/[^0-9]/g, '');
+                                  setRegBdNo(nextBd);
+                                  if (!isRegPinCustom) {
+                                    setRegPin(nextBd);
+                                  }
                                   setErrorMsg('');
                                 }}
                                 onFocus={() => setFocusedRegField('regBdNo')}
@@ -1491,9 +1650,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               />
                               <label
                                 htmlFor="reg-bd-no"
-                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                   isFloating
-                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                       (hasActiveConflict
                                         ? 'text-red-500 dark:text-red-400'
                                         : isFocused
@@ -1502,7 +1661,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                     : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                                 }`}
                               >
-                                User ID (BD No)
+                                USER ID (BD NO)
                               </label>
                             </div>
                             {hasActiveConflict && (
@@ -1515,19 +1674,80 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                         );
                       })()}
 
-                      {/* 2. Full Name */}
+                      {/* 2. RANK */}
                       {(() => {
-                        const isFocused = focusedRegField === 'regFullName';
-                        const isFloating = isFocused || regFullName.trim().length > 0;
+                        const isFocused = focusedRegField === 'regRank';
+                        const isFloating = isFocused || regRank.trim().length > 0;
+                        return (
+                          <div className="relative">
+                            <select
+                              id="reg-rank"
+                              value={regRank}
+                              onChange={(e) => {
+                                const nextRank = e.target.value as Rank;
+                                setRegRank(nextRank);
+                                if (regLivingType === 'L_IN' && !regMessType) {
+                                  setRegMessType(
+                                    ['MWO', 'SWO', 'WO', 'Sgt'].includes(nextRank)
+                                      ? "Sgt's Mess"
+                                      : "Airmen's Mess"
+                                  );
+                                }
+                                setErrorMsg('');
+                              }}
+                              onFocus={() => setFocusedRegField('regRank')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regRank' ? null : prev))}
+                              required
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold outline-none transition-all duration-200 cursor-pointer ${
+                                !regRank ? 'text-transparent' : 'text-slate-900 dark:text-white'
+                              } ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            >
+                              <option value="" disabled hidden></option>
+                              {regRanksList.map((r) => (
+                                <option
+                                  key={r}
+                                  value={r}
+                                  className="text-slate-900 dark:text-white bg-white dark:bg-slate-900"
+                                >
+                                  {r}
+                                </option>
+                              ))}
+                            </select>
+                            <label
+                              htmlFor="reg-rank"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              RANK
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* 3. NAME (Full Name removed as requested) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regName';
+                        const isFloating = isFocused || regName.trim().length > 0;
                         return (
                           <div className="relative">
                             <input
-                              id="reg-full-name"
+                              id="reg-name"
                               type="text"
-                              value={regFullName}
-                              onChange={(e) => setRegFullName(e.target.value)}
-                              onFocus={() => setFocusedRegField('regFullName')}
-                              onBlur={() => setFocusedRegField((prev) => (prev === 'regFullName' ? null : prev))}
+                              value={regName}
+                              onChange={(e) => {
+                                setRegName(e.target.value);
+                                setErrorMsg('');
+                              }}
+                              onFocus={() => setFocusedRegField('regName')}
+                              onBlur={() => setFocusedRegField((prev) => (prev === 'regName' ? null : prev))}
                               placeholder=""
                               required
                               className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
@@ -1537,57 +1757,21 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               }`}
                             />
                             <label
-                              htmlFor="reg-full-name"
-                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                              htmlFor="reg-name"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                 isFloating
-                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                     (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
                                   : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                               }`}
                             >
-                              Full Name
+                              NAME
                             </label>
                           </div>
                         );
                       })()}
 
-                      {/* 3. Surname */}
-                      {(() => {
-                        const isFocused = focusedRegField === 'regSurname';
-                        const isFloating = isFocused || regSurname.trim().length > 0;
-                        return (
-                          <div className="relative">
-                            <input
-                              id="reg-surname"
-                              type="text"
-                              value={regSurname}
-                              onChange={(e) => setRegSurname(e.target.value)}
-                              onFocus={() => setFocusedRegField('regSurname')}
-                              onBlur={() => setFocusedRegField((prev) => (prev === 'regSurname' ? null : prev))}
-                              placeholder=""
-                              required
-                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
-                                isFocused
-                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
-                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
-                              }`}
-                            />
-                            <label
-                              htmlFor="reg-surname"
-                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
-                                isFloating
-                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
-                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
-                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
-                              }`}
-                            >
-                              Surname
-                            </label>
-                          </div>
-                        );
-                      })()}
-
-                      {/* 4. Trade (Exact list from Pic 3 + Custom at bottom) */}
+                      {/* 4. TRADE */}
                       {(() => {
                         const isFocused = focusedRegField === 'regTrade';
                         const isFloating = isFocused || regTrade.trim().length > 0;
@@ -1630,14 +1814,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             </select>
                             <label
                               htmlFor="reg-trade"
-                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                 isFloating
-                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                     (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
                                   : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                               }`}
                             >
-                              Trade
+                              TRADE
                             </label>
                           </div>
                         );
@@ -1679,20 +1863,20 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               />
                               <label
                                 htmlFor="reg-custom-trade"
-                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                   isFloating
-                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                       (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
                                     : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                                 }`}
                               >
-                                Custom Trade Name
+                                CUSTOM TRADE NAME
                               </label>
                             </div>
                           );
                         })()}
 
-                      {/* 5. User Role (ONLY Super Admin, Admin, User - no extra text in parentheses) */}
+                      {/* 5. USER ROLE */}
                       {(() => {
                         const isFocused = focusedRegField === 'regUserRole';
                         const isFloating = isFocused || regUserRole.trim().length > 0;
@@ -1701,7 +1885,14 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             <select
                               id="reg-user-role"
                               value={regUserRole}
-                              onChange={(e) => setRegUserRole(e.target.value)}
+                              onChange={(e) => {
+                                const nextRole = e.target.value;
+                                setRegUserRole(nextRole);
+                                if (nextRole && !isRegPinCustom) {
+                                  setRegPin(cleanRegBdDigits);
+                                }
+                                setErrorMsg('');
+                              }}
                               onFocus={() => setFocusedRegField('regUserRole')}
                               onBlur={() => setFocusedRegField((prev) => (prev === 'regUserRole' ? null : prev))}
                               required
@@ -1720,26 +1911,68 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                             </select>
                             <label
                               htmlFor="reg-user-role"
-                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                 isFloating
-                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                     (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
                                   : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                               }`}
                             >
-                              User Role
+                              USER ROLE
                             </label>
                           </div>
                         );
                       })()}
 
-                      {/* 6. Contact No (Must be 11 digits starting with 01) */}
+                      {/* 6. PIN (Appears after USER ROLE is set; default pre-filled with User's BD No) */}
+                      {regUserRole.trim().length > 0 &&
+                        (() => {
+                          const isFocused = focusedRegField === 'regPin';
+                          const currentPinValue = isRegPinCustom ? regPin : regPin || cleanRegBdDigits;
+                          const isFloating = isFocused || currentPinValue.trim().length > 0;
+                          return (
+                            <div className="relative animate-fadeIn">
+                              <input
+                                id="reg-pin"
+                                type="text"
+                                value={currentPinValue}
+                                onChange={(e) => {
+                                  setIsRegPinCustom(true);
+                                  setRegPin(e.target.value);
+                                  setErrorMsg('');
+                                }}
+                                onFocus={() => setFocusedRegField('regPin')}
+                                onBlur={() => setFocusedRegField((prev) => (prev === 'regPin' ? null : prev))}
+                                placeholder=""
+                                required
+                                className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-mono font-bold text-slate-900 dark:text-white outline-none transition-all duration-200 ${
+                                  isFocused
+                                    ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                                }`}
+                              />
+                              <label
+                                htmlFor="reg-pin"
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
+                                  isFloating
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                      (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                    : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                                }`}
+                              >
+                                PIN
+                              </label>
+                            </div>
+                          );
+                        })()}
+
+                      {/* 7. CONTACT NO (Above PRESENT ADDRESS; must be 11 digits starting with 01) */}
                       {(() => {
                         const isFocused = focusedRegField === 'regContactNo';
                         const isFloating = isFocused || regContactNo.trim().length > 0;
                         const hasContactError = regContactNo.length > 0 && !isRegContactValid;
                         return (
-                          <div className="space-y-1">
+                          <div className={`space-y-1 ${regUserRole.trim().length > 0 ? 'sm:col-span-2' : ''}`}>
                             <div className="relative">
                               <input
                                 id="reg-contact-no"
@@ -1765,9 +1998,9 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                               />
                               <label
                                 htmlFor="reg-contact-no"
-                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none ${
+                                className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
                                   isFloating
-                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
                                       (hasContactError
                                         ? 'text-red-500 dark:text-red-400'
                                         : isFocused
@@ -1776,7 +2009,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                                     : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
                                 }`}
                               >
-                                Contact No
+                                CONTACT NO
                               </label>
                             </div>
                             {hasContactError && (
@@ -1788,6 +2021,235 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                           </div>
                         );
                       })()}
+
+                      {/* 8. PRESENT ADDRESS (Below CONTACT NO; Trigger Box) */}
+                      {(() => {
+                        const isFocused = focusedRegField === 'regPresentAddress' || isRegAddressOpen;
+                        const isFloating = isFocused || resolvedRegPresentAddress.length > 0 || regLivingType !== '';
+                        return (
+                          <div className="relative sm:col-span-2">
+                            <button
+                              id="reg-present-address"
+                              type="button"
+                              onClick={() => {
+                                setIsRegAddressOpen((prev) => !prev);
+                                setFocusedRegField('regPresentAddress');
+                                setErrorMsg('');
+                              }}
+                              className={`w-full bg-white dark:bg-slate-900 border rounded-xl px-3.5 py-3 text-xs font-bold text-left outline-none transition-all duration-200 flex items-center justify-between gap-2 cursor-pointer ${
+                                isFocused
+                                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                              }`}
+                            >
+                              <span
+                                className={`truncate ${
+                                  resolvedRegPresentAddress
+                                    ? 'text-slate-900 dark:text-white'
+                                    : regLivingType === 'L_IN'
+                                    ? 'text-slate-500 dark:text-slate-400'
+                                    : regLivingType === 'L_OUT'
+                                    ? 'text-slate-500 dark:text-slate-400'
+                                    : 'text-transparent'
+                                }`}
+                              >
+                                {resolvedRegPresentAddress ||
+                                  (regLivingType === 'L_IN'
+                                    ? regMessType || 'Living In'
+                                    : regLivingType === 'L_OUT'
+                                    ? regLivingOutType === 'INSIDE_BASE'
+                                      ? 'Inside Base'
+                                      : regLivingOutType === 'OUTSIDE_BASE'
+                                      ? 'Outside Base'
+                                      : 'Living Out'
+                                    : 'PRESENT ADDRESS')}
+                              </span>
+                              <ChevronRight
+                                className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform duration-200 ${
+                                  isRegAddressOpen ? 'rotate-90 text-emerald-500' : ''
+                                }`}
+                              />
+                            </button>
+                            <label
+                              htmlFor="reg-present-address"
+                              className={`absolute left-3.5 pointer-events-none transition-all duration-200 ease-out select-none uppercase ${
+                                isFloating
+                                  ? 'top-0 -translate-y-1/2 text-[10px] font-black tracking-wider px-1.5 bg-white dark:bg-slate-900 z-10 ' +
+                                    (isFocused ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400')
+                                  : 'top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wider bg-transparent'
+                              }`}
+                            >
+                              PRESENT ADDRESS
+                            </label>
+                          </div>
+                        );
+                      })()}
+
+                      {/* PRESENT ADDRESS EXPANDED PANEL (Living In / Living Out Options) */}
+                      {(isRegAddressOpen || regLivingType !== '') && (
+                        <div className="sm:col-span-2 p-3 rounded-xl bg-white dark:bg-slate-900/95 border border-emerald-500/40 space-y-2.5 animate-fadeIn">
+                          {/* Level 1: Living In vs Living Out */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRegLivingType('L_IN');
+                                if (!regMessType) {
+                                  setRegMessType(
+                                    ['MWO', 'SWO', 'WO', 'Sgt'].includes(regRank as Rank)
+                                      ? "Sgt's Mess"
+                                      : "Airmen's Mess"
+                                  );
+                                }
+                                setErrorMsg('');
+                              }}
+                              className={`py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer border ${
+                                regLivingType === 'L_IN'
+                                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                                  : 'bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-500/50'
+                              }`}
+                            >
+                              Living In
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRegLivingType('L_OUT');
+                                if (!regLivingOutType) {
+                                  setRegLivingOutType('INSIDE_BASE');
+                                }
+                                setErrorMsg('');
+                              }}
+                              className={`py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer border ${
+                                regLivingType === 'L_OUT'
+                                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                                  : 'bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-500/50'
+                              }`}
+                            >
+                              Living Out
+                            </button>
+                          </div>
+
+                          {/* Level 2A: Living In -> Sgt's Mess | Airmen's Mess -> Fixed "Block No:" input */}
+                          {regLivingType === 'L_IN' && (
+                            <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRegMessType("Sgt's Mess");
+                                    setErrorMsg('');
+                                  }}
+                                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                                    regMessType === "Sgt's Mess"
+                                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400'
+                                  }`}
+                                >
+                                  Sgt's Mess
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRegMessType("Airmen's Mess");
+                                    setErrorMsg('');
+                                  }}
+                                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                                    regMessType === "Airmen's Mess"
+                                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400'
+                                  }`}
+                                >
+                                  Airmen's Mess
+                                </button>
+                              </div>
+
+                              <div className="flex items-center w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20">
+                                <span className="text-xs font-black text-slate-500 dark:text-slate-400 mr-2 whitespace-nowrap select-none">
+                                  Block No:
+                                </span>
+                                <input
+                                  type="text"
+                                  value={regBlockNo}
+                                  onChange={(e) => {
+                                    setRegBlockNo(e.target.value);
+                                    setErrorMsg('');
+                                  }}
+                                  placeholder="123/12"
+                                  className="flex-1 bg-transparent text-xs font-bold text-slate-900 dark:text-white outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Level 2B: Living Out -> Inside Base (Fixed "Svc Qtr No:") | Outside Base ("Maizpara...") */}
+                          {regLivingType === 'L_OUT' && (
+                            <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRegLivingOutType('INSIDE_BASE');
+                                    setErrorMsg('');
+                                  }}
+                                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                                    regLivingOutType === 'INSIDE_BASE'
+                                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400'
+                                  }`}
+                                >
+                                  Inside Base
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRegLivingOutType('OUTSIDE_BASE');
+                                    setErrorMsg('');
+                                  }}
+                                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                                    regLivingOutType === 'OUTSIDE_BASE'
+                                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400'
+                                  }`}
+                                >
+                                  Outside Base
+                                </button>
+                              </div>
+
+                              {regLivingOutType === 'INSIDE_BASE' ? (
+                                <div className="flex items-center w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20">
+                                  <span className="text-xs font-black text-slate-500 dark:text-slate-400 mr-2 whitespace-nowrap select-none">
+                                    Svc Qtr No:
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={regSvcQtrNo}
+                                    onChange={(e) => {
+                                      setRegSvcQtrNo(e.target.value);
+                                      setErrorMsg('');
+                                    }}
+                                    placeholder="123/12"
+                                    className="flex-1 bg-transparent text-xs font-bold text-slate-900 dark:text-white outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+                                  />
+                                </div>
+                              ) : regLivingOutType === 'OUTSIDE_BASE' ? (
+                                <div className="flex items-center w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20">
+                                  <input
+                                    type="text"
+                                    value={regOutsideBaseAddr}
+                                    onChange={(e) => {
+                                      setRegOutsideBaseAddr(e.target.value);
+                                      setErrorMsg('');
+                                    }}
+                                    placeholder="Maizpara..."
+                                    className="w-full bg-transparent text-xs font-bold text-slate-900 dark:text-white outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+                                  />
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1839,42 +2301,50 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                           {resolvedRegUnitName}
                         </div>
                         <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                          {regBase} {regSlogan ? `• ${regSlogan}` : ''}
+                          {resolvedRegBase} {regSlogan ? `• ${regSlogan}` : ''}
                         </div>
                       </div>
                     </div>
 
-                    {/* User Summary Boxed Grid (6 Fields) */}
+                    {/* User Summary Boxed Grid (7 Fields) */}
                     <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
                       <div className="text-[10px] font-black uppercase tracking-wider text-sky-600 dark:text-sky-400">
                         2. User Information (Biodata & User Management)
                       </div>
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">User ID (BD No)</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">USER ID (BD NO)</div>
                           <div className="font-mono font-black text-emerald-600 dark:text-emerald-400">BD/{cleanRegBdDigits || regBdNo}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">Full Name</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">RANK</div>
                           <div className="font-bold text-slate-900 dark:text-white truncate">
-                            {regFullName}
+                            {regRank}
                           </div>
                         </div>
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">Surname</div>
-                          <div className="font-bold text-slate-900 dark:text-white truncate">{regSurname}</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">NAME</div>
+                          <div className="font-bold text-slate-900 dark:text-white truncate">{regName}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">Trade</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">TRADE</div>
                           <div className="font-bold text-slate-900 dark:text-white truncate">{resolvedRegTrade}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">User Role</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">USER ROLE</div>
                           <div className="font-black text-amber-600 dark:text-amber-400 truncate">{formatUserRoleLabel(regUserRole)}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
-                          <div className="text-[9px] uppercase font-bold text-slate-400">Contact No</div>
+                          <div className="text-[9px] uppercase font-bold text-slate-400">PIN</div>
+                          <div className="font-mono font-bold text-emerald-600 dark:text-emerald-400 truncate">{resolvedRegPin || cleanRegBdDigits}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">CONTACT NO</div>
                           <div className="font-mono font-bold text-slate-900 dark:text-white truncate">{regContactNo}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#070b14] border border-slate-200 dark:border-slate-800 col-span-2">
+                          <div className="text-[9px] uppercase font-bold text-slate-400">PRESENT ADDRESS</div>
+                          <div className="font-bold text-slate-900 dark:text-white truncate">{resolvedRegPresentAddress}</div>
                         </div>
                       </div>
                     </div>
@@ -1932,7 +2402,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                       {submittedRequestRecord?.officeName || resolvedRegUnitName}
                     </h3>
                     <p className="text-xs text-slate-600 dark:text-slate-300">
-                      Requester: <strong>{submittedRequestRecord?.fullName || regFullName}</strong> (BD/{submittedRequestRecord?.bdNo || regBdNo})
+                      Requester: <strong>{submittedRequestRecord?.rank || regRank} {submittedRequestRecord?.surname || submittedRequestRecord?.fullName || regName}</strong> (BD/{submittedRequestRecord?.bdNo || regBdNo})
                     </p>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed pt-1">
                       Your New Office registration request has been submitted for approval. Once approved, your New Office will be created and your profile will be updated in <strong>Biodata Register</strong> & <strong>User Management</strong>.
@@ -2241,14 +2711,25 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
                   setRegisterSuccessBanner('');
                   setRegUnit('');
                   setRegBase('');
+                  setRegCustomBase('');
+                  setAvailableBases(getAvailableBases());
                   setRegSlogan('');
                   setRegBdNo('');
-                  setRegFullName('');
-                  setRegSurname('');
+                  setRegRank('');
+                  setRegName('');
                   setRegTrade('');
                   setRegCustomTrade('');
                   setAvailableTrades(getAvailableTrades());
                   setRegUserRole('');
+                  setRegPin('');
+                  setIsRegPinCustom(false);
+                  setIsRegAddressOpen(false);
+                  setRegLivingType('');
+                  setRegMessType('');
+                  setRegBlockNo('');
+                  setRegLivingOutType('');
+                  setRegSvcQtrNo('');
+                  setRegOutsideBaseAddr('');
                   setRegContactNo('');
                   setFocusedRegField(null);
                   setRegisterStep(1);

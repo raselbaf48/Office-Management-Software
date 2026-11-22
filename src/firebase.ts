@@ -113,6 +113,7 @@ export interface PendingOfficeRegistrationRequest {
   trade: string;
   flightName: string;
   userRole: string;
+  presentAddress?: string;
   contactNo: string;
   pin: string;
   // Step 3: Approval Status
@@ -198,8 +199,20 @@ export interface RegisteredOfficeRecord {
 export type CustomFirebaseConfig = OfficeFirebaseConfig;
 export type RegisteredOfficeTelemetry = RegisteredOfficeRecord;
 
-export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=15';
+export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=25';
 export const DEFAULT_APP_TITLE = 'Office Management Application';
+
+export function normalizeOfficeLogoUrl(rawLogo?: string, is155: boolean = false): string {
+  const s = String(rawLogo || '').trim();
+  if (!s) return is155 ? '/155-uasu-baf-logo.png' : DEFAULT_APP_LOGO;
+  if (s.includes('155-uasu-baf-logo')) {
+    return '/155-uasu-baf-logo.png';
+  }
+  if (s.includes('office-management-logo') || s.includes('/baf-logo') || s.includes('BAF Logo')) {
+    return is155 ? '/155-uasu-baf-logo.png' : DEFAULT_APP_LOGO;
+  }
+  return s;
+}
 
 export function syncBrowserTabIdentity(
   officeName?: string,
@@ -349,8 +362,17 @@ export function parseFlexibleFirebaseConfig(rawInput: string): OfficeFirebaseCon
 export const parseFirebaseConfigInput = parseFlexibleFirebaseConfig;
 
 export function generateOfficeCodeFromName(officeName: string): string {
-  const cleaned = String(officeName || '')
+  const normName = String(officeName || '')
+    .trim()
     .toUpperCase()
+    .replace(/\s+/g, ' ');
+  if (normName === '155 UASU BAF' || normName === '155 UASU') {
+    return '155-UASU';
+  }
+  if (normName === 'F-7 BG FLIGHT LINE') {
+    return 'F-7-BG';
+  }
+  const cleaned = normName
     .replace(/[^A-Z0-9\s-]/g, '')
     .trim();
   if (!cleaned) {
@@ -358,10 +380,10 @@ export function generateOfficeCodeFromName(officeName: string): string {
   }
   const parts = cleaned.split(/[\s-]+/).filter(Boolean);
   if (parts.length === 1) {
-    return parts[0].slice(0, 8);
+    return parts[0].slice(0, 12);
   }
-  const code = parts.slice(0, 3).map((p) => p.slice(0, 4)).join('-');
-  return code.slice(0, 12);
+  const code = parts.map((p) => p.slice(0, 6)).join('-');
+  return code.slice(0, 24);
 }
 
 export function buildAutoCloudFirebaseConfig(
@@ -417,7 +439,7 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
 
   return {
     officeName,
-    officeLogo: String(raw.officeLogo || '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
+    officeLogo: normalizeOfficeLogoUrl(raw.officeLogo, is155Code),
     officeSlogan,
     ...(officeBase ? { officeBase } : {}),
     officeCode,
@@ -845,10 +867,11 @@ export function getActiveOfficeIdentity(): {
       (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
       custom.officeName ||
       'Office Management Portal';
-    const resolvedLogo =
+    const resolvedLogo = normalizeOfficeLogoUrl(
       (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
-      custom.officeLogo ||
-      '/155-uasu-baf-logo.png';
+        custom.officeLogo,
+      is155
+    );
     const rawCustomSlogan =
       profileOverride?.officeSlogan !== undefined
         ? profileOverride.officeSlogan
@@ -875,9 +898,10 @@ export function getActiveOfficeIdentity(): {
     officeName:
       (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
       '155 UASU BAF',
-    officeLogo:
-      (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
-      '/155-uasu-baf-logo.png',
+    officeLogo: normalizeOfficeLogoUrl(
+      profileOverride?.officeLogo && String(profileOverride.officeLogo).trim(),
+      true
+    ),
     officeSlogan:
       (profileOverride?.officeSlogan && String(profileOverride.officeSlogan).trim()) ||
       'Intel • Surveillance • Strike',
@@ -1501,8 +1525,13 @@ export async function toggleRegisteredOfficeStatus(
               setDoc(
                 doc(masterDbInstance!, 'registered_offices', docSnap.id),
                 {
-                  status: nextStatus,
-                  disabledAt: nextStatus === 'DISABLED' ? nowIso : null,
+                  officeName: String(d.officeName || code).slice(0, 200),
+                  projectId: String(d.projectId || firebaseConfigData.projectId || 'default').slice(0, 128),
+                  firebaseConfig: {
+                    ...(d.firebaseConfig || {}),
+                    status: nextStatus,
+                    disabledAt: nextStatus === 'DISABLED' ? nowIso : '',
+                  },
                   lastActive: nowIso,
                 },
                 { merge: true }
@@ -1573,11 +1602,12 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
     window.dispatchEvent(new CustomEvent('baf_office_config_changed'));
   }
 
-  // 7. Non-blocking background delete from Firestore registered_offices collection
+  // 7. Non-blocking background soft-remove in Firestore registered_offices collection (compatible with allow delete: if false)
   if (masterDbInstance) {
+    const nowIso = new Date().toISOString();
     getDocs(collection(masterDbInstance, 'registered_offices'))
       .then((snap) => {
-        const deletions: Promise<any>[] = [];
+        const updates: Promise<any>[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data() as RegisteredOfficeRecord;
           const dCode = String(
@@ -1587,10 +1617,24 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
             .trim();
           const normCode = dCode === '155-UASU-BAF' ? '155-UASU' : dCode;
           if (dCode === code || normCode === code) {
-            deletions.push(deleteDoc(doc(masterDbInstance!, 'registered_offices', docSnap.id)));
+            updates.push(
+              setDoc(
+                doc(masterDbInstance!, 'registered_offices', docSnap.id),
+                {
+                  officeName: String(d.officeName || code).slice(0, 200),
+                  projectId: String(d.projectId || firebaseConfigData.projectId || 'default').slice(0, 128),
+                  firebaseConfig: {
+                    ...(d.firebaseConfig || {}),
+                    status: 'REMOVED',
+                  },
+                  lastActive: nowIso,
+                },
+                { merge: true }
+              )
+            );
           }
         });
-        return Promise.all(deletions);
+        return Promise.all(updates);
       })
       .catch(() => {});
   }
@@ -1868,6 +1912,7 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
       mergedMap.set(code, {
         ...prev,
         ...rec,
+        officeLogo: normalizeOfficeLogoUrl(rec.officeLogo || prev?.officeLogo, code === '155-UASU'),
         officeCode: code,
         joinPin: rec.joinPin || rec.firebaseConfig?.joinPin || prev?.joinPin,
         status: rec.status || prev?.status || 'ACTIVE',
@@ -1890,7 +1935,7 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
       const existing = mergedMap.get(code);
       mergedMap.set(code, {
         officeName: currentCustom.officeName,
-        officeLogo: currentCustom.officeLogo || '/155-uasu-baf-logo.png',
+        officeLogo: normalizeOfficeLogoUrl(currentCustom.officeLogo, code === '155-UASU'),
         officeSlogan: currentCustom.officeSlogan,
         officeBase: currentCustom.officeBase,
         officeCode: code,
@@ -1975,13 +2020,17 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
               rawCode === '155-UASU-BAF' || d.officeName.trim().toUpperCase() === '155 UASU BAF'
                 ? '155-UASU'
                 : rawCode;
-            if (removedCodes.includes(code)) return;
+            const cloudStatus = (d as any).status || (d.firebaseConfig as any)?.status;
+            if (cloudStatus === 'REMOVED' || removedCodes.includes(code)) return;
             const prev = mergedMap.get(code);
+            const resolvedStatus: 'ACTIVE' | 'DISABLED' =
+              cloudStatus === 'DISABLED' || prev?.status === 'DISABLED' ? 'DISABLED' : 'ACTIVE';
             const enriched: RegisteredOfficeRecord = {
               ...prev,
               ...d,
+              officeLogo: normalizeOfficeLogoUrl(d.officeLogo || prev?.officeLogo, code === '155-UASU'),
               officeCode: code,
-              status: d.status || prev?.status || 'ACTIVE',
+              status: resolvedStatus,
               joinPin: d.joinPin || d.firebaseConfig?.joinPin || prev?.joinPin,
               totalUsers: getRealtimeOfficeUserCount(code, d.totalUsers),
             };
@@ -2321,53 +2370,54 @@ export function isOfficeNameAlreadyRegistered(
     .toUpperCase()
     .replace(/\s+/g, ' ');
   if (!normalizedInput) return false;
-  const inputCode = generateOfficeCodeFromName(normalizedInput).toUpperCase().trim();
 
-  // Check default 155 UASU BAF
+  // Check default 155 UASU BAF (Full Name Match only)
   const defProfile = getDefault155OfficeProfile();
   const defNameNorm = String(defProfile.officeName || '155 UASU BAF')
     .trim()
     .toUpperCase()
     .replace(/\s+/g, ' ');
-  if (
-    normalizedInput === defNameNorm ||
-    normalizedInput === '155 UASU BAF' ||
-    normalizedInput === '155 UASU' ||
-    inputCode === '155-UASU'
-  ) {
+  if (normalizedInput === defNameNorm || normalizedInput === '155 UASU BAF') {
     return true;
   }
 
-  // Check local master cache + passed registeredOffices
+  const removedCodes = getRemovedOfficeCodes();
+
+  // Check local master cache + passed registeredOffices (Full Name Match only)
   const cacheMap = getLocalMasterOfficesCache();
   const allReg = [...Object.values(cacheMap), ...registeredOffices];
   for (const off of allReg) {
     if (!off) continue;
+    const offStatus = (off as any).status || (off.firebaseConfig as any)?.status;
+    const offCode = String(off.officeCode || off.firebaseConfig?.officeCode || '')
+      .trim()
+      .toUpperCase();
+    if (offStatus === 'REMOVED' || (offCode && removedCodes.includes(offCode))) {
+      continue;
+    }
     const offName = String(off.officeName || '')
       .trim()
       .toUpperCase()
       .replace(/\s+/g, ' ');
-    const offCode = String(off.officeCode || off.firebaseConfig?.officeCode || '')
-      .trim()
-      .toUpperCase();
-    if (offName && (offName === normalizedInput || (inputCode && offCode === inputCode))) {
+    if (offName && offName === normalizedInput) {
       return true;
     }
   }
 
-  // Check pending requests (PENDING or APPROVED)
+  // Check pending requests (PENDING or APPROVED - Full Name Match only)
   const localReqs = getPendingOfficeRequestsLocal();
   const allReqs = [...localReqs, ...pendingRequests];
   for (const req of allReqs) {
     if (!req || req.status === 'REJECTED') continue;
+    const reqCode = String(req.officeCode || '').trim().toUpperCase();
+    if (req.status === 'APPROVED' && reqCode && removedCodes.includes(reqCode)) {
+      continue;
+    }
     const reqName = String(req.officeName || '')
       .trim()
       .toUpperCase()
       .replace(/\s+/g, ' ');
-    const reqCode = String(req.officeCode || '')
-      .trim()
-      .toUpperCase();
-    if (reqName && (reqName === normalizedInput || (inputCode && reqCode === inputCode))) {
+    if (reqName && reqName === normalizedInput) {
       return true;
     }
   }
@@ -2395,9 +2445,7 @@ function getDefault155OfficeProfile(): OfficeProfileData {
       if (parsed && typeof parsed === 'object') {
         return {
           officeName: String(parsed.officeName || '155 UASU BAF').trim() || '155 UASU BAF',
-          officeLogo:
-            String(parsed.officeLogo || '/155-uasu-baf-logo.png').trim() ||
-            '/155-uasu-baf-logo.png',
+          officeLogo: normalizeOfficeLogoUrl(parsed.officeLogo, true),
           officeSlogan:
             String(parsed.officeSlogan || 'Intel • Surveillance • Strike').trim() ||
             'Intel • Surveillance • Strike',
@@ -2477,7 +2525,7 @@ export function findOfficeByUserId(
         return {
           ...hit,
           officeName: matchedRegOffice.officeName || hit.officeName,
-          officeLogo: matchedRegOffice.officeLogo || hit.officeLogo,
+          officeLogo: normalizeOfficeLogoUrl(matchedRegOffice.officeLogo || hit.officeLogo, false),
           officeSlogan:
             matchedRegOffice.officeSlogan ||
             matchedRegOffice.firebaseConfig?.officeSlogan ||
@@ -2489,7 +2537,7 @@ export function findOfficeByUserId(
           officeConfig:
             hit.officeConfig || {
               officeName: matchedRegOffice.officeName,
-              officeLogo: matchedRegOffice.officeLogo || '/155-uasu-baf-logo.png',
+              officeLogo: normalizeOfficeLogoUrl(matchedRegOffice.officeLogo, false),
               officeSlogan: matchedRegOffice.officeSlogan,
               officeBase: matchedRegOffice.officeBase,
               officeCode: matchedRegOffice.officeCode,
@@ -2498,7 +2546,19 @@ export function findOfficeByUserId(
             },
         };
       }
-      return hit;
+      const isHit155 = Boolean(
+        hit.isDefault155 ||
+          String(hit.officeCode || '')
+            .toUpperCase()
+            .includes('155')
+      );
+      return {
+        ...hit,
+        officeLogo: normalizeOfficeLogoUrl(
+          matchedRegOffice?.officeLogo || hit.officeLogo,
+          isHit155
+        ),
+      };
     }
   }
 
@@ -2538,8 +2598,10 @@ export function findOfficeByUserId(
             const officeCode = regOffice?.officeCode || safeCode;
             const officeName =
               prof?.officeName || regOffice?.officeName || safeCode.replace(/_/g, ' ');
-            const officeLogo =
-              prof?.officeLogo || regOffice?.officeLogo || '/155-uasu-baf-logo.png';
+            const officeLogo = normalizeOfficeLogoUrl(
+              prof?.officeLogo || regOffice?.officeLogo,
+              false
+            );
             const officeSlogan = sanitizeOfficeSlogan(
               prof?.officeSlogan ?? regOffice?.officeSlogan ?? '',
               false
@@ -3044,6 +3106,7 @@ export async function submitOfficeRegistrationRequest(input: {
   trade: string;
   flightName: string;
   userRole: string;
+  presentAddress?: string;
   contactNo: string;
   pin?: string;
 }): Promise<PendingOfficeRegistrationRequest> {
@@ -3084,6 +3147,7 @@ export async function submitOfficeRegistrationRequest(input: {
     trade: String(input.trade || 'Radio Fitt').trim() || 'Radio Fitt',
     flightName: String(input.flightName || '').trim(),
     userRole: String(input.userRole || 'SUPER_ADMIN').trim() || 'SUPER_ADMIN',
+    presentAddress: String(input.presentAddress || '').trim(),
     contactNo: String(input.contactNo || '').trim(),
     pin: String(input.pin || cleanBd).trim() || cleanBd,
     status: 'PENDING',
@@ -3155,9 +3219,9 @@ export async function approveOfficeRegistrationRequest(
     trade: req.trade || 'Radio Fitt',
     bloodGroup: '',
     email: '',
-    presentAddress: req.officeBase || 'BAF BASE ZHR',
+    presentAddress: req.presentAddress || req.officeBase || 'BAF BASE ZHR',
     permanentAddress: '',
-    addressBlock: req.officeBase || 'BAF BASE ZHR',
+    addressBlock: req.presentAddress || req.officeBase || 'BAF BASE ZHR',
     mobileNo: req.contactNo || '',
     postingDate: nowIso.slice(0, 10),
     flightName: '',

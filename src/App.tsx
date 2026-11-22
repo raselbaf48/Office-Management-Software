@@ -121,7 +121,7 @@ export default function App() {
       const activeId = getActiveOfficeIdentity();
       syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
     } else {
-      syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
+      syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
     }
   }, [userSession, officeIdentity]);
 
@@ -345,7 +345,7 @@ export default function App() {
     setJustLoggedIn(false);
     handleRoleChange('USER');
     setLastUsedPortal('Office');
-    syncBrowserTabIdentity('', '/office-management-logo.png?v=15', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
   };
 
   
@@ -1001,6 +1001,7 @@ export default function App() {
           airmanToEdit={airmanToEdit}
           existingAirmen={airmen}
           onSave={handleSaveAirman}
+          onRemoveAirman={handleDeleteAirman}
           onClose={() => {
             setIsAddEditOpen(false);
             setAirmanToEdit(null);

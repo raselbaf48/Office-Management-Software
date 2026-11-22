@@ -235,7 +235,7 @@ service cloud.firestore {
       allow create: if isValidId(airmanId) && isValidAirman(incoming());
       allow update: if isValidId(airmanId) && isValidAirman(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'bdNo', 'rank', 'name', 'fullName', 'flightName', 'trade',
+                         'id', 'bdNo', 'rank', 'name', 'fullName', 'flightName', 'trade',
                          'seniority', 'mobileNo', 'bloodGroup', 'addressBlock', 'permanentAddress',
                          'dateJoined', 'dateLeft', 'leaveReason', 'remarks', 'code', 'serNo',
                          'email', 'active', 'updatedAt'
@@ -249,7 +249,7 @@ service cloud.firestore {
       allow create: if isValidId(assignmentId) && isValidDutyAssignment(incoming());
       allow update: if isValidId(assignmentId) && isValidDutyAssignment(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'airmanId', 'date', 'dutyCode', 'dutyName', 'idaShift',
+                         'id', 'airmanId', 'date', 'dutyCode', 'dutyName', 'idaShift',
                          'proxyForFlight', 'disposalScope', 'notes', 'location',
                          'isOfficial', 'isCompleted', 'isDeleted', 'updatedAt', 'updatedBy'
                        ]);
@@ -262,7 +262,7 @@ service cloud.firestore {
       allow create: if isValidId(logId) && isValidParadeStateLog(incoming());
       allow update: if isValidId(logId) && isValidParadeStateLog(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'actionType', 'airmanId', 'airmanName', 'airmanRank', 'airmanTrade',
+                         'id', 'actionType', 'airmanId', 'airmanName', 'airmanRank', 'airmanTrade',
                          'dutyCode', 'idaShift', 'fromDate', 'toDate', 'notes', 'description',
                          'timestamp', 'updatedAt'
                        ]);
@@ -275,7 +275,7 @@ service cloud.firestore {
       allow create: if isValidId(profileId) && isValidUserProfile(incoming());
       allow update: if isValidId(profileId) && isValidUserProfile(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'airmanId', 'bdNo', 'userId', 'rank', 'name', 'mobileNo', 'flightName',
+                         'id', 'airmanId', 'bdNo', 'userId', 'rank', 'name', 'mobileNo', 'flightName',
                          'trade', 'role', 'status', 'password', 'pin', 'isProtected', 'adminPass', 'ownerPass',
                          'detailOrder', 'detailedAt', 'detailedBy', 'remarks', 'updatedAt'
                        ]);
@@ -352,8 +352,14 @@ service cloud.firestore {
                                incoming().lastActive is string && incoming().lastActive.size() <= 64 &&
                                isOptStr(incoming(), 'officeLogo', 500000) &&
                                isOptNum(incoming(), 'totalUsers') &&
-                               isOptStr(incoming(), 'createdAt', 64);
-      allow delete: if false;
+                               isOptStr(incoming(), 'createdAt', 64) &&
+                               isOptStr(incoming(), 'status', 32) &&
+                               isOptStr(incoming(), 'disabledAt', 64) &&
+                               isOptStr(incoming(), 'officeCode', 64) &&
+                               isOptStr(incoming(), 'officeSlogan', 200) &&
+                               isOptStr(incoming(), 'officeBase', 200) &&
+                               isOptStr(incoming(), 'joinPin', 64);
+      allow delete: if isValidId(projectId);
     }
 
     match /test/{testId} {

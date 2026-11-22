@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -185,22 +186,34 @@ export function isCorruptedAssignmentRecord(a: any): boolean {
   return false;
 }
 
+function stripActiveOfficePrefixFromRawId(raw: string): string {
+  const s = String(raw || '').trim();
+  if (!s) return s;
+  const prefix = getOfficeFirestoreDocPrefix();
+  if (prefix) {
+    const altPrefix = prefix.replace(/__$/, '_');
+    if (s.startsWith(prefix)) return s.slice(prefix.length);
+    if (altPrefix && s.startsWith(altPrefix)) return s.slice(altPrefix.length);
+  }
+  return s;
+}
+
 export function getAssignmentDocId(a: any): string {
   const raw =
-    a?.id ||
+    stripActiveOfficePrefixFromRawId(a?.id) ||
     `asn_${a?.airmanId || 'u'}_${a?.date || '0000'}_${a?.dutyCode || 'ON_PARADE'}_${a?.idaShift || 'n'}_${a?.disposalScope || 'ALL'}`;
   return sanitizeDocId(raw);
 }
 
 export function getAirmanDocId(a: any): string {
   const cleanBd = String(a?.bdNo || '').replace(/\D/g, '');
-  const raw = a?.id || (cleanBd ? `BD_${cleanBd}` : `airman_${Date.now()}`);
+  const raw = stripActiveOfficePrefixFromRawId(a?.id) || (cleanBd ? `BD_${cleanBd}` : `airman_${Date.now()}`);
   return sanitizeDocId(raw);
 }
 
 export function getUserProfileDocId(u: any): string {
   const cleanBd = clampStr(String(u?.userId || u?.bdNo || '').replace(/^BD\/?/i, '').trim() || 'unknown', 64) || 'unknown';
-  return sanitizeDocId(u?.id || `user_login_${cleanBd}`);
+  return sanitizeDocId(stripActiveOfficePrefixFromRawId(u?.id) || `user_login_${cleanBd}`);
 }
 
 // -------------------- Pending Offline Delta Queue --------------------
@@ -641,17 +654,29 @@ function scopeWriteOpsForActiveOffice(
 ): Array<{ path: string; docId: string; data: Record<string, any> }> {
   const prefix = getOfficeFirestoreDocPrefix();
   if (!prefix) return ops;
+  const altPrefix = prefix.replace(/__$/, '_');
 
   return ops.map((op) => {
-    const baseDocId = op.docId.startsWith(prefix) ? op.docId.slice(prefix.length) : op.docId;
+    let baseDocId = op.docId;
+    if (baseDocId.startsWith(prefix)) {
+      baseDocId = baseDocId.slice(prefix.length);
+    } else if (altPrefix && baseDocId.startsWith(altPrefix)) {
+      baseDocId = baseDocId.slice(altPrefix.length);
+    }
     const cleanBaseId = sanitizeDocId(baseDocId);
     const scopedDocId = `${prefix}${cleanBaseId}`.slice(0, 120);
     const scopedData: Record<string, any> = { ...op.data };
-    if (typeof scopedData.id === 'string' && !scopedData.id.startsWith(prefix)) {
-      scopedData.id = clampStr(`${prefix}${scopedData.id}`, 128) || scopedDocId;
+    if (typeof scopedData.id === 'string') {
+      scopedData.id = clampStr(scopedDocId, 128) || scopedDocId;
     }
-    if (typeof scopedData.settingKey === 'string' && !scopedData.settingKey.startsWith(prefix)) {
-      scopedData.settingKey = clampStr(`${prefix}${scopedData.settingKey}`, 200) || scopedDocId;
+    if (typeof scopedData.settingKey === 'string') {
+      let baseSettingKey = scopedData.settingKey;
+      if (baseSettingKey.startsWith(prefix)) {
+        baseSettingKey = baseSettingKey.slice(prefix.length);
+      } else if (altPrefix && baseSettingKey.startsWith(altPrefix)) {
+        baseSettingKey = baseSettingKey.slice(altPrefix.length);
+      }
+      scopedData.settingKey = clampStr(`${prefix}${baseSettingKey}`, 200) || scopedDocId;
     }
     return {
       path: op.path,
@@ -1093,6 +1118,24 @@ export async function fetchAirmenFromFirebase(sinceIso?: string): Promise<any[]>
   return queryCollectionDocs('airmen', sinceIso, 10000, 12000);
 }
 
+export async function deleteAirmanFromFirebase(airmanOrList: any | any[]): Promise<void> {
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
+  const list = (Array.isArray(airmanOrList) ? airmanOrList : [airmanOrList]).filter(Boolean);
+  if (list.length === 0) return;
+  const nowIso = new Date().toISOString();
+  const tombstoneOps = list.map((a) => {
+    const formatted = formatAirmanForFirestore({ ...a, remarks: '__DELETED__', active: false, updatedAt: nowIso }, nowIso);
+    return { path: 'airmen', ...formatted };
+  });
+  try {
+    await commitSetOps(tombstoneOps, 'airmen');
+  } catch {}
+  const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
+  await Promise.allSettled(
+    scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
+  );
+}
+
 // -------------------- 2. DUTY ASSIGNMENTS --------------------
 
 function formatDutyAssignmentForFirestore(
@@ -1271,6 +1314,24 @@ export async function fetchUserProfilesFromFirebase(sinceIso?: string, timeoutMs
   return queryCollectionDocs('user_profiles', sinceIso, timeoutMs, Math.max(timeoutMs, 10000));
 }
 
+export async function deleteUserProfileFromFirebase(userOrList: any | any[]): Promise<void> {
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
+  const list = (Array.isArray(userOrList) ? userOrList : [userOrList]).filter(Boolean);
+  if (list.length === 0) return;
+  const nowIso = new Date().toISOString();
+  const tombstoneOps = list.map((u) => {
+    const formatted = formatUserProfileForFirestore({ ...u, remarks: '__DELETED__', status: 'DELETED', updatedAt: nowIso }, nowIso);
+    return { path: 'user_profiles', ...formatted };
+  });
+  try {
+    await commitSetOps(tombstoneOps, 'user_profiles');
+  } catch {}
+  const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
+  await Promise.allSettled(
+    scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
+  );
+}
+
 // -------------------- 5. APP SETTINGS --------------------
 
 export interface AppSettingItemInput {
@@ -1310,12 +1371,17 @@ export async function fetchAppSettingsWithMetaFromFirebase(
   const result: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }> = {};
   docs.forEach((d: any) => {
     if (d && d.settingKey) {
-      result[d.settingKey] = {
-        valueStr: decodeNativeValueToString(d.value),
-        rawValue: d.value,
-        updatedAt: String(d.updatedAt || ''),
-        updatedBy: d.updatedBy,
-      };
+      const incomingTime = Date.parse(String(d.updatedAt || '')) || 0;
+      const existing = result[d.settingKey];
+      const existingTime = existing ? Date.parse(existing.updatedAt || '') || 0 : -1;
+      if (!existing || incomingTime >= existingTime) {
+        result[d.settingKey] = {
+          valueStr: decodeNativeValueToString(d.value),
+          rawValue: d.value,
+          updatedAt: String(d.updatedAt || ''),
+          updatedBy: d.updatedBy,
+        };
+      }
     }
   });
   return result;

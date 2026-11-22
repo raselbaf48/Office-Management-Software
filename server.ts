@@ -635,18 +635,10 @@ async function startServer() {
   const sendActiveOrFallbackPwaIcon = (
     res: express.Response,
     sizeType: '192' | '512' | 'maskable',
-    requestedHash?: string
+    _requestedHash?: string
   ) => {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-
-    const targetHash = requestedHash || (!activePwaOfficeState.is155Office ? activePwaOfficeState.iconHash : '');
-    if (targetHash && dynamicPwaIconStore.has(targetHash)) {
-      const entry = dynamicPwaIconStore.get(targetHash)!;
-      const buf =
-        sizeType === '192' ? entry.icon192 : sizeType === 'maskable' ? entry.maskable512 : entry.icon512;
-      return res.status(200).send(buf);
-    }
 
     const fallbackFile =
       sizeType === '192'
@@ -658,7 +650,7 @@ async function startServer() {
     if (fs.existsSync(fallbackPath)) {
       return res.sendFile(fallbackPath);
     }
-    return res.redirect('/pwa-512x512-trans.png');
+    return res.redirect('/pwa-512x512-trans.png?v=25');
   };
 
   app.get('/api/pwa-icon/:hash/:file', (req, res) => {
@@ -671,7 +663,7 @@ async function startServer() {
           : '512';
       return sendActiveOrFallbackPwaIcon(res, sizeType, hash);
     } catch {
-      return res.redirect('/pwa-512x512-trans.png');
+      return res.redirect('/pwa-512x512-trans.png?v=25');
     }
   });
 
@@ -690,14 +682,13 @@ async function startServer() {
     return sendActiveOrFallbackPwaIcon(res, 'maskable', hash);
   });
 
-  // Shared handler for both /manifest.json and /api/pwa-manifest so Chromium ALWAYS gets the active office's Name & Logo
+  // Shared handler for both /manifest.json and /api/pwa-manifest so PWA ALWAYS uses the new BAF Logo
   const handlePwaManifestRequest = (req: express.Request, res: express.Response) => {
     try {
       const queryName = String(req.query.name || '').trim();
       const queryLogo = String(req.query.logo || '').trim();
       const queryCode = String(req.query.code || '').trim();
       const querySlogan = String(req.query.slogan || '').trim();
-      const queryHash = String(req.query.iconHash || '').trim();
 
       const isQueryGeneric =
         !queryName ||
@@ -710,7 +701,6 @@ async function startServer() {
         : activePwaOfficeState.officeName || '155 UASU BAF';
       const rawCode = !isQueryGeneric ? queryCode : activePwaOfficeState.officeCode;
       const rawSlogan = !isQueryGeneric ? querySlogan : activePwaOfficeState.officeSlogan;
-      const iconHash = queryHash || (!activePwaOfficeState.is155Office ? activePwaOfficeState.iconHash : '');
 
       const is155Office =
         appName.toUpperCase().includes('155') ||
@@ -723,21 +713,10 @@ async function startServer() {
         ? `${appName} — ${rawSlogan}`
         : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
 
-      const hasPreparedIcons = Boolean(!is155Office && iconHash && dynamicPwaIconStore.has(iconHash));
-      const hashParam = hasPreparedIcons ? `?iconHash=${encodeURIComponent(iconHash)}` : '?v=18';
-
-      const icon192Url = hasPreparedIcons
-        ? `/api/pwa-active-icon-192.png${hashParam}`
-        : '/pwa-192x192-trans.png?v=18';
-      const icon512Url = hasPreparedIcons
-        ? `/api/pwa-active-icon-512.png${hashParam}`
-        : '/pwa-512x512-trans.png?v=18';
-      const maskable192Url = hasPreparedIcons
-        ? `/api/pwa-active-icon-192.png${hashParam}`
-        : '/pwa-192x192-full.png?v=18';
-      const maskable512Url = hasPreparedIcons
-        ? `/api/pwa-active-maskable-512.png${hashParam}`
-        : '/pwa-512x512-full.png?v=18';
+      const icon192Url = '/pwa-192x192-trans.png?v=25';
+      const icon512Url = '/pwa-512x512-trans.png?v=25';
+      const maskable192Url = '/pwa-192x192-full.png?v=25';
+      const maskable512Url = '/pwa-512x512-full.png?v=25';
 
       const officeQuery = rawCode && !is155Office ? `?office=${encodeURIComponent(rawCode)}` : '';
 
@@ -1208,6 +1187,11 @@ async function startServer() {
       });
     }
     res.json({ year, assignments });
+  });
+
+  app.get('/api/server-history', (req, res) => {
+    const db = loadDatabase();
+    res.json({ history: db.activityHistory || [] });
   });
 
   app.get('/api/roster/server-history', (req, res) => {

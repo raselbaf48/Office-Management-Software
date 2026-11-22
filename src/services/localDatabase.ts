@@ -40,6 +40,7 @@ import {
 import {
   fetchAirmenFromFirebase,
   pushAirmenToFirebase,
+  deleteAirmanFromFirebase,
   fetchDutyAssignmentsFromFirebase,
   pushDutyAssignmentsToFirebase,
   softDeleteDutyAssignmentsInFirebase,
@@ -47,6 +48,7 @@ import {
   pushParadeStatesToFirebase,
   fetchUserProfilesFromFirebase,
   pushUserProfilesToFirebase,
+  deleteUserProfileFromFirebase,
   fetchAppSettingsFromFirebase,
   fetchAppSettingsWithMetaFromFirebase,
   pushAppSettingsToFirebase,
@@ -351,9 +353,16 @@ const IGNORED_SETTING_KEYS = new Set<string>([
   'custom_office_config',
   'baf_custom_office_firebase_config_v1',
   'baf_master_registered_offices_cache',
+  'baf_registered_offices_v1',
   'baf_custom_office_clean_v3',
   'baf_pending_office_requests_v1',
+  'baf_rejected_office_request_ids_v1',
+  'baf_removed_office_codes_v1',
+  'baf_master_credentials_v1',
   'baf_global_user_office_map_v1',
+  'baf_last_synced_data_hash',
+  'baf_pwa_active_office_meta',
+  'baf_linked_firebase_target',
 ]);
 
 function isSyncableSettingKey(key: string): boolean {
@@ -565,10 +574,10 @@ export class LocalDatabaseEngine {
         this.pullAllSettingsFromServer();
         if (!this.db.activityHistory || this.db.activityHistory.length < 25) {
           fetch('/api/server-history')
-            .then((r) => r.json())
+            .then((r) => (r.ok ? r.json() : null))
             .then((d) => {
               if (d && Array.isArray(d.history) && d.history.length > 0 && isDefault155UasuOffice()) {
-                this.mergeHistory(d.history);
+                this.mergeHistory(d.history, false);
               }
             })
             .catch(() => {});
@@ -993,7 +1002,7 @@ export class LocalDatabaseEngine {
       // 3. Activity History
       if (Array.isArray(srvDb.activityHistory) && srvDb.activityHistory.length > 0 && (!this.isInitialPullDone || isFirestoreQuotaExceeded())) {
         const beforeLen = (this.db.activityHistory || []).length;
-        this.mergeHistory(srvDb.activityHistory);
+        this.mergeHistory(srvDb.activityHistory, false);
         if ((this.db.activityHistory || []).length !== beforeLen) {
           changed = true;
         }
@@ -1502,7 +1511,12 @@ export class LocalDatabaseEngine {
 
         cloudAirmen.forEach((a: any) => {
           const k = getCanonicalAirKey(a);
-          if (k) airmenMap.set(k, a);
+          if (!k) return;
+          if (a?.remarks === '__DELETED__' || a?.isDeleted === true) {
+            airmenMap.delete(k);
+            return;
+          }
+          airmenMap.set(k, a);
         });
 
         (this.db.airmen || []).forEach((localA: any) => {
@@ -1716,7 +1730,12 @@ export class LocalDatabaseEngine {
         cloudUsers.forEach((u: any) => {
           if (isLeaked155AutoSyncedUser(u)) return;
           const k = getUserBdKey(u);
-          if (k) userMap.set(k, u);
+          if (!k) return;
+          if (u?.remarks === '__DELETED__' || u?.status === 'DELETED') {
+            userMap.delete(k);
+            return;
+          }
+          userMap.set(k, u);
         });
         (this.db.detailedUsers || []).forEach((localU: any) => {
           if (isLeaked155AutoSyncedUser(localU)) return;
@@ -2017,6 +2036,13 @@ export class LocalDatabaseEngine {
             const docId = getAirmanDocId(ca);
             if (pendingQueue.airmen[docId]) return;
             const k = getKey(ca);
+            if (ca?.remarks === '__DELETED__' || ca?.isDeleted === true) {
+              if (map.has(k)) {
+                map.delete(k);
+                dbChanged = true;
+              }
+              return;
+            }
             map.set(k, { ...map.get(k), ...ca });
             dbChanged = true;
           });
@@ -2093,7 +2119,15 @@ export class LocalDatabaseEngine {
           incUsers.forEach((cu: any) => {
             const docId = sanitizeDocId(cu?.id || `user_login_${cu?.bdNo || 'u'}`);
             if (!pendingQueue.users[docId]) {
-              uMap.set(getUk(cu), cu);
+              const uk = getUk(cu);
+              if (cu?.remarks === '__DELETED__' || cu?.status === 'DELETED') {
+                if (uMap.has(uk)) {
+                  uMap.delete(uk);
+                  dbChanged = true;
+                }
+                return;
+              }
+              uMap.set(uk, cu);
               dbChanged = true;
             }
           });
@@ -2943,8 +2977,11 @@ export class LocalDatabaseEngine {
       });
     });
 
-    const mergeCandidateIntoAirmen = (cand: any, sourceLabel: string) => {
+    const hasExistingAirmen = airmenByBd.size > 0;
+
+    const mergeCandidateIntoAirmen = (cand: any, sourceLabel: string, allowInsertWhenPopulated: boolean = false) => {
       if (!cand || typeof cand !== 'object') return;
+      if (cand.remarks === '__DELETED__' || cand.status === 'DELETED' || cand.isDeleted === true) return;
       const digits = String(cand.bdNo || cand.userId || cand.id || '')
         .replace(/^BD\/?/i, '')
         .replace(/\D/g, '')
@@ -2972,6 +3009,9 @@ export class LocalDatabaseEngine {
       ).trim();
 
       if (!existing) {
+        if (hasExistingAirmen && !allowInsertWhenPopulated) {
+          return;
+        }
         const shortCode =
           candSurname
             .replace(/[^a-zA-Z]/g, '')
@@ -3040,10 +3080,10 @@ export class LocalDatabaseEngine {
           const parsedLegacy = JSON.parse(rawLegacy);
           if (parsedLegacy && typeof parsedLegacy === 'object') {
             if (Array.isArray(parsedLegacy.airmen)) {
-              parsedLegacy.airmen.forEach((a: any) => mergeCandidateIntoAirmen(a, 'Approved Office Registration'));
+              parsedLegacy.airmen.forEach((a: any) => mergeCandidateIntoAirmen(a, 'Approved Office Registration', false));
             }
             if (Array.isArray(parsedLegacy.detailedUsers)) {
-              parsedLegacy.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+              parsedLegacy.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management', false));
             }
           }
         }
@@ -3055,7 +3095,7 @@ export class LocalDatabaseEngine {
         if (rawScopedUsers) {
           const parsedUsers = JSON.parse(rawScopedUsers);
           if (Array.isArray(parsedUsers)) {
-            parsedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+            parsedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management', false));
           }
         }
       } catch {}
@@ -3063,7 +3103,7 @@ export class LocalDatabaseEngine {
 
     // 3. Check `targetDb.detailedUsers`
     if (Array.isArray(targetDb.detailedUsers)) {
-      targetDb.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management'));
+      targetDb.detailedUsers.forEach((u: any) => mergeCandidateIntoAirmen(u, 'Office User Management', false));
     }
 
     // 4. Check `getPendingOfficeRequestsLocal()` for this officeCode
@@ -3075,7 +3115,7 @@ export class LocalDatabaseEngine {
           r.status !== 'REJECTED' &&
           String(r.officeCode || '').toUpperCase().trim() === officeCode
         ) {
-          mergeCandidateIntoAirmen(r, `Approved Office Registration (${r.officeName})`);
+          mergeCandidateIntoAirmen(r, `Approved Office Registration (${r.officeName})`, false);
         }
       });
     } catch {}
@@ -3100,7 +3140,8 @@ export class LocalDatabaseEngine {
               contactNo: fbCfg.adminContactNo || '',
               officeBase: off.officeBase || fbCfg.officeBase || identity.officeBase,
             },
-            `Approved Office Registration (${off.officeName})`
+            `Approved Office Registration (${off.officeName})`,
+            false
           );
         }
       });
@@ -3123,7 +3164,8 @@ export class LocalDatabaseEngine {
             contactNo: fbCfg.adminContactNo || '',
             officeBase: activeCustomCfg.officeBase || fbCfg.officeBase || identity.officeBase,
           },
-          `Approved Office Registration (${activeCustomCfg.officeName})`
+          `Approved Office Registration (${activeCustomCfg.officeName})`,
+          false
         );
       }
     } catch {}
@@ -3139,7 +3181,7 @@ export class LocalDatabaseEngine {
           entry.active !== false &&
           String(entry.officeCode || '').toUpperCase().trim() === officeCode
         ) {
-          mergeCandidateIntoAirmen(entry, `Office Directory (${entry.officeName})`);
+          mergeCandidateIntoAirmen(entry, `Office Directory (${entry.officeName})`, false);
         }
       });
     } catch {}
@@ -3349,17 +3391,20 @@ export class LocalDatabaseEngine {
   }
 
   public async updateAirman(id: string, data: Partial<Airman>): Promise<Airman | null> {
-    const cleanIdBd = id.replace(/\D/g, '');
-    const cleanDataBd = data.bdNo ? String(data.bdNo).replace(/\D/g, '') : '';
-    const idx = this.db.airmen.findIndex((a) => {
-      if (a.id === id) return true;
-      const aBd = a.bdNo ? String(a.bdNo).replace(/\D/g, '') : '';
-      if (cleanIdBd && aBd && aBd === cleanIdBd) return true;
-      if (cleanDataBd && aBd && aBd === cleanDataBd) return true;
-      return false;
-    });
+    const cleanIdBd = String(id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+    const cleanDataBd = data.bdNo ? String(data.bdNo).replace(/^BD\/?/i, '').replace(/\D/g, '').trim() : '';
+    let idx = this.db.airmen.findIndex((a) => a.id === id);
+    if (idx === -1 && cleanIdBd) {
+      idx = this.db.airmen.findIndex((a) => String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim() === cleanIdBd);
+    }
+    if (idx === -1 && cleanDataBd) {
+      idx = this.db.airmen.findIndex((a) => String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim() === cleanDataBd);
+    }
     if (idx === -1) return null;
-    const previous = this.db.airmen[idx];
+    const previous = { ...this.db.airmen[idx] };
+    const oldBd = String(previous.bdNo || previous.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+    const newBd = String(data.bdNo || previous.bdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim() || oldBd;
+    const canonicalId = newBd ? `BD/${newBd}` : previous.id;
 
     // Check if seniority order needs shifting
     if (data.seniority !== undefined && data.seniority !== null && !isNaN(Number(data.seniority))) {
@@ -3376,71 +3421,362 @@ export class LocalDatabaseEngine {
       this.db.airmen = normalizeAirmenSeniority(this.db.airmen);
     }
 
-    const cleanBd = String(data.bdNo || previous.bdNo || '').replace(/\D/g, '');
-    const canonicalId = previous.id?.startsWith('BD/') ? previous.id : (cleanBd ? `BD/${cleanBd}` : previous.id);
+    const newIdx = this.db.airmen.findIndex(
+      (a) =>
+        a.id === previous.id ||
+        (oldBd && String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim() === oldBd)
+    );
+    const targetIdx = newIdx !== -1 ? newIdx : idx;
+    const updatedRecord: Airman = {
+      ...this.db.airmen[targetIdx],
+      ...data,
+      id: canonicalId,
+      bdNo: newBd || previous.bdNo,
+      seniority: this.db.airmen[targetIdx]?.seniority ?? previous.seniority,
+    };
+    this.db.airmen[targetIdx] = updatedRecord;
 
-    const newIdx = this.db.airmen.findIndex((a) => a.id === previous.id || (cleanBd && a.bdNo?.replace(/\D/g, '') === cleanBd));
-    if (newIdx !== -1) {
-      this.db.airmen[newIdx] = {
-        ...this.db.airmen[newIdx],
-        ...data,
-        id: canonicalId,
-        seniority: this.db.airmen[newIdx].seniority,
-      };
+    // Remove any duplicate entry that might share oldBd, newBd, previous.id, or canonicalId
+    this.db.airmen = this.db.airmen.filter((a, i) => {
+      if (i === targetIdx) return true;
+      const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (a.id === previous.id || a.id === canonicalId) return false;
+      if (oldBd && aBd === oldBd) return false;
+      if (newBd && aBd === newBd) return false;
+      return true;
+    });
+
+    // Update assignments if airman ID / BD No changed
+    if (previous.id !== canonicalId || (oldBd && newBd && oldBd !== newBd)) {
+      const oldIds = new Set([previous.id, `BD/${oldBd}`, oldBd].filter(Boolean));
+      if (this.db.assignments) {
+        Object.keys(this.db.assignments).forEach((monthKey) => {
+          if (Array.isArray(this.db.assignments[monthKey])) {
+            this.db.assignments[monthKey] = this.db.assignments[monthKey].map((ass) =>
+              oldIds.has(ass.airmanId) ? { ...ass, airmanId: canonicalId } : ass
+            );
+          }
+        });
+      }
+    }
+
+    // Synchronize detailedUsers and local caches in-place so old BD No never resurrects as a second member
+    const oldUsersToTombstone: any[] = [];
+    const syncUserListInPlace = (users: any[]): any[] => {
+      if (!Array.isArray(users)) return [];
+      const seenBds = new Set<string>();
+      const out: any[] = [];
+      for (const u of users) {
+        if (!u) continue;
+        const uBd = String(u.bdNo || u.userId || u.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        const matchesTarget =
+          u.airmanId === previous.id ||
+          u.airmanId === canonicalId ||
+          (oldBd && uBd === oldBd) ||
+          (newBd && uBd === newBd);
+        if (matchesTarget) {
+          if (oldBd && newBd && oldBd !== newBd) {
+            oldUsersToTombstone.push({ ...u });
+          }
+          const updatedPin = !u.pin || String(u.pin).trim() === oldBd ? newBd : u.pin;
+          const nextUser = {
+            ...u,
+            id: `user-login-${newBd}`,
+            userId: newBd,
+            bdNo: newBd,
+            airmanId: canonicalId,
+            rank: updatedRecord.rank || u.rank,
+            name: updatedRecord.name || u.name,
+            fullName: updatedRecord.fullName || updatedRecord.name || u.fullName,
+            surname: updatedRecord.name || u.surname,
+            trade: updatedRecord.trade || u.trade,
+            mobileNo: updatedRecord.mobileNo || u.mobileNo,
+            pin: updatedPin,
+            password: updatedPin,
+            updatedAt: new Date().toISOString(),
+          };
+          if (!seenBds.has(newBd)) {
+            seenBds.add(newBd);
+            out.push(nextUser);
+          }
+        } else {
+          const key = uBd || String(u.id || '');
+          if (!seenBds.has(key)) {
+            seenBds.add(key);
+            out.push(u);
+          }
+        }
+      }
+      return out;
+    };
+
+    if (Array.isArray(this.db.detailedUsers)) {
+      this.db.detailedUsers = syncUserListInPlace(this.db.detailedUsers);
+    }
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const officeCode = getActiveOfficeCode();
+      const safeCode = officeCode.replace(/[^A-Z0-9_-]/g, '_');
+
+      try {
+        const scopedUsersKey = getActiveDetailedUsersStorageKey();
+        const rawScoped = window.localStorage.getItem(scopedUsersKey);
+        const parsedScoped = rawScoped ? JSON.parse(rawScoped) : this.db.detailedUsers || [];
+        const updatedScoped = syncUserListInPlace(Array.isArray(parsedScoped) ? parsedScoped : []);
+        window.localStorage.setItem(scopedUsersKey, JSON.stringify(updatedScoped));
+      } catch {}
+
+      try {
+        const legacyKey = `baf_local_db_v3__office_${safeCode}`;
+        const rawLegacy = window.localStorage.getItem(legacyKey);
+        if (rawLegacy) {
+          const parsedLegacy = JSON.parse(rawLegacy);
+          if (parsedLegacy && typeof parsedLegacy === 'object') {
+            parsedLegacy.airmen = this.db.airmen;
+            if (Array.isArray(parsedLegacy.detailedUsers)) {
+              parsedLegacy.detailedUsers = syncUserListInPlace(parsedLegacy.detailedUsers);
+            }
+            window.localStorage.setItem(legacyKey, JSON.stringify(parsedLegacy));
+          }
+        }
+      } catch {}
+
+      if (oldBd && newBd) {
+        try {
+          const reqsKey = 'baf_pending_office_requests_v1';
+          const rawReqs = window.localStorage.getItem(reqsKey);
+          if (rawReqs) {
+            const reqs = JSON.parse(rawReqs);
+            if (Array.isArray(reqs)) {
+              let reqChanged = false;
+              const nextReqs = reqs.map((r: any) => {
+                const rCode = String(r?.officeCode || '').toUpperCase().trim();
+                const rBd = String(r?.bdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+                if (rCode === officeCode && rBd === oldBd) {
+                  reqChanged = true;
+                  return {
+                    ...r,
+                    bdNo: newBd,
+                    rank: updatedRecord.rank || r.rank,
+                    surname: updatedRecord.name || r.surname,
+                    fullName: updatedRecord.fullName || updatedRecord.name || r.fullName,
+                    trade: updatedRecord.trade || r.trade,
+                    contactNo: updatedRecord.mobileNo || r.contactNo,
+                    presentAddress: updatedRecord.addressBlock || r.presentAddress,
+                  };
+                }
+                return r;
+              });
+              if (reqChanged) {
+                window.localStorage.setItem(reqsKey, JSON.stringify(nextReqs));
+              }
+            }
+          }
+        } catch {}
+
+        try {
+          const updateOfficeObj = (off: any) => {
+            const code = String(off?.officeCode || off?.firebaseConfig?.officeCode || '').toUpperCase().trim();
+            const adminBd = String(off?.firebaseConfig?.adminBdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+            if (code === officeCode && adminBd === oldBd) {
+              return {
+                ...off,
+                firebaseConfig: {
+                  ...off.firebaseConfig,
+                  adminBdNo: newBd,
+                  adminRank: updatedRecord.rank || off.firebaseConfig?.adminRank,
+                  adminSurname: updatedRecord.name || off.firebaseConfig?.adminSurname,
+                  adminFullName: updatedRecord.fullName || updatedRecord.name || off.firebaseConfig?.adminFullName,
+                  adminTrade: updatedRecord.trade || off.firebaseConfig?.adminTrade,
+                  adminContactNo: updatedRecord.mobileNo || off.firebaseConfig?.adminContactNo,
+                },
+              };
+            }
+            return off;
+          };
+
+          for (const regKey of ['baf_registered_offices_v1', 'baf_master_portal_offices_local_v1']) {
+            const rawReg = window.localStorage.getItem(regKey);
+            if (rawReg) {
+              const parsedReg = JSON.parse(rawReg);
+              if (Array.isArray(parsedReg)) {
+                window.localStorage.setItem(regKey, JSON.stringify(parsedReg.map(updateOfficeObj)));
+              }
+            }
+          }
+
+          const customCfgKey = 'baf_custom_office_firebase_config_v1';
+          const rawCustomCfg = window.localStorage.getItem(customCfgKey);
+          if (rawCustomCfg) {
+            const parsedCustomCfg = JSON.parse(rawCustomCfg);
+            if (parsedCustomCfg && typeof parsedCustomCfg === 'object') {
+              window.localStorage.setItem(customCfgKey, JSON.stringify(updateOfficeObj(parsedCustomCfg)));
+            }
+          }
+        } catch {}
+
+        try {
+          const globalMapKey = 'baf_global_user_office_map_v1';
+          const rawMap = window.localStorage.getItem(globalMapKey);
+          if (rawMap) {
+            const map = JSON.parse(rawMap);
+            if (map && typeof map === 'object') {
+              const prevEntry = map[oldBd] || map[newBd];
+              if (oldBd !== newBd && map[oldBd]) {
+                delete map[oldBd];
+              }
+              if (prevEntry || !isDefault155UasuOffice()) {
+                const identity = getActiveOfficeIdentity();
+                map[newBd] = {
+                  ...(prevEntry || {}),
+                  bdNo: newBd,
+                  fullName: updatedRecord.fullName || updatedRecord.name,
+                  surname: updatedRecord.name,
+                  rank: updatedRecord.rank,
+                  trade: updatedRecord.trade,
+                  contactNo: updatedRecord.mobileNo || '',
+                  presentAddress: updatedRecord.addressBlock || '',
+                  officeCode: identity.officeCode,
+                  officeName: identity.officeName,
+                  officeBase: identity.officeBase,
+                  isDefault155: isDefault155UasuOffice(),
+                  active: updatedRecord.active !== false,
+                  isPostedOut: updatedRecord.active === false,
+                  updatedAt: new Date().toISOString(),
+                };
+              }
+              window.localStorage.setItem(globalMapKey, JSON.stringify(map));
+            }
+          }
+        } catch {}
+      }
     }
 
     if (previous.active && !data.active) {
-      this.logSystemAction(canonicalId, `${previous.rank} ${previous.name}`, 'Posted out / Marked inactive from Nominal Roll');
-      markUserPostedOutInGlobalDirectory(cleanBd, true);
+      this.logSystemAction(canonicalId, `${updatedRecord.rank} ${updatedRecord.name}`, 'Posted out / Marked inactive from Nominal Roll');
+      markUserPostedOutInGlobalDirectory(newBd, true);
     } else if (!previous.active && data.active) {
-      this.logSystemAction(canonicalId, `${previous.rank} ${previous.name}`, 'Reactivated in Nominal Roll');
-      markUserPostedOutInGlobalDirectory(cleanBd, false);
+      this.logSystemAction(canonicalId, `${updatedRecord.rank} ${updatedRecord.name}`, 'Reactivated in Nominal Roll');
+      markUserPostedOutInGlobalDirectory(newBd, false);
     } else if (data.active === false) {
-      markUserPostedOutInGlobalDirectory(cleanBd, true);
+      markUserPostedOutInGlobalDirectory(newBd, true);
     }
 
     this.saveToStorage(this.db, true, false);
 
-    // Save to Cloud Supabase safely and exclusively via saveToFirebase
+    // If the airman document ID or BD No changed, remove the old document from Firestore so sync never pulls both old and new
+    if ((oldBd && newBd && oldBd !== newBd) || getAirmanDocId(previous) !== getAirmanDocId(updatedRecord)) {
+      deleteAirmanFromFirebase(previous).catch(() => {});
+      if (oldUsersToTombstone.length > 0) {
+        deleteUserProfileFromFirebase(oldUsersToTombstone).catch(() => {});
+      }
+    }
+
+    // Save to Cloud safely via saveToFirebase
     await this.saveToFirebase(this.db, true);
 
-    return this.db.airmen[newIdx !== -1 ? newIdx : idx];
+    return updatedRecord;
   }
 
   public deleteAirman(id: string): boolean {
-    if (String(id).replace(/\D/g, '') === '48456') {
+    const cleanIdDigits = String(id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+    if (cleanIdDigits === '48456') {
       return false;
     }
-    const target = this.db.airmen.find((a) => a.id === id);
-    if (target && (String(target.bdNo || '').replace(/\D/g, '') === '48456' || target.isProtected)) {
+    const target = this.db.airmen.find(
+      (a) =>
+        a.id === id ||
+        (cleanIdDigits && String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim() === cleanIdDigits)
+    );
+    if (!target) {
       return false;
     }
-    if (target) {
-        this.logSystemAction(id, `${target.rank} ${target.name}`, 'Permanently deleted from Nominal Roll');
-        markUserPostedOutInGlobalDirectory(target.bdNo || id, true);
+    const targetBd = String(target.bdNo || target.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+    if (targetBd === '48456' || target.isProtected) {
+      return false;
     }
-    this.db.airmen = normalizeAirmenSeniority(this.db.airmen.filter((a) => a.id !== id));
+
+    this.logSystemAction(target.id, `${target.rank} ${target.name}`, 'Permanently deleted from Nominal Roll');
+    markUserPostedOutInGlobalDirectory(target.bdNo || target.id, true);
+
+    this.db.airmen = normalizeAirmenSeniority(
+      this.db.airmen.filter((a) => {
+        if (a.id === id || a.id === target.id) return false;
+        const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        if (targetBd && aBd === targetBd) return false;
+        return true;
+      })
+    );
 
     // Clean assignments
     if (this.db.assignments) {
       Object.keys(this.db.assignments).forEach((monthKey) => {
         if (Array.isArray(this.db.assignments[monthKey])) {
-          this.db.assignments[monthKey] = this.db.assignments[monthKey].filter((ass) => ass.airmanId !== id);
+          this.db.assignments[monthKey] = this.db.assignments[monthKey].filter(
+            (ass) => ass.airmanId !== id && ass.airmanId !== target.id
+          );
         }
       });
     }
-    
+
     // Clean detailedUsers (never delete 48456)
+    const deletedUsers: any[] = [];
+    const filterDeletedUser = (u: any) => {
+      const uBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (uBd === '48456' || u?.isProtected === true) return true;
+      const isMatch =
+        u?.airmanId === id ||
+        u?.airmanId === target.id ||
+        (targetBd && uBd === targetBd);
+      if (isMatch) {
+        deletedUsers.push(u);
+        return false;
+      }
+      return true;
+    };
+
     if (this.db.detailedUsers) {
-      this.db.detailedUsers = this.db.detailedUsers.filter(
-        (u: any) =>
-          String(u.bdNo || u.userId || '').replace(/\D/g, '') === '48456' ||
-          u.isProtected === true ||
-          (u.airmanId !== id && u.bdNo !== target?.bdNo)
-      );
+      this.db.detailedUsers = this.db.detailedUsers.filter(filterDeletedUser);
+    }
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const officeCode = getActiveOfficeCode();
+      const safeCode = officeCode.replace(/[^A-Z0-9_-]/g, '_');
+      try {
+        const scopedUsersKey = getActiveDetailedUsersStorageKey();
+        const rawScoped = window.localStorage.getItem(scopedUsersKey);
+        if (rawScoped) {
+          const parsedScoped = JSON.parse(rawScoped);
+          if (Array.isArray(parsedScoped)) {
+            window.localStorage.setItem(
+              scopedUsersKey,
+              JSON.stringify(parsedScoped.filter(filterDeletedUser))
+            );
+          }
+        }
+      } catch {}
+
+      try {
+        const legacyKey = `baf_local_db_v3__office_${safeCode}`;
+        const rawLegacy = window.localStorage.getItem(legacyKey);
+        if (rawLegacy) {
+          const parsedLegacy = JSON.parse(rawLegacy);
+          if (parsedLegacy && typeof parsedLegacy === 'object') {
+            parsedLegacy.airmen = this.db.airmen;
+            if (Array.isArray(parsedLegacy.detailedUsers)) {
+              parsedLegacy.detailedUsers = parsedLegacy.detailedUsers.filter(filterDeletedUser);
+            }
+            window.localStorage.setItem(legacyKey, JSON.stringify(parsedLegacy));
+          }
+        }
+      } catch {}
     }
 
     this.saveToStorage();
+    deleteAirmanFromFirebase(target).catch(() => {});
+    if (deletedUsers.length > 0) {
+      deleteUserProfileFromFirebase(deletedUsers).catch(() => {});
+    }
     updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
 
     return true;
@@ -5029,7 +5365,7 @@ export class LocalDatabaseEngine {
     // No history entries or logs are deleted
   }
 
-  public mergeHistory(incoming: ActivityHistoryItem[]): void {
+  public mergeHistory(incoming: ActivityHistoryItem[], pushToFirebase: boolean = true): void {
     if (!Array.isArray(incoming) || incoming.length === 0) return;
     const historyMap = new Map<string, ActivityHistoryItem>();
     (this.db.activityHistory || []).forEach((h) => {
@@ -5045,7 +5381,10 @@ export class LocalDatabaseEngine {
       (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
     );
     this.cleanDuplicateHistory();
-    this.saveToStorage();
+    this.saveToStorage(this.db, true, pushToFirebase, pushToFirebase);
+    if (!pushToFirebase && !hasPendingDeltas()) {
+      this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
+    }
   }
 
   public undoHistory(historyId: string): boolean {

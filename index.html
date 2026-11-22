@@ -13,28 +13,22 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Noto+Serif+Bengali:wght@400;500;600;700;800;900&family=Tiro+Bangla:ital@0;1&display=swap" rel="stylesheet" crossorigin="anonymous">
-    <link id="pwa-icon-192" rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192-trans.png?v=18" />
-    <link id="pwa-icon-512" rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512-trans.png?v=18" />
-    <link id="pwa-apple-icon" rel="apple-touch-icon" sizes="192x192" href="/pwa-192x192-trans.png?v=18" />
-    <link id="pwa-manifest-link" rel="manifest" href="/api/pwa-manifest?v=18" />
+    <link id="pwa-icon-192" rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192-trans.png?v=25" />
+    <link id="pwa-icon-512" rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512-trans.png?v=25" />
+    <link id="pwa-apple-icon" rel="apple-touch-icon" sizes="192x192" href="/pwa-192x192-trans.png?v=25" />
+    <link id="pwa-manifest-link" rel="manifest" href="/api/pwa-manifest?v=25" />
     <script>
       (function () {
         try {
           if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(function () {});
+            navigator.serviceWorker.register('/sw.js?v=25').catch(function () {});
           }
           var officeName = '155 UASU BAF';
-          var is155 = true;
-          var customLogo = '';
           var rawMeta = localStorage.getItem('baf_pwa_active_office_meta');
           if (rawMeta) {
             var meta = JSON.parse(rawMeta);
             if (meta && meta.officeName && meta.officeName !== 'Office Management' && meta.officeName !== 'Office Management Application') {
               officeName = String(meta.officeName).trim();
-              is155 = Boolean(meta.is155);
-              if (!is155 && meta.logoUrl && meta.logoUrl.indexOf('office-management-logo') === -1 && meta.logoUrl.indexOf('pwa-pc-') === -1) {
-                customLogo = String(meta.logoUrl);
-              }
             }
           } else {
             var rawCfg = localStorage.getItem('baf_custom_office_config');
@@ -42,21 +36,17 @@
               var cfg = JSON.parse(rawCfg);
               if (cfg && cfg.officeName && cfg.officeName !== 'Office Management') {
                 officeName = String(cfg.officeName).trim();
-                is155 = officeName.toUpperCase().indexOf('155 UASU') !== -1;
-                if (!is155 && cfg.officeLogo && cfg.officeLogo.indexOf('office-management-logo') === -1 && cfg.officeLogo.indexOf('pwa-pc-') === -1) {
-                  customLogo = String(cfg.officeLogo);
-                }
               }
             }
           }
           var shortName = officeName.length > 25 ? officeName.slice(0, 25).trim() : officeName;
           var manifestEl = document.getElementById('pwa-manifest-link');
           if (manifestEl) {
-            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&is155=' + (is155 ? '1' : '0');
+            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=25';
             manifestEl.setAttribute('href', '/api/pwa-manifest?' + q);
           }
-          var icon192 = is155 ? '/pwa-192x192-trans.png?v=18' : (customLogo || '/api/pwa-active-icon-192.png?v=18');
-          var icon512 = is155 ? '/pwa-512x512-trans.png?v=18' : (customLogo || '/api/pwa-active-icon-512.png?v=18');
+          var icon192 = '/pwa-192x192-trans.png?v=25';
+          var icon512 = '/pwa-512x512-trans.png?v=25';
           var el192 = document.getElementById('pwa-icon-192');
           var el512 = document.getElementById('pwa-icon-512');
           var elApple = document.getElementById('pwa-apple-icon');

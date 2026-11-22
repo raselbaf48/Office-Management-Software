@@ -7,10 +7,10 @@ export interface DynamicPWAOfficeIdentity {
 }
 
 const DEFAULT_OFFICE_NAME = '155 UASU BAF';
-const UASU_192_ICON = '/pwa-192x192-trans.png?v=18';
-const UASU_512_ICON = '/pwa-512x512-trans.png?v=18';
-const UASU_MASKABLE_192 = '/pwa-192x192-full.png?v=18';
-const UASU_MASKABLE_512 = '/pwa-512x512-full.png?v=18';
+const UASU_192_ICON = '/pwa-192x192-trans.png?v=25';
+const UASU_512_ICON = '/pwa-512x512-trans.png?v=25';
+const UASU_MASKABLE_192 = '/pwa-192x192-full.png?v=25';
+const UASU_MASKABLE_512 = '/pwa-512x512-full.png?v=25';
 
 let lastSyncedSignature = '';
 const iconResizeCache = new Map<string, { icon192: string; icon512: string; maskable512: string; hash: string }>();
@@ -228,11 +228,12 @@ export async function syncDynamicOfficePwaManifest(
       officeCode.toUpperCase().includes('155');
 
     let rawLogo = String(effectiveIdentity.officeLogo || '').trim();
-    if (!rawLogo || (is155Office && isGenericAppLogoUrl(rawLogo)) || isGenericAppLogoUrl(rawLogo)) {
-      rawLogo = '/155-uasu-baf-logo.png';
+    if (!rawLogo || isGenericAppLogoUrl(rawLogo)) {
+      rawLogo = '/office-management-logo.png?v=25';
     }
 
-    const uses155Logo = is155Office || is155LogoUrl(rawLogo);
+    // Always use the BAF Default Logo for PWA App icons (/pwa-192x192-trans.png?v=25 & /pwa-512x512-trans.png?v=25)
+    const uses155Logo = true;
 
     const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}`;
     if (sig === lastSyncedSignature) return;
@@ -259,56 +260,23 @@ export async function syncDynamicOfficePwaManifest(
     }
     appNameMeta.content = appName;
 
-    let serverIcon192Url = UASU_192_ICON;
-    let serverIcon512Url = UASU_512_ICON;
-    let serverMaskable192Url = UASU_MASKABLE_192;
-    let serverMaskable512Url = UASU_MASKABLE_512;
-    let customIconHash = '';
-    let sizedCustomIcons: { icon192: string; icon512: string; maskable512: string; hash: string } | null = null;
+    const serverIcon192Url = UASU_192_ICON;
+    const serverIcon512Url = UASU_512_ICON;
+    const serverMaskable192Url = UASU_MASKABLE_192;
+    const serverMaskable512Url = UASU_MASKABLE_512;
+    const customIconHash = '';
+    const sizedCustomIcons: { icon192: string; icon512: string; maskable512: string; hash: string } | null = null;
 
-    // 2. For custom office logos, render exact 192x192 & 512x512 PNGs via Canvas and upload to server.ts
-    if (!uses155Logo) {
-      sizedCustomIcons = await generateSizedPwaIcons(rawLogo);
-      customIconHash = sizedCustomIcons.hash;
-      if (sizedCustomIcons.icon192.startsWith('data:image/png')) {
-        try {
-          const res = await fetch('/api/pwa-icon-upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              hash: sizedCustomIcons.hash,
-              icon192: sizedCustomIcons.icon192,
-              icon512: sizedCustomIcons.icon512,
-              maskable512: sizedCustomIcons.maskable512,
-              officeName: appName,
-              officeCode,
-              officeSlogan: slogan,
-              is155Office: false,
-            }),
-          });
-          if (res.ok) {
-            uploadedHashes.add(sizedCustomIcons.hash);
-          }
-        } catch {}
-      }
-      const hashQuery = `?iconHash=${encodeURIComponent(sizedCustomIcons.hash)}`;
-      serverIcon192Url = `/api/pwa-active-icon-192.png${hashQuery}`;
-      serverIcon512Url = `/api/pwa-active-icon-512.png${hashQuery}`;
-      serverMaskable192Url = `/api/pwa-active-icon-192.png${hashQuery}`;
-      serverMaskable512Url = `/api/pwa-active-maskable-512.png${hashQuery}`;
-    } else {
-      // Notify server that 155 UASU BAF is the active PWA office
-      fetch('/api/pwa-icon-upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          officeName: appName,
-          officeCode: officeCode || '155-UASU',
-          officeSlogan: slogan || 'Intel • Surveillance • Strike',
-          is155Office: true,
-        }),
-      }).catch(() => {});
-    }
+    fetch('/api/pwa-icon-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        officeName: appName,
+        officeCode: officeCode || '155-UASU',
+        officeSlogan: slogan || 'Intel • Surveillance • Strike',
+        is155Office: true,
+      }),
+    }).catch(() => {});
 
     // Save active office PWA metadata to localStorage so index.html synchronous head script has it on reload
     try {

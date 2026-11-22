@@ -67,3 +67,67 @@ export function addCustomTradeToList(tradeName: string): string[] {
 
   return getAvailableTrades();
 }
+
+export const DEFAULT_BAF_BASES: string[] = [
+  'BAF BASE AKR',
+  'BAF BASE BSR',
+  'BAF BASE ZHR',
+  'BAF BASE MTR',
+  'BAF BASE CXB',
+  'BAF BASE SMD',
+];
+
+const CUSTOM_BASES_STORAGE_KEY = 'baf_custom_bases_v1';
+
+export function getCustomBases(): string[] {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_BASES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((b) => String(b || '').trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function getAvailableBases(extraBases: string[] = []): string[] {
+  const custom = getCustomBases();
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const b of [...DEFAULT_BAF_BASES, ...custom, ...extraBases]) {
+    const clean = String(b || '').trim();
+    if (!clean || clean === '__CUSTOM__' || clean === 'Custom') continue;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(clean);
+    }
+  }
+
+  return result;
+}
+
+export function addCustomBaseToList(baseName: string): string[] {
+  const clean = String(baseName || '').trim();
+  if (!clean || clean === '__CUSTOM__' || clean === 'Custom') {
+    return getAvailableBases();
+  }
+
+  const allExisting = getAvailableBases();
+  const alreadyExists = allExisting.some((b) => b.toLowerCase() === clean.toLowerCase());
+  if (!alreadyExists && typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const currentCustom = getCustomBases();
+      const nextCustom = [...currentCustom, clean];
+      window.localStorage.setItem(CUSTOM_BASES_STORAGE_KEY, JSON.stringify(nextCustom));
+      window.dispatchEvent(new CustomEvent('baf_custom_bases_updated', { detail: nextCustom }));
+    } catch {}
+  }
+
+  return getAvailableBases();
+}
+
