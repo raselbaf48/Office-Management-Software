@@ -52,6 +52,7 @@ import {
   publishSyncManifest,
   subscribeToSyncManifest,
   fetchSyncManifestFromFirebase,
+  extractManifestDataHash,
   probeFirebaseConnectionAndQuota,
   purgeActiveCustomOfficeCloudData,
   getAssignmentDocId,
@@ -286,9 +287,9 @@ function getYesterdayDateStr(dateStr: string): string {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const SINGLE_USER_BACKUP_INTERVAL_MS = 60000; // 60 seconds trailing debounce to batch edits
-const MULTI_USER_BACKUP_INTERVAL_MS = 15000; // 15 seconds trailing debounce to batch edits
-const MULTI_USER_POLL_INTERVAL_MS = 180000; // 3 minutes safety check ticker
+const SINGLE_USER_BACKUP_INTERVAL_MS = 2500; // 2.5 seconds trailing debounce to batch rapid clicks
+const MULTI_USER_BACKUP_INTERVAL_MS = 2000; // 2 seconds trailing debounce to batch rapid clicks
+const MULTI_USER_POLL_INTERVAL_MS = 45000; // 45 seconds safety check ticker
 const LAST_FIREBASE_PULL_KEY = 'baf_last_firebase_pull_at';
 const LAST_HANDLED_REVISION_KEY = 'baf_last_handled_sync_revision';
 const SETTING_PREFIXES = ['baf_', 'savedDisposalKeys', 'parade_historical', 'flg_wg_'];
@@ -524,18 +525,14 @@ export class LocalDatabaseEngine {
         try {
           hasSession = Boolean(window.sessionStorage.getItem('baf_user_session'));
         } catch {}
-        const lastPullMs = this.parseTimeMs(this.lastPullAt);
-        const recentlyPulled = lastPullMs > 0 && Date.now() - lastPullMs < 10 * 60 * 1000;
-        // Only run Firebase boot pull if authenticated (and not pulled within 10 mins) or local airmen DB is empty
-        if ((hasSession && !recentlyPulled) || (this.db.airmen || []).length === 0) {
-          this.syncFromFirebase({ isLoginSync: false });
-        } else if (hasSession) {
-          this.isInitialPullDone = true;
+        // Always compare Local Cloud vs Firebase Cloud on boot/reload when authenticated (costs only 1 manifest read if matched)
+        if (hasSession || (this.db.airmen || []).length === 0) {
+          this.syncFromFirebase({ isLoginSync: true });
         }
         if (hasSession) {
           this.attachManifestListener();
         }
-      }, 1000);
+      }, 400);
 
       window.addEventListener('baf_office_config_changed', (e: any) => {
         const isBrandNew = Boolean(e?.detail?.__isBrandNew);
@@ -680,17 +677,12 @@ export class LocalDatabaseEngine {
       if (!manifest || !manifest.updatedAt) return;
       if (manifest.updatedBySessionId === CLIENT_SESSION_ID) return;
       const localFp = this.computeLocalDataFingerprint(this.db);
-      if (manifest.dataHash && manifest.dataHash === localFp) {
+      const manifestHash = extractManifestDataHash(manifest);
+      if (manifestHash && manifestHash === localFp) {
         this.recordHandledRevision(manifest.revision);
         return;
       }
-      if (!manifest.dataHash && manifest.revision && manifest.revision <= this.lastHandledRevision) return;
-      const manifestMs = this.parseTimeMs(manifest.updatedAt);
-      const lastPullMs = this.parseTimeMs(this.lastPullAt);
-      if (!manifest.dataHash && manifestMs > 0 && lastPullMs > 0 && manifestMs <= lastPullMs) {
-        this.recordHandledRevision(manifest.revision);
-        return;
-      }
+      if (!manifestHash && manifest.revision && manifest.revision <= this.lastHandledRevision) return;
       this.recordHandledRevision(manifest.revision || Date.now());
 
       // Skip pulling Office collections when manifest only recorded non-Office changes (e.g. Canteen)
@@ -699,8 +691,7 @@ export class LocalDatabaseEngine {
         return;
       }
 
-      // Only pull changed collections incrementally
-      this.pullIncrementalFromFirebase(manifest.changedCollections);
+      this.pullIncrementalFromFirebase(manifest.changedCollections, manifestHash);
     });
   }
 
@@ -771,11 +762,16 @@ export class LocalDatabaseEngine {
       }
     };
 
-    const airmenList = [...(dbObj.airmen || [])].sort((a: any, b: any) => {
-      const ka = String(a?.bdNo || a?.id || '').replace(/\D/g, '') || String(a?.id || '');
-      const kb = String(b?.bdNo || b?.id || '').replace(/\D/g, '') || String(b?.id || '');
-      return ka.localeCompare(kb);
-    });
+    const airmenList = [...(dbObj.airmen || [])]
+      .filter((a: any) => {
+        const digits = String(a?.bdNo || a?.id || '').replace(/\D/g, '');
+        return digits !== '48456' && a?.role !== 'master_owner' && a?.isProtected !== true;
+      })
+      .sort((a: any, b: any) => {
+        const ka = String(a?.bdNo || a?.id || '').replace(/\D/g, '') || String(a?.id || '');
+        const kb = String(b?.bdNo || b?.id || '').replace(/\D/g, '') || String(b?.id || '');
+        return ka.localeCompare(kb);
+      });
     for (const a of airmenList) {
       const key = String(a?.bdNo || a?.id || '').replace(/\D/g, '') || String(a?.id || '');
       feed(
@@ -785,57 +781,28 @@ export class LocalDatabaseEngine {
       );
     }
 
-    const asnRecords: Array<{ docId: string; sig: string }> = [];
+    const asnByCanonicalKey = new Map<string, string>();
     Object.values(dbObj.assignments || {}).forEach((monthList) => {
       if (!Array.isArray(monthList)) return;
       for (const rawA of monthList) {
         const a: any = rawA;
         if (!a || isCorruptedAssignmentRecord(a) || a.isDeleted) continue;
         const normAirId = normalizeCanonicalAirmanId(a.airmanId);
-        const normA = { ...a, airmanId: normAirId };
-        const docId = getAssignmentDocId(normA);
-        const sig = `${docId}|${normAirId}|${a.date || ''}|${a.dutyCode || 'ON_PARADE'}|${a.idaShift || ''}|${
-          a.disposalScope || 'ALL'
-        }|${a.proxyForFlight || ''}|${a.notes || ''}|${a.location || ''}|${a.isOfficial ? '1' : '0'}|${
-          a.isCompleted ? '1' : '0'
-        }`;
-        asnRecords.push({ docId, sig });
+        const dateStr = String(a.date || '').trim();
+        const dutyCode = String(a.dutyCode || 'ON_PARADE').trim() || 'ON_PARADE';
+        const shiftKey = String(a.idaShift || a.shift || 'n').trim() || 'n';
+        const scopeKey = String(a.disposalScope || 'ALL').trim() || 'ALL';
+        const canonicalKey = `${normAirId}|${dateStr}|${dutyCode}|${shiftKey}|${scopeKey}`;
+        const sig = `${canonicalKey}|${a.proxyForFlight || ''}|${a.notes || ''}|${a.location || ''}`;
+        asnByCanonicalKey.set(canonicalKey, sig);
       }
     });
-    asnRecords.sort((x, y) => x.docId.localeCompare(y.docId));
-    for (const r of asnRecords) {
-      feed(`D:${r.sig};`);
+    const sortedAsnKeys = Array.from(asnByCanonicalKey.keys()).sort();
+    for (const k of sortedAsnKeys) {
+      feed(`D:${asnByCanonicalKey.get(k)};`);
     }
 
-    const usersList = [...(dbObj.detailedUsers || [])]
-      .filter((u: any) => u && (u.bdNo || u.id))
-      .sort((a: any, b: any) => {
-        const ka = String(a?.bdNo || a?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-        const kb = String(b?.bdNo || b?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-        return ka.localeCompare(kb);
-      });
-    for (const u of usersList) {
-      const k = String(u?.bdNo || u?.id || '').replace(/^BD\/?/i, '').trim().toLowerCase();
-      feed(`U:${k}|${u?.role || ''}|${u?.status || ''}|${u?.pin || u?.password || ''}|${u?.name || ''}|${u?.rank || ''};`);
-    }
-
-    if (typeof window !== 'undefined') {
-      const keySettings = [
-        'baf_official_duty_matrix_v4',
-        'baf_custom_duties',
-        'baf_leave_requests',
-        'baf_tdy_records',
-        'baf_deployment_records',
-      ];
-      for (const sk of keySettings) {
-        const val = window.localStorage.getItem(sk);
-        if (val) {
-          feed(`S:${sk}=${val};`);
-        }
-      }
-    }
-
-    return `fp_${h1.toString(36)}_${h2.toString(36)}_${airmenList.length}_${asnRecords.length}`;
+    return `fp_${h1.toString(36)}_${h2.toString(36)}_${airmenList.length}_${sortedAsnKeys.length}`;
   }
 
   private getManifestExtraMeta(dbObj: LocalStorageDB = this.db): {
@@ -941,8 +908,15 @@ export class LocalDatabaseEngine {
         this.db.airmen = normalizeAirmenSeniority(enrichedMerged);
       }
 
-      // 2. Duty Assignments: only pull from local server if Firebase hasn't already completed initial pull or quota is full
-      if (srvDb.assignments && typeof srvDb.assignments === 'object' && (!this.isInitialPullDone || isFirestoreQuotaExceeded())) {
+      // 2. Duty Assignments: only pull from local server if Firebase is not configured or quota is full or local assignments are empty
+      const hasExistingLocalAssignments = Object.keys(this.db.assignments || {}).some(
+        (k) => Array.isArray(this.db.assignments[k]) && this.db.assignments[k].length > 0
+      );
+      if (
+        srvDb.assignments &&
+        typeof srvDb.assignments === 'object' &&
+        (!isFirebaseConfigured || isFirestoreQuotaExceeded() || !hasExistingLocalAssignments)
+      ) {
         if (!this.db.assignments) this.db.assignments = {};
         Object.keys(srvDb.assignments).forEach((mKey) => {
           const incoming = (srvDb.assignments[mKey] || [])
@@ -1204,11 +1178,9 @@ export class LocalDatabaseEngine {
         return true;
       }
 
-      // On login, quota recovery, or when quota flag is set, verify Firebase health & quota live from server
-      if (options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded() || hasPendingDeltas()) {
-        const probe = await probeFirebaseConnectionAndQuota(
-          Boolean(options?.isLoginSync || options?.isQuotaRecovery || isFirestoreQuotaExceeded())
-        );
+      // On quota recovery or when quota flag is currently set, verify Firebase quota live from server
+      if (options?.isQuotaRecovery || isFirestoreQuotaExceeded()) {
+        const probe = await probeFirebaseConnectionAndQuota(true);
         if (probe.quotaExceeded || isFirestoreQuotaExceeded()) {
           await this.pullDatabaseFromServer();
           await this.pullAllSettingsFromServer();
@@ -1235,13 +1207,6 @@ export class LocalDatabaseEngine {
           });
           return true;
         }
-        if (!probe.ok) {
-          console.warn('[localDatabase] Firebase unreachable on probe, using Local Cloud Storage:', probe.errorMsg);
-          await this.pullDatabaseFromServer();
-          await this.pullAllSettingsFromServer();
-          this.isInitialPullDone = true;
-          return false;
-        }
       }
 
       // REQUIREMENT 2: If the user made ANY changes while Firebase quota was exhausted (or offline),
@@ -1259,42 +1224,48 @@ export class LocalDatabaseEngine {
       const hasLocalAirmen = (this.db.airmen || []).length > 0;
       // Always force a fresh manifest read on login or quota recovery so cross-device comparison is 100% accurate
       const manifest = !options?.forceFullPull
-        ? await fetchSyncManifestFromFirebase(Boolean(options?.isLoginSync || options?.isQuotaRecovery || !this.lastPullAt))
+        ? await fetchSyncManifestFromFirebase(true)
         : null;
-      const manifestMs = manifest?.updatedAt ? this.parseTimeMs(manifest.updatedAt) : 0;
+
+      if (isFirestoreQuotaExceeded()) {
+        await this.pullDatabaseFromServer();
+        await this.pullAllSettingsFromServer();
+        this.isInitialPullDone = true;
+        if (options?.isLoginSync) {
+          window.dispatchEvent(
+            new CustomEvent('baf_login_quota_exceeded_popup', {
+              detail: {
+                source: 'login',
+                message: 'Firebase daily quota exceeded. Using Local Cloud Storage.',
+                upgradeUrl: getQuotaConsoleUpgradeUrl(),
+              },
+            })
+          );
+        }
+        return true;
+      }
+
       const lastPullMs = this.lastPullAt ? this.parseTimeMs(this.lastPullAt) : 0;
       const localFingerprint = this.computeLocalDataFingerprint(this.db);
+      const manifestHash = extractManifestDataHash(manifest);
 
       const isExactFingerprintMatch = Boolean(
         manifest &&
-        manifest.dataHash &&
-        manifest.dataHash === localFingerprint &&
-        hasLocalAirmen &&
-        !hasPendingDeltas()
-      );
-
-      const isRevisionAndTimestampMatch = Boolean(
-        manifest &&
-        !manifest.dataHash &&
-        manifest.revision &&
-        this.lastHandledRevision > 0 &&
-        manifest.revision === this.lastHandledRevision &&
-        manifestMs > 0 &&
-        lastPullMs > 0 &&
-        manifestMs <= lastPullMs &&
+        manifestHash &&
+        manifestHash === localFingerprint &&
         hasLocalAirmen &&
         !hasPendingDeltas()
       );
 
       // REQUIREMENT 1: On first login (or boot), compare Local Cloud with Firebase Cloud first.
-      // If they match, perform ZERO downloads and ZERO uploads!
-      if (!options?.forceFullPull && (isExactFingerprintMatch || isRevisionAndTimestampMatch)) {
+      // If their data fingerprints match, perform ZERO downloads and ZERO uploads!
+      if (!options?.forceFullPull && isExactFingerprintMatch) {
         if (manifest?.revision) {
           this.recordHandledRevision(manifest.revision);
         }
-        if (manifest?.dataHash) {
+        if (manifestHash) {
           try {
-            window.localStorage.setItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'), manifest.dataHash);
+            window.localStorage.setItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'), manifestHash);
           } catch {}
         }
         this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
@@ -1323,11 +1294,11 @@ export class LocalDatabaseEngine {
         ? window.localStorage.getItem(getOfficeScopedStorageKey('baf_last_synced_data_hash'))
         : null;
 
-      // Only use incremental pull if this device has previously completed a verified sync with Firebase
+      // Only attempt incremental pull first if Firebase manifest already has a verified dataHash AND this device had a verified sync hash
       const canUseIncremental =
         !options?.forceFullPull &&
         hasLocalAirmen &&
-        Boolean(manifest) &&
+        Boolean(manifest && manifestHash) &&
         lastPullMs > 0 &&
         this.lastHandledRevision > 0 &&
         Boolean(lastSyncedHash);
@@ -1352,16 +1323,13 @@ export class LocalDatabaseEngine {
 
       const fetchCollectionsFromFirebase = async (sinceParam?: string) => {
         if (sinceParam) {
-          const changedCols =
-            Array.isArray(manifest?.changedCollections) && manifest!.changedCollections!.length > 0
-              ? manifest!.changedCollections!
-              : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'];
+          // Always query all 5 office collections modified since sinceParam so earlier changes in any collection are never skipped
           const [a, d, h, u, s] = await Promise.all([
-            changedCols.includes('airmen') ? fetchAirmenFromFirebase(sinceParam) : Promise.resolve([]),
-            changedCols.includes('duty_assignments') ? fetchDutyAssignmentsFromFirebase(sinceParam) : Promise.resolve([]),
-            changedCols.includes('parade_states') ? fetchParadeStatesFromFirebase(sinceParam) : Promise.resolve([]),
-            changedCols.includes('user_profiles') ? fetchUserProfilesFromFirebase(sinceParam) : Promise.resolve([]),
-            changedCols.includes('app_settings') ? fetchAppSettingsWithMetaFromFirebase(sinceParam) : Promise.resolve({}),
+            fetchAirmenFromFirebase(sinceParam),
+            fetchDutyAssignmentsFromFirebase(sinceParam),
+            fetchParadeStatesFromFirebase(sinceParam),
+            fetchUserProfilesFromFirebase(sinceParam),
+            fetchAppSettingsWithMetaFromFirebase(sinceParam),
           ]);
           return { a, d, h, u, s };
         } else {
@@ -1743,13 +1711,12 @@ export class LocalDatabaseEngine {
       );
 
       // Verification check: If we did an incremental pull, verify that our reconciled Local Cloud fingerprint
-      // now matches Firebase's manifest.dataHash. If it still doesn't match (e.g., older differences existed),
+      // now matches Firebase's manifestHash. If it still doesn't match (e.g., older differences existed),
       // automatically run a full pull from Firebase so both devices have 100% identical data!
       if (
         useSinceIso &&
-        manifest?.dataHash &&
         !hasPendingDeltas() &&
-        this.computeLocalDataFingerprint(newDb) !== manifest.dataHash
+        (!manifestHash || this.computeLocalDataFingerprint(newDb) !== manifestHash)
       ) {
         emitSyncProgress(50, 'Synchronizing complete dataset from Firebase Cloud...');
         useSinceIso = undefined;
@@ -1828,7 +1795,7 @@ export class LocalDatabaseEngine {
       window.localStorage.removeItem('baf_pending_sync');
 
       const extraMeta = this.getManifestExtraMeta(newDb);
-      if (changedCollections.length > 0 || !manifest?.dataHash) {
+      if (changedCollections.length > 0 || !manifestHash || manifestHash !== extraMeta.dataHash) {
         await publishSyncManifest(
           changedCollections.length > 0
             ? Array.from(new Set(changedCollections))
@@ -1915,7 +1882,7 @@ export class LocalDatabaseEngine {
   /**
    * Incremental pull triggered by sync_manifest for multi-user real-time collaboration
    */
-  public async pullIncrementalFromFirebase(changedCollections?: string[]): Promise<boolean> {
+  public async pullIncrementalFromFirebase(changedCollections?: string[], expectedDataHash?: string): Promise<boolean> {
     if (typeof window === 'undefined' || !isFirebaseConfigured || isFirestoreQuotaExceeded()) return false;
     if (this.isFirebaseSyncing || this.isPushing) return false;
 
@@ -2070,6 +2037,9 @@ export class LocalDatabaseEngine {
         this.getManifestExtraMeta(this.db);
         window.dispatchEvent(new CustomEvent('baf_settings_updated', { detail: { source: 'firebase' } }));
         window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { source: 'firebase' } }));
+      }
+      if (expectedDataHash && !hasPendingDeltas() && this.computeLocalDataFingerprint(this.db) !== expectedDataHash) {
+        void this.syncFromFirebase({ forceFullPull: true });
       }
       return true;
     } catch {

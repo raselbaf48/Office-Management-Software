@@ -209,7 +209,8 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'revision', 'updatedAt']) &&
              data.keys().hasOnly([
                'id', 'revision', 'updatedAt', 'updatedBySessionId',
-               'updatedByBdNo', 'lastReason', 'changedCollections'
+               'updatedByBdNo', 'lastReason', 'changedCollections',
+               'dataHash', 'airmenCount', 'assignmentsCount'
              ]) &&
              data.id is string && data.id.size() >= 1 && data.id.size() <= 64 &&
              data.revision is number &&
@@ -217,6 +218,9 @@ service cloud.firestore {
              isOptStr(data, 'updatedBySessionId', 128) &&
              isOptStr(data, 'updatedByBdNo', 64) &&
              isOptStr(data, 'lastReason', 200) &&
+             isOptStr(data, 'dataHash', 128) &&
+             isOptNum(data, 'airmenCount') &&
+             isOptNum(data, 'assignmentsCount') &&
              (!('changedCollections' in data) || (
                data.changedCollections is list &&
                data.changedCollections.size() <= 20 &&
@@ -331,7 +335,8 @@ service cloud.firestore {
       allow update: if isValidId(metaId) && isValidSyncManifest(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'id', 'revision', 'updatedAt', 'updatedBySessionId',
-                         'updatedByBdNo', 'lastReason', 'changedCollections'
+                         'updatedByBdNo', 'lastReason', 'changedCollections',
+                         'dataHash', 'airmenCount', 'assignmentsCount'
                        ]);
       allow delete: if false;
     }

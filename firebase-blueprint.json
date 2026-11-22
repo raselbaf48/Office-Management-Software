@@ -177,7 +177,10 @@
         "updatedBySessionId": { "type": "string", "maxLength": 128, "description": "Client session ID that made the change" },
         "updatedByBdNo": { "type": "string", "maxLength": 64, "description": "BD No of user who pushed the change" },
         "lastReason": { "type": "string", "maxLength": 200, "description": "Reason for update" },
-        "changedCollections": { "type": "array", "description": "List of modified collection names" }
+        "changedCollections": { "type": "array", "description": "List of modified collection names" },
+        "dataHash": { "type": "string", "maxLength": 128, "description": "Deterministic fingerprint of cloud dataset for match-first login check" },
+        "airmenCount": { "type": "number", "description": "Total airmen count in cloud dataset" },
+        "assignmentsCount": { "type": "number", "description": "Total active duty assignments count in cloud dataset" }
       },
       "required": ["id", "revision", "updatedAt"]
     },

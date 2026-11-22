@@ -847,6 +847,16 @@ function getCurrentBdNo(): string {
   return '';
 }
 
+export function extractManifestDataHash(manifest?: SyncManifest | null): string {
+  if (!manifest) return '';
+  if (typeof manifest.dataHash === 'string' && manifest.dataHash.trim()) {
+    return manifest.dataHash.trim();
+  }
+  const lr = String(manifest.lastReason || '');
+  const m = lr.match(/\|h=([a-zA-Z0-9_-]+)/);
+  return m && m[1] ? m[1] : '';
+}
+
 export async function publishSyncManifest(
   changedCollections: string[],
   reason: string = 'delta_sync',
@@ -854,23 +864,35 @@ export async function publishSyncManifest(
 ): Promise<void> {
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   const manifestDocId = getSyncManifestDocId();
+  const nowIso = new Date().toISOString();
+  const safeCollections = changedCollections
+    .filter((c) => typeof c === 'string' && c.trim().length > 0)
+    .slice(0, 20);
+  const effectiveHash =
+    extraMeta?.dataHash || extractManifestDataHash(cachedManifestResult) || '';
+  const baseReason = String(reason || 'delta_sync').split('|h=')[0].slice(0, 90) || 'delta_sync';
+  const encodedReason = effectiveHash
+    ? clampStr(`${baseReason}|h=${effectiveHash}`, 200) || baseReason
+    : clampStr(baseReason, 200) || 'delta_sync';
+
+  const coreManifest: SyncManifest = {
+    id: manifestDocId,
+    revision: Date.now(),
+    updatedAt: nowIso,
+    updatedBySessionId: CLIENT_SESSION_ID.slice(0, 128),
+    updatedByBdNo: getCurrentBdNo() || 'system',
+    lastReason: encodedReason,
+    changedCollections: safeCollections,
+  };
+
+  const nextManifest: SyncManifest = {
+    ...coreManifest,
+    ...(effectiveHash ? { dataHash: clampStr(effectiveHash, 128) } : {}),
+    ...(typeof extraMeta?.airmenCount === 'number' ? { airmenCount: extraMeta.airmenCount } : {}),
+    ...(typeof extraMeta?.assignmentsCount === 'number' ? { assignmentsCount: extraMeta.assignmentsCount } : {}),
+  };
+
   try {
-    const nowIso = new Date().toISOString();
-    const safeCollections = changedCollections
-      .filter((c) => typeof c === 'string' && c.trim().length > 0)
-      .slice(0, 20);
-    const nextManifest: SyncManifest = {
-      id: manifestDocId,
-      revision: Date.now(),
-      updatedAt: nowIso,
-      updatedBySessionId: CLIENT_SESSION_ID.slice(0, 128),
-      updatedByBdNo: getCurrentBdNo() || 'system',
-      lastReason: clampStr(reason, 200) || 'delta_sync',
-      changedCollections: safeCollections,
-      ...(extraMeta?.dataHash ? { dataHash: clampStr(extraMeta.dataHash, 128) } : cachedManifestResult?.dataHash ? { dataHash: cachedManifestResult.dataHash } : {}),
-      ...(typeof extraMeta?.airmenCount === 'number' ? { airmenCount: extraMeta.airmenCount } : {}),
-      ...(typeof extraMeta?.assignmentsCount === 'number' ? { assignmentsCount: extraMeta.assignmentsCount } : {}),
-    };
     await withFirestoreTimeout(
       setDoc(doc(dbLite, 'system_meta', manifestDocId), nextManifest, { merge: true }),
       8000,
@@ -882,8 +904,23 @@ export async function publishSyncManifest(
   } catch (err: any) {
     if (isQuotaExceededError(err)) {
       setFirestoreQuotaExceeded(true, err?.message);
-    } else {
-      console.warn('[FirebaseService] Manifest update notice:', err?.message);
+      return;
+    }
+    try {
+      await withFirestoreTimeout(
+        setDoc(doc(dbLite, 'system_meta', manifestDocId), coreManifest, { merge: true }),
+        8000,
+        'set:sync_manifest_core'
+      );
+      lastManifestFetchAt = Date.now();
+      lastManifestFetchDocId = manifestDocId;
+      cachedManifestResult = nextManifest;
+    } catch (fallbackErr: any) {
+      if (isQuotaExceededError(fallbackErr)) {
+        setFirestoreQuotaExceeded(true, fallbackErr?.message);
+      } else {
+        console.warn('[FirebaseService] Manifest update notice:', fallbackErr?.message || err?.message);
+      }
     }
   }
 }
@@ -902,11 +939,13 @@ async function pollSharedManifestOnce(force: boolean = false) {
   try {
     const data = await fetchSyncManifestFromFirebase(force);
     if (data && data.updatedAt) {
+      const prevHash = extractManifestDataHash(latestManifestSnapshot);
+      const nextHash = extractManifestDataHash(data);
       if (
         !latestManifestSnapshot ||
         latestManifestSnapshot.revision !== data.revision ||
         latestManifestSnapshot.updatedAt !== data.updatedAt ||
-        (data.dataHash && latestManifestSnapshot.dataHash !== data.dataHash)
+        (nextHash && prevHash !== nextHash)
       ) {
         latestManifestSnapshot = data;
         manifestListeners.forEach((cb) => {
@@ -927,8 +966,8 @@ function ensureSharedManifestListener() {
 
   void pollSharedManifestOnce();
   sharedManifestTimer = setInterval(() => {
-    void pollSharedManifestOnce();
-  }, 60 * 1000); // 60 seconds background manifest poll when active
+    void pollSharedManifestOnce(true);
+  }, 15 * 1000); // 15 seconds background manifest poll when active
 }
 
 export function subscribeToSyncManifest(
