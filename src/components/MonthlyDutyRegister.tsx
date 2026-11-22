@@ -646,7 +646,11 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
   const fetchRoster = async () => {
     try {
+      // Immediately hydrate synchronously at 0ms from localDb so UI and Print Preview always have latest data
       if (isFullYearView) {
+        const instantYear = localDb.getRosterYear(currentYear).assignments || [];
+        setAllYearAssignments(instantYear);
+        setAssignments(instantYear);
         const res = await fetch(`/api/roster/year?year=${currentYear}`);
         if (res.ok) {
           const data = await res.json();
@@ -654,6 +658,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
           setAssignments(data.assignments || []);
         }
       } else {
+        const instantMonth = localDb.getRoster(monthKey).assignments || [];
+        setAssignments(instantMonth);
         const res = await fetch(`/api/roster?month=${monthKey}`);
         if (res.ok) {
           const data = await res.json();
@@ -689,8 +695,10 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
       fetchRoster();
     };
     window.addEventListener('baf_state_updated', handleGlobalUpdate);
+    window.addEventListener('baf_sync_status', handleGlobalUpdate);
     return () => {
       window.removeEventListener('baf_state_updated', handleGlobalUpdate);
+      window.removeEventListener('baf_sync_status', handleGlobalUpdate);
     };
   }, [monthKey, currentYear, isFullYearView]);
 
@@ -729,10 +737,15 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
         if (
           dutyCode === 'ON_PARADE' ||
           dutyCode === 'CANTEEN' ||
+          dutyCode === 'BAKE_N_BITE' ||
+          dutyCode === 'DEPLOYMENT' ||
+          dutyCode === 'ATT' ||
           (dutyCode as string) === 'CTN' ||
+          (dutyCode as string) === 'BnB' ||
           dType?.shortName === 'P' ||
           dType?.shortName === 'PRD' ||
-          dType?.shortName === 'CTN'
+          dType?.shortName === 'CTN' ||
+          dType?.shortName === 'BnB'
         ) {
           pCount++;
         }
@@ -780,9 +793,12 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
       notes,
     };
 
-    // Optimistic UI update: instant 0ms reaction on click
+    // Optimistic UI update: instant 0ms reaction on click (preserve underlying deployment if assigning a regular duty)
+    const isDepCode = (c: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(c || ''));
     setAssignments((prev) => {
-      const filtered = prev.filter((a) => !(a.airmanId === assignment.airmanId && a.date === assignment.date));
+      const filtered = prev.filter(
+        (a) => !(a.airmanId === assignment.airmanId && a.date === assignment.date && (isDepCode(code) || !isDepCode(a.dutyCode)))
+      );
       return [...filtered, assignment];
     });
     const dutyLabel = DUTY_TYPE_MAP.get(code)?.name || code;
@@ -860,6 +876,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
           body: JSON.stringify({
             airmanId: cellEditModal.assignedAirman.id,
             date: cellEditModal.date,
+            dutyCode: cellEditModal.dutyCode,
+            idaShift: cellEditModal.idaShift,
           }),
         });
       }
@@ -913,6 +931,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
         body: JSON.stringify({
           airmanId: cellEditModal.assignedAirman.id,
           date: cellEditModal.date,
+          dutyCode: cellEditModal.dutyCode,
+          idaShift: cellEditModal.idaShift,
         }),
       });
 
@@ -1582,8 +1602,28 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                         } else if (dutyCode === 'ON_PARADE' || dutyType?.shortName === 'PRD' || dutyType?.shortName === 'P') {
                           displayLabel = 'P';
                           displayBadgeBg = 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700';
-                        } else if (dutyCode === 'CANTEEN' || (dutyCode as string) === 'CTN' || dutyType?.shortName === 'CTN') {
+                        } else if (
+                          dutyCode === 'CANTEEN' ||
+                          (dutyCode as string) === 'CTN' ||
+                          dutyType?.shortName === 'CTN' ||
+                          ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('canteen'))
+                        ) {
                           displayLabel = 'CTN';
+                          displayBadgeBg = 'bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700';
+                        } else if (
+                          dutyCode === 'BAKE_N_BITE' ||
+                          (dutyCode as string) === 'BnB' ||
+                          dutyType?.shortName === 'BnB' ||
+                          ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('bake'))
+                        ) {
+                          displayLabel = 'BnB';
+                          displayBadgeBg = 'bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700';
+                        } else if (dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') {
+                          const cleanNote = (ass?.notes || '').trim();
+                          displayLabel =
+                            cleanNote && !cleanNote.toLowerCase().includes('imported')
+                              ? cleanNote.split(' - ')[0].trim().toUpperCase()
+                              : 'ATT';
                           displayBadgeBg = 'bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700';
                         } else if (dutyCode === 'DUTY_OFF' || (dutyCode as any) === 'OFF') {
                           let offDuty = '';
@@ -1850,13 +1890,20 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                       const isSelected = bulkDutyCode === dt.code;
                       const reqCount = getRequiredCountForDuty(dt.code);
                       const assignedCount = getAssignedCountForDuty(dt.code);
+                      const isOverQuota = reqCount > 0 && assignedCount > reqCount;
+                      const isUnderQuota = reqCount > 0 && assignedCount < reqCount;
+                      const quotaGlowClass = isOverQuota
+                        ? 'duty-box-over-quota'
+                        : isUnderQuota
+                        ? 'duty-box-under-quota'
+                        : '';
 
                       return (
                         <button
                           key={dt.code}
                           type="button"
                           onClick={() => setBulkDutyCode(dt.code)}
-                          className={`p-2 rounded-xl text-xs font-bold text-left border transition-all flex flex-col justify-between space-y-1 ${
+                          className={`p-2 rounded-xl text-xs font-bold text-left border transition-all flex flex-col justify-between space-y-1 ${quotaGlowClass} ${
                             isSelected
                               ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-xs bg-emerald-50/50 dark:bg-emerald-950/30'
                               : 'bg-white dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-slate-300'
@@ -1871,9 +1918,11 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                             {reqCount > 0 ? (
                               <span
                                 className={`text-[10px] font-black px-1.5 py-0.5 rounded ${
-                                  assignedCount >= reqCount
-                                    ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700'
-                                    : 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700'
+                                  isOverQuota
+                                    ? 'bg-red-100 dark:bg-red-900/60 text-red-800 dark:text-red-200 border border-red-400 dark:border-red-600'
+                                    : isUnderQuota
+                                    ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-400 dark:border-amber-600'
+                                    : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700'
                                 }`}
                               >
                                 {reqCount} No.
@@ -1888,7 +1937,13 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                           <div className="flex items-center justify-between w-full mt-0.5">
                             <span className="truncate text-[11px] font-bold">{dt.name}</span>
                             {reqCount > 0 && (
-                              <span className="text-[9px] font-extrabold text-slate-500 dark:text-slate-400">
+                              <span className={`text-[9px] font-extrabold ${
+                                isOverQuota
+                                  ? 'text-red-600 dark:text-red-400'
+                                  : isUnderQuota
+                                  ? 'text-amber-600 dark:text-amber-400'
+                                  : 'text-slate-500 dark:text-slate-400'
+                              }`}>
                                 {assignedCount}/{reqCount}
                               </span>
                             )}
@@ -2235,6 +2290,11 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
           year={currentYear}
           month={currentMonth}
           flightFilter={flightFilter}
+          onMonthChange={(nextYear, nextMonth) => {
+            setCurrentYear(nextYear);
+            setCurrentMonth(nextMonth);
+            setIsFullYearView(false);
+          }}
         />
       )}
 

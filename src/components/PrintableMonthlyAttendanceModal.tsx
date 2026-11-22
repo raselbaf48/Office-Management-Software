@@ -14,6 +14,7 @@ import {
   isAirmanInUnitForMonth,
 } from '../utils/csvExport';
 import { getActiveOfficeIdentity } from '../firebase';
+import { localDb } from '../services/localDatabase';
 
 interface PrintableMonthlyAttendanceModalProps {
   isOpen: boolean;
@@ -23,6 +24,7 @@ interface PrintableMonthlyAttendanceModalProps {
   year: number;
   month: number;
   flightFilter?: string;
+  onMonthChange?: (year: number, month: number) => void;
 }
 
 export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanceModalProps> = ({
@@ -33,6 +35,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   year,
   month,
   flightFilter = 'All',
+  onMonthChange,
 }) => {
   const [selectedYear, setSelectedYear] = useState<number>(year);
   const [selectedMonth, setSelectedMonth] = useState<number>(month);
@@ -40,6 +43,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
     flightFilter === 'All' ? 'All' : formatFlightFullName(flightFilter)
   );
   const [selectedRank, setSelectedRank] = useState<string>('All');
+  const [dbRefreshTick, setDbRefreshTick] = useState<number>(0);
 
   useEffect(() => {
     setSelectedYear(year);
@@ -49,25 +53,36 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   useEffect(() => {
     if (flightFilter && flightFilter !== 'All') {
       setSelectedFlight(formatFlightFullName(flightFilter));
+    } else if (flightFilter === 'All') {
+      setSelectedFlight('All');
     }
   }, [flightFilter]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleUpdate = () => setDbRefreshTick((t) => t + 1);
+    window.addEventListener('baf_state_updated', handleUpdate);
+    window.addEventListener('baf_sync_status', handleUpdate);
+    return () => {
+      window.removeEventListener('baf_state_updated', handleUpdate);
+      window.removeEventListener('baf_sync_status', handleUpdate);
+    };
+  }, [isOpen]);
+
   const handlePrevMonth = () => {
-    if (selectedMonth === 1) {
-      setSelectedMonth(12);
-      setSelectedYear((y) => y - 1);
-    } else {
-      setSelectedMonth((m) => m - 1);
-    }
+    const nextMonth = selectedMonth === 1 ? 12 : selectedMonth - 1;
+    const nextYear = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
+    setSelectedMonth(nextMonth);
+    setSelectedYear(nextYear);
+    onMonthChange?.(nextYear, nextMonth);
   };
 
   const handleNextMonth = () => {
-    if (selectedMonth === 12) {
-      setSelectedMonth(1);
-      setSelectedYear((y) => y + 1);
-    } else {
-      setSelectedMonth((m) => m + 1);
-    }
+    const nextMonth = selectedMonth === 12 ? 1 : selectedMonth + 1;
+    const nextYear = selectedMonth === 12 ? selectedYear + 1 : selectedYear;
+    setSelectedMonth(nextMonth);
+    setSelectedYear(nextYear);
+    onMonthChange?.(nextYear, nextMonth);
   };
 
   const monthName = new Date(selectedYear, selectedMonth - 1, 1).toLocaleString('en-US', {
@@ -77,6 +92,33 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
   const daysArray = Array.from({ length: daysInMonth }, (_, i) => i + 1);
   const monthKey = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
+
+  // Dynamically combine assignments from localDb for the active selectedYear & selectedMonth (plus previous month for Day 1 Duty Off) and passed assignments prop
+  const effectiveAssignments = useMemo(() => {
+    const prevYear = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
+    const prevMonth = selectedMonth === 1 ? 12 : selectedMonth - 1;
+    const prevMonthKey = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+
+    const dedup = new Map<string, DutyAssignment>();
+    const addItems = (list?: DutyAssignment[]) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((a) => {
+        if (!a || !a.date || (a as any).isDeleted) return;
+        const dStr = String(a.date);
+        if (!dStr.startsWith(monthKey) && !dStr.startsWith(prevMonthKey)) return;
+        const key = `${a.airmanId}_${dStr}_${a.dutyCode}_${a.idaShift || ''}_${a.disposalScope || 'ALL'}`;
+        dedup.set(key, a);
+      });
+    };
+
+    try {
+      addItems(localDb.getRoster(monthKey).assignments);
+      addItems(localDb.getRoster(prevMonthKey).assignments);
+    } catch {}
+    addItems(assignments);
+
+    return Array.from(dedup.values());
+  }, [assignments, selectedYear, selectedMonth, monthKey, dbRefreshTick]);
 
   const availableRanks = useMemo(() => {
     const rankOrder = ['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LCpl', 'LAC', 'AC-1', 'AC-2', 'AC'];
@@ -116,19 +158,19 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
 
   const assignmentMap = useMemo(() => {
     const map = new Map<string, DutyAssignment>();
-    assignments.forEach((ass) => addAssignmentToMap(map, ass));
+    effectiveAssignments.forEach((ass) => addAssignmentToMap(map, ass));
     return map;
-  }, [assignments]);
+  }, [effectiveAssignments]);
 
   const statsList = useMemo(() => {
-    return calculateDutyStats(filteredAirmen, assignments, selectedYear, selectedMonth);
-  }, [filteredAirmen, assignments, selectedYear, selectedMonth]);
+    return calculateDutyStats(filteredAirmen, effectiveAssignments, selectedYear, selectedMonth);
+  }, [filteredAirmen, effectiveAssignments, selectedYear, selectedMonth]);
 
   const statsMap = useMemo(() => {
     return new Map(statsList.map((s) => [s.airmanId, s]));
   }, [statsList]);
 
-  // Helper to resolve specific duty off (e.g. NTF OFF) or joining date status
+  // Helper to resolve specific duty off (e.g. NTF OFF), other disposal, or joining date status (matches MonthlyDutyRegister 100%)
   const resolveDutyLabel = (airman: Airman, day: number) => {
     const dayStr = day < 10 ? `0${day}` : `${day}`;
     const dateStr = `${monthKey}-${dayStr}`;
@@ -147,20 +189,46 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
     const ass = resolveAirmanDutyForDate(airman.id, dateStr, assignmentMap);
     const dutyCode = ass?.dutyCode;
     const dutyType = DUTY_TYPE_MAP.get(dutyCode as any);
+    const dutyCodeStr = String(dutyCode || '');
+    const isOtherDisposal =
+      dutyCodeStr.toUpperCase() === 'OTHERS' ||
+      dutyCodeStr.toUpperCase() === 'OTHER' ||
+      dutyCodeStr.startsWith('OTHERS_');
 
     if (dutyCode === 'ON_PARADE' || dutyType?.shortName === 'PRD' || dutyType?.shortName === 'P') {
       return { label: 'P', type: 'PRESENT' };
     }
 
-    // Canteen is shortform CTN and counted as present
-    if (dutyCode === 'CANTEEN' || (dutyCode as string) === 'CTN' || dutyType?.shortName === 'CTN') {
+    // Any Deployment (Canteen, Bake & Bite, or Custom Deployment) is counted as present (On Parade)
+    if (
+      dutyCode === 'CANTEEN' ||
+      (dutyCode as string) === 'CTN' ||
+      dutyType?.shortName === 'CTN' ||
+      ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('canteen'))
+    ) {
       return { label: 'CTN', type: 'PRESENT' };
+    }
+    if (
+      dutyCode === 'BAKE_N_BITE' ||
+      (dutyCode as string) === 'BnB' ||
+      dutyType?.shortName === 'BnB' ||
+      ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('bake'))
+    ) {
+      return { label: 'BnB', type: 'PRESENT' };
+    }
+    if (dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') {
+      const cleanNote = (ass?.notes || '').trim();
+      const dest =
+        cleanNote && !cleanNote.toLowerCase().includes('imported')
+          ? cleanNote.split(' - ')[0].trim().toUpperCase()
+          : 'ATT';
+      return { label: dest, type: 'PRESENT' };
     }
 
     if (dutyCode === 'DUTY_OFF' || (dutyCode as any) === 'OFF') {
       let offDuty = '';
       if (ass?.notes) {
-        const match = ass.notes.match(/\b(NTF|GD|SY|BTF|IDAC|IDA|AIRPORT|APT|AFLD|HALISHAHAR|HAL|ESC|ESCORT)\b/i);
+        const match = ass.notes.match(/\b(NTF|GD|SY|BTF|IDAC|IDA|AIRPORT|APT|AFLD|HALISHAHAR|HAL|ESCT|ESC|ESCORT)\b/i);
         if (match) offDuty = match[1].toUpperCase();
       }
       if (!offDuty) {
@@ -173,7 +241,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       }
       if (offDuty === 'GD' || offDuty === 'SECURITY') offDuty = 'SY';
       if (offDuty === 'AIRPORT' || offDuty === 'AIRFIELD' || offDuty === 'APT') offDuty = 'AFLD';
-      if (offDuty === 'ESCORT' || offDuty === 'ESC') offDuty = 'ESCT';
+      if (offDuty === 'ESCORT' || offDuty === 'ESC' || offDuty?.includes('1794394') || (ass?.notes || '').toLowerCase().includes('escort')) offDuty = 'ESCT';
       return { label: offDuty ? `${offDuty}\nOFF` : 'OFF', type: 'OFF' };
     }
 
@@ -183,13 +251,40 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       return { label: shiftCode, type: 'DUTY' };
     }
 
-    if (dutyCode === 'LEAVE') return { label: 'L', type: 'LEAVE' };
+    if (dutyCode === 'LEAVE') return { label: 'LV', type: 'LEAVE' };
     if (dutyCode === 'TDY') return { label: 'TDY', type: 'TDY' };
-    if ((dutyCode as any) === 'ESCORT' || (dutyCode as any) === 'ESC' || (dutyCode as any) === 'ESCT' || (dutyCode && String(dutyCode).includes('1794394')) || (ass?.notes || '').toLowerCase().includes('escort')) {
+    if (
+      (dutyCode as any) === 'ESCORT' ||
+      (dutyCode as any) === 'ESC' ||
+      (dutyCode as any) === 'ESCT' ||
+      dutyCodeStr.includes('1794394') ||
+      dutyType?.name === 'Escort Duty' ||
+      (ass?.notes || '').toLowerCase().includes('escort') ||
+      ((ass as any)?.dutyName || '').toLowerCase().includes('escort')
+    ) {
       return { label: 'ESCT', type: 'DUTY' };
     }
     if (dutyCode === 'GD' || (dutyCode as any) === 'SECURITY') return { label: 'SY', type: 'DUTY' };
     if (dutyCode === 'AIRPORT' || (dutyCode as any) === 'APT' || (dutyCode as any) === 'AIRFIELD' || (dutyCode as any) === 'AFLD') return { label: 'AFLD', type: 'DUTY' };
+
+    if (isOtherDisposal) {
+      const cleanNote = ass?.notes?.trim();
+      const fallbackName = (ass as any)?.dutyName || (ass as any)?.customTitle;
+      let name = '';
+      if (cleanNote && !['OTHER', 'OTHERS', 'OTHER DISPOSAL', 'CUSTOM DISPOSAL', 'CUSTOM'].includes(cleanNote.toUpperCase())) {
+        name = cleanNote;
+      } else if (fallbackName && !['OTHER', 'OTHERS', 'OTHER DISPOSAL', 'CUSTOM DISPOSAL', 'CUSTOM'].includes(String(fallbackName).toUpperCase())) {
+        name = String(fallbackName);
+      } else if (typeof dutyCode === 'string' && dutyCode.startsWith('OTHERS_')) {
+        name = dutyCode.replace('OTHERS_', '');
+      } else {
+        name = 'Disposal';
+      }
+      if (name.includes(' - ')) {
+        name = name.split(' - ')[0].trim();
+      }
+      return { label: name.toUpperCase(), type: 'DUTY' };
+    }
 
     let label = dutyType?.shortName || dutyCode || '-';
     if (label === 'APT' || label === 'AIRPORT' || label === 'AIRFIELD') label = 'AFLD';
@@ -241,7 +336,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   const handleExportExcel = () => {
     exportMonthlyAttendanceRegisterExcel(
       airmen,
-      assignments,
+      effectiveAssignments,
       selectedYear,
       selectedMonth,
       selectedFlight,

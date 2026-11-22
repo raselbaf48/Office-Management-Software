@@ -209,8 +209,19 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
           span.forEach((ass) => {
             rec.totalAttDays++;
             if (ass.date === todayStr) {
-              rec.currentlyOnAtt = true;
-              rec.currentAttLocation = location;
+              // Check if today has a higher-priority Leave, TDY, or active Duty overriding Deployment
+              const todayOverrides = allAssignments.filter(
+                (a: any) =>
+                  a &&
+                  a.date === todayStr &&
+                  (!a.disposalScope || a.disposalScope === 'ALL') &&
+                  matchAirmanId(a.airmanId, airmanId) &&
+                  !['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT', 'ON_PARADE', 'PT', 'PT_PARADE'].includes(a.dutyCode)
+              );
+              if (todayOverrides.length === 0) {
+                rec.currentlyOnAtt = true;
+                rec.currentAttLocation = location;
+              }
             }
           });
           
@@ -275,7 +286,7 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
     try {
       const notes = finalDest;
       
-      const dutyCodeToUse = finalDest === 'Canteen' ? 'CANTEEN' : finalDest.includes('Bake') ? 'BAKE_N_BITE' : 'ATT';
+      const dutyCodeToUse = finalDest === 'Canteen' ? 'CANTEEN' : finalDest.includes('Bake') ? 'BAKE_N_BITE' : 'DEPLOYMENT';
       await fetch('/api/roster/assign-range', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

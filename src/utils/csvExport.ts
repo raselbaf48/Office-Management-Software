@@ -1220,19 +1220,45 @@ export function exportMonthlyAttendanceRegisterExcel(
     const ass = resolveAirmanDutyForDate(airman.id, dateStr, assignmentMap);
     const dutyCode = ass?.dutyCode;
     const dutyType = DUTY_TYPE_MAP.get(dutyCode as any);
+    const dutyCodeStr = String(dutyCode || '');
+    const isOtherDisposal =
+      dutyCodeStr.toUpperCase() === 'OTHERS' ||
+      dutyCodeStr.toUpperCase() === 'OTHER' ||
+      dutyCodeStr.startsWith('OTHERS_');
 
     if (dutyCode === 'ON_PARADE' || dutyType?.shortName === 'PRD' || dutyType?.shortName === 'P') {
       return 'P';
     }
 
-    if (dutyCode === 'CANTEEN' || (dutyCode as string) === 'CTN' || dutyType?.shortName === 'CTN') {
+    if (
+      dutyCode === 'CANTEEN' ||
+      (dutyCode as string) === 'CTN' ||
+      dutyType?.shortName === 'CTN' ||
+      ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('canteen'))
+    ) {
       return 'CTN';
+    }
+
+    if (
+      dutyCode === 'BAKE_N_BITE' ||
+      (dutyCode as string) === 'BnB' ||
+      dutyType?.shortName === 'BnB' ||
+      ((dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') && (ass?.notes || '').toLowerCase().includes('bake'))
+    ) {
+      return 'BnB';
+    }
+
+    if (dutyCode === 'DEPLOYMENT' || dutyCode === 'ATT') {
+      const cleanNote = (ass?.notes || '').trim();
+      return cleanNote && !cleanNote.toLowerCase().includes('imported')
+        ? cleanNote.split(' - ')[0].trim().toUpperCase()
+        : 'ATT';
     }
 
     if (dutyCode === 'DUTY_OFF' || (dutyCode as any) === 'OFF') {
       let offDuty = '';
       if (ass?.notes) {
-        const match = ass.notes.match(/\b(NTF|GD|SY|BTF|IDAC|IDA|AIRPORT|APT|AFLD|HALISHAHAR|HAL|ESC|ESCORT)\b/i);
+        const match = ass.notes.match(/\b(NTF|GD|SY|BTF|IDAC|IDA|AIRPORT|APT|AFLD|HALISHAHAR|HAL|ESCT|ESC|ESCORT)\b/i);
         if (match) offDuty = match[1].toUpperCase();
       }
       if (!offDuty) {
@@ -1245,7 +1271,7 @@ export function exportMonthlyAttendanceRegisterExcel(
       }
       if (offDuty === 'AIRPORT' || offDuty === 'AIRFIELD' || offDuty === 'APT') offDuty = 'AFLD';
       if (offDuty === 'GD' || offDuty === 'SECURITY') offDuty = 'SY';
-      if (offDuty === 'ESCORT' || offDuty === 'ESC') offDuty = 'ESCT';
+      if (offDuty === 'ESCORT' || offDuty === 'ESC' || offDuty?.includes('1794394') || (ass?.notes || '').toLowerCase().includes('escort')) offDuty = 'ESCT';
       return offDuty ? `${offDuty}\nOFF` : 'OFF';
     }
 
@@ -1254,11 +1280,30 @@ export function exportMonthlyAttendanceRegisterExcel(
       return s.startsWith('m') ? 'IDAC "A"' : s.startsWith('a') ? 'IDAC "B"' : 'IDAC "C"';
     }
 
-    if (dutyCode === 'LEAVE') return 'L';
+    if (dutyCode === 'LEAVE') return 'LV';
     if (dutyCode === 'TDY') return 'TDY';
     if ((dutyCode as any) === 'ESCORT' || (dutyCode as any) === 'ESC' || (dutyCode as any) === 'ESCT' || (dutyCode && String(dutyCode).includes('1794394')) || (ass?.notes || '').toLowerCase().includes('escort')) return 'ESCT';
     if (dutyCode === 'GD' || (dutyCode as any) === 'SECURITY') return 'SY';
     if (dutyCode === 'AIRPORT' || (dutyCode as any) === 'APT' || (dutyCode as any) === 'AIRFIELD' || (dutyCode as any) === 'AFLD') return 'AFLD';
+
+    if (isOtherDisposal) {
+      const cleanNote = ass?.notes?.trim();
+      const fallbackName = (ass as any)?.dutyName || (ass as any)?.customTitle;
+      let name = '';
+      if (cleanNote && !['OTHER', 'OTHERS', 'OTHER DISPOSAL', 'CUSTOM DISPOSAL', 'CUSTOM'].includes(cleanNote.toUpperCase())) {
+        name = cleanNote;
+      } else if (fallbackName && !['OTHER', 'OTHERS', 'OTHER DISPOSAL', 'CUSTOM DISPOSAL', 'CUSTOM'].includes(String(fallbackName).toUpperCase())) {
+        name = String(fallbackName);
+      } else if (typeof dutyCode === 'string' && dutyCode.startsWith('OTHERS_')) {
+        name = dutyCode.replace('OTHERS_', '');
+      } else {
+        name = 'Disposal';
+      }
+      if (name.includes(' - ')) {
+        name = name.split(' - ')[0].trim();
+      }
+      return name.toUpperCase();
+    }
 
     let label = dutyType?.shortName || dutyCode || '-';
     if (label === 'APT' || label === 'AIRPORT' || label === 'AIRFIELD') label = 'AFLD';
@@ -1331,9 +1376,17 @@ export function exportMonthlyAttendanceRegisterExcel(
     let dutyOffCount = 0;
     const dayLabels: string[] = [];
 
+    const presentLabelsSet = new Set<string>(['P', 'CTN', 'BnB']);
     daysArray.forEach((day) => {
+      const dayStr = day < 10 ? `0${day}` : `${day}`;
+      const dateStr = `${monthKey}-${dayStr}`;
+      const ass = resolveAirmanDutyForDate(airman.id, dateStr, assignmentMap);
+      const isDep = ass && ['CANTEEN', 'BAKE_N_BITE', 'DEPLOYMENT', 'ATT'].includes(ass.dutyCode);
       const label = resolveDutyLabel(airman, day);
-      if (label === 'P' || label === 'CTN') pCount++;
+      if (label === 'P' || label === 'CTN' || label === 'BnB' || (isDep && label !== '-')) {
+        pCount++;
+        presentLabelsSet.add(label);
+      }
       if (label.includes('OFF')) dutyOffCount++;
       dayLabels.push(label);
     });
@@ -1346,6 +1399,9 @@ export function exportMonthlyAttendanceRegisterExcel(
 
     const syColLetter = getExcelColName(7 + daysInMonth); // e.g. 'AL'
     const idacCColLetter = getExcelColName(14 + daysInMonth); // e.g. 'AS'
+    const presentFormula = Array.from(presentLabelsSet)
+      .map((lbl) => `COUNTIF(${dateRange}, "${lbl.replace(/"/g, '""')}")`)
+      .join(' + ');
 
     const row: any[] = [
       idx + 1,
@@ -1354,7 +1410,7 @@ export function exportMonthlyAttendanceRegisterExcel(
       airman.name || airman.fullName || '',
       formatFlightFullName(airman.flightName),
       ...dayLabels,
-      { t: 'n', f: `COUNTIF(${dateRange}, "P") + COUNTIF(${dateRange}, "CTN")`, v: pCount },
+      { t: 'n', f: presentFormula, v: pCount },
       { t: 'n', f: `COUNTIF(${dateRange}, "SY") + COUNTIF(${dateRange}, "GD")`, v: stat?.totalGD || 0 },
       { t: 'n', f: `COUNTIF(${dateRange}, "BTF")`, v: stat?.totalBTF || 0 },
       { t: 'n', f: `COUNTIF(${dateRange}, "NTF")`, v: stat?.totalNTF || 0 },

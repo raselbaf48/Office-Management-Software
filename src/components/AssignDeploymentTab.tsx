@@ -163,7 +163,7 @@ export const AssignDeploymentTab: React.FC<AssignDeploymentTabProps> = ({
 
     try {
       const fullNotes = finalDest;
-      const dutyCodeToUse = finalDest === 'Canteen' ? 'CANTEEN' : finalDest.includes('Bake') ? 'BAKE_N_BITE' : 'ATT';
+      const dutyCodeToUse = finalDest === 'Canteen' ? 'CANTEEN' : finalDest.includes('Bake') ? 'BAKE_N_BITE' : 'DEPLOYMENT';
 
       const res = await fetch('/api/roster/assign-range', {
         method: 'POST',

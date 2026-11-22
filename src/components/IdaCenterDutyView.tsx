@@ -159,7 +159,7 @@ export const IdaCenterDutyView: React.FC<IdaCenterDutyViewProps> = ({
       const [paradeResults, rosterResults] = await Promise.all([
         Promise.all(
           datesToFetch.map((dStr) =>
-            fetch(`/api/parade-state?date=${dStr}&shift=Morning&flight=Overall`)
+            fetch(`/api/parade-state?date=${dStr}&shift=Morning&flight=Overall&stateType=DASHBOARD`)
               .then((r) => (r.ok ? r.json() : null))
               .catch(() => null)
           )

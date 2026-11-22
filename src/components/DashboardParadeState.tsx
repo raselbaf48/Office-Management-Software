@@ -115,6 +115,7 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
         date: activeDate,
         shift: 'Morning',
         flight: selectedFlight,
+        stateType: 'DASHBOARD',
       });
       const res = await fetch(`/api/parade-state?${params.toString()}`);
       if (res.ok) {

@@ -49,6 +49,7 @@ import { FlightDutyRatioModal } from './FlightDutyRatioModal';
 import {
  SignatureConfigModal,
  getSavedPreparedBy,
+ getSavedCheckedBy,
  getSavedAuthorizedBy,
  SignatureDetails,
 } from './SignatureConfigModal';
@@ -129,8 +130,9 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
 
  // Signature Config Modal state
  const [showSignatureModal, setShowSignatureModal] = useState<boolean>(false);
- const [signatureInitialTab, setSignatureInitialTab] = useState<'PREPARED_BY' | 'AUTHORIZED_BY'>('PREPARED_BY');
+ const [signatureInitialTab, setSignatureInitialTab] = useState<'PREPARED_BY' | 'CHECKED_BY' | 'AUTHORIZED_BY'>('PREPARED_BY');
  const [preparedBy, setPreparedBy] = useState<SignatureDetails>(getSavedPreparedBy);
+ const [checkedBy, setCheckedBy] = useState<SignatureDetails>(getSavedCheckedBy);
  const [authorizedBy, setAuthorizedBy] = useState<SignatureDetails>(getSavedAuthorizedBy);
 
  // Single Airman Row Quick Edit Popover
@@ -277,6 +279,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  useEffect(() => {
  const handleSigUpdated = () => {
  setPreparedBy(getSavedPreparedBy());
+ setCheckedBy(getSavedCheckedBy());
  setAuthorizedBy(getSavedAuthorizedBy());
  };
  window.addEventListener('baf_signatures_updated', handleSigUpdated);
@@ -287,7 +290,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  useEffect(() => {
     const fetchStatuses = () => {
       if (!showAddDisposalModal || !disposalFromDate) return;
-      fetch(`/api/parade-state?date=${disposalFromDate}&shift=Morning`)
+      const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
+      fetch(`/api/parade-state?date=${disposalFromDate}&shift=Morning&stateType=${stateType}`)
         .then((r) => r.json())
         .then((data) => {
           const map = {};
@@ -307,7 +311,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
     fetchStatuses();
     window.addEventListener('baf_state_updated', fetchStatuses);
     return () => window.removeEventListener('baf_state_updated', fetchStatuses);
-  }, [showAddDisposalModal, disposalFromDate]);
+  }, [showAddDisposalModal, disposalFromDate, isPtDocument, isOthersDocument]);
 
  // Format Date: e.g. "14 Aug 26"
  const formatDateShort = (dStr: string) => {
@@ -372,7 +376,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const fetchSingle = async (showLoader = false) => {
  if (showLoader) setLoading(true);
  try {
- const stateType = isPtDocument ? 'PT' : 'PARADE';
+ const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
  const res = await fetch(`/api/parade-state?date=${fromDate}&shift=Morning&flight=Overall&stateType=${stateType}`);
  if (res.ok) {
  const d = await res.json();
@@ -389,7 +393,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const fetchMulti = async (showLoader = false) => {
  if (showLoader) setLoading(true);
  try {
- const stateType = isPtDocument ? 'PT' : 'PARADE';
+ const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
  const results = await Promise.all(
  datesInRange.map((dStr) =>
  fetch(`/api/parade-state?date=${dStr}&shift=Morning&flight=Overall&stateType=${stateType}`)
@@ -477,6 +481,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const handleSaveSingleRowDuty = async (code: DutyCategoryCode, idaShift?: IDAShift, notes?: string, proxyForFlight?: FlightName) => {
  if (!activeEditCell) return;
  const monthKey = activeEditCell.date.slice(0, 7);
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
  try {
  const res = await fetch('/api/roster/assign', {
  method: 'PUT',
@@ -489,7 +494,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  dutyCode: code,
  idaShift,
  proxyForFlight,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: effectiveScope,
  notes,
  },
  }),
@@ -509,6 +514,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  // Handle single row duty delete
  const handleDeleteRowDuty = async () => {
  if (!activeEditCell) return;
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
  try {
  const res = await fetch('/api/roster/delete-assignment', {
  method: 'POST',
@@ -516,6 +522,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  body: JSON.stringify({
  airmanId: activeEditCell.airman.id,
  date: activeEditCell.date,
+ disposalScope: effectiveScope,
  }),
  });
  if (res.ok) {
@@ -553,7 +560,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  });
  }
 
- const effectiveScope = isPtDocument ? 'PT' : (disposalScope === 'PT' ? 'PT' : 'PARADE');
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
 
  const promises = selectedDisposalAirmenIds.map((airmanId) =>
  fetch('/api/roster/assign-range', {
@@ -678,7 +685,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  dutyCode: effectiveDutyCode,
  fromDate: editDisposalFromDate,
  toDate: editDisposalToDate,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE',
  notes: effectiveNotes,
  }),
  });
@@ -1987,6 +1994,26 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  </div>
  </div>
 
+ {/* MIDDLE SIGNATURE BLOCK (Checked By) */}
+ <div className="text-left font-bold min-w-[210px]">
+ {checkedBy.signDigitally && (
+ <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white select-none">
+ <span className="font-bold underline">
+ {checkedBy.digitalSignatureText || checkedBy.name}
+ </span>
+ <span className="block text-[8px] font-mono not-italic text-slate-600">
+ [Digitally Signed • BAF Verified]
+ </span>
+ </div>
+ )}
+ <div className="border-t border-slate-900 dark:border-slate-600 pt-1.5">
+ <div className="text-xs uppercase font-black">{checkedBy.name}</div>
+ <div className="text-[11px] font-normal">{checkedBy.rank}</div>
+ <div className="text-[11px] font-normal">{checkedBy.designation}</div>
+ <div className="text-[10px] uppercase font-bold">{checkedBy.unit || getActiveOfficeIdentity().officeName}</div>
+ </div>
+ </div>
+
  {/* RIGHT SIGNATURE BLOCK (Authorized By) */}
  <div className="text-left font-bold min-w-[210px]">
  {authorizedBy.signDigitally && (
@@ -2592,8 +2619,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
               </div>
             </div>
             {/* Modal Action Buttons */}
-                        {editDisposalCategory === 'OTHERS' && (
-                          <div className="flex items-center justify-end space-x-2 pt-3 border-t border-slate-200 dark:border-slate-800 dark:border-slate-700">
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-slate-200 dark:border-slate-800 dark:border-slate-700">
  <button
  type="button"
  onClick={() => setEditDisposalModal(null)}
@@ -2609,21 +2635,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
               >
                 {editDisposalLoading ? 'Applying...' : 'Apply Changes'}
               </button>
- <button
- type="button"
- onClick={handleSaveEditDisposal}
- disabled={editDisposalLoading}
- className="px-5 py-2 text-xs font-bold bg-purple-600 hover:bg-purple-700 disabled:bg-slate-400 text-white rounded-xl shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
- >
- {editDisposalLoading ? (
- <RefreshCw className="w-4 h-4 animate-spin" />
- ) : (
- <Check className="w-4 h-4" />
- )}
- <span>Done</span>
-                        </button>
-                      </div>
-                    )}
+            </div>
  </div>
  </div>
  )}
@@ -2640,14 +2652,15 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
 
  
 
- {/* Signature Configuration Modal (Prepared By / Authorized By) */}
+ {/* Signature Configuration Modal (Prepared By / Checked By / Authorized By) */}
  <SignatureConfigModal
  isOpen={showSignatureModal}
  onClose={() => setShowSignatureModal(false)}
  initialTab={signatureInitialTab}
- onSignaturesUpdated={(prep, auth) => {
+ onSignaturesUpdated={(prep, auth, chk) => {
  setPreparedBy(prep);
  setAuthorizedBy(auth);
+ if (chk) setCheckedBy(chk);
  }}
  />
  </div>

@@ -126,6 +126,9 @@ export interface PendingOfficeRegistrationRequest {
 export interface GlobalUserOfficeEntry {
   bdNo: string;
   userName: string;
+  fullName?: string;
+  surname?: string;
+  mobileNo?: string;
   rank: string;
   flightName?: string;
   trade?: string;
@@ -155,6 +158,13 @@ export interface OfficeFirebaseConfig {
   joinPin?: string;
   officeSlogan?: string;
   officeBase?: string;
+  adminBdNo?: string;
+  adminFullName?: string;
+  adminSurname?: string;
+  adminRank?: string;
+  adminTrade?: string;
+  adminRole?: string;
+  adminContactNo?: string;
 }
 
 export interface CustomOfficeConfig {
@@ -1172,6 +1182,27 @@ export async function registerOfficeInMasterTelemetry(
       ...(params.firebaseConfig.firestoreDatabaseId
         ? { firestoreDatabaseId: String(params.firebaseConfig.firestoreDatabaseId) }
         : {}),
+      ...(params.firebaseConfig.adminBdNo || existing?.firebaseConfig?.adminBdNo
+        ? { adminBdNo: String(params.firebaseConfig.adminBdNo || existing?.firebaseConfig?.adminBdNo) }
+        : {}),
+      ...(params.firebaseConfig.adminFullName || existing?.firebaseConfig?.adminFullName
+        ? { adminFullName: String(params.firebaseConfig.adminFullName || existing?.firebaseConfig?.adminFullName) }
+        : {}),
+      ...(params.firebaseConfig.adminSurname || existing?.firebaseConfig?.adminSurname
+        ? { adminSurname: String(params.firebaseConfig.adminSurname || existing?.firebaseConfig?.adminSurname) }
+        : {}),
+      ...(params.firebaseConfig.adminRank || existing?.firebaseConfig?.adminRank
+        ? { adminRank: String(params.firebaseConfig.adminRank || existing?.firebaseConfig?.adminRank) }
+        : {}),
+      ...(params.firebaseConfig.adminTrade || existing?.firebaseConfig?.adminTrade
+        ? { adminTrade: String(params.firebaseConfig.adminTrade || existing?.firebaseConfig?.adminTrade) }
+        : {}),
+      ...(params.firebaseConfig.adminRole || existing?.firebaseConfig?.adminRole
+        ? { adminRole: String(params.firebaseConfig.adminRole || existing?.firebaseConfig?.adminRole) }
+        : {}),
+      ...(params.firebaseConfig.adminContactNo || existing?.firebaseConfig?.adminContactNo
+        ? { adminContactNo: String(params.firebaseConfig.adminContactNo || existing?.firebaseConfig?.adminContactNo) }
+        : {}),
     },
     totalUsers: Math.max(0, Number(resolvedTotalUsers) || 0),
     createdAt: params.createdAt || params.configuredAt || existing?.createdAt || nowIso,
@@ -1257,11 +1288,10 @@ export async function saveMasterCredentials(
       await setDoc(
         doc(masterDbInstance, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY),
         {
-          key: MASTER_CREDENTIALS_STORAGE_KEY,
           settingKey: MASTER_CREDENTIALS_STORAGE_KEY,
           value: JSON.stringify(creds),
           updatedAt: nowIso,
-          updated_at: nowIso,
+          updatedBy: 'master_admin',
         },
         { merge: true }
       );
@@ -1367,12 +1397,14 @@ function saveRemovedOfficeCodes(codes: string[], syncToCloud: boolean = true): v
     setRawLocalStorageItem(REMOVED_OFFICES_STORAGE_KEY, JSON.stringify(unique));
   }
   if (syncToCloud && masterDbInstance) {
+    const nowIso = new Date().toISOString();
     setDoc(
       doc(masterDbInstance, 'app_settings', REMOVED_OFFICES_STORAGE_KEY),
       {
-        key: REMOVED_OFFICES_STORAGE_KEY,
+        settingKey: REMOVED_OFFICES_STORAGE_KEY,
         value: JSON.stringify(unique),
-        updated_at: new Date().toISOString(),
+        updatedAt: nowIso,
+        updatedBy: 'master_admin',
       },
       { merge: true }
     ).catch(() => {});
@@ -2032,12 +2064,14 @@ export function saveGlobalUserOfficeMap(
   } catch {}
 
   if (syncToCloud && !isUnchanged && masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const nowIso = new Date().toISOString();
     setDoc(
       doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY),
       {
-        key: GLOBAL_USER_OFFICE_MAP_KEY,
+        settingKey: GLOBAL_USER_OFFICE_MAP_KEY,
         value: serialized,
-        updated_at: new Date().toISOString(),
+        updatedAt: nowIso,
+        updatedBy: 'system',
       },
       { merge: true }
     ).catch((err) => {
@@ -2914,14 +2948,14 @@ export function savePendingOfficeRequestsLocal(
   } catch {}
 
   if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const nowIso = new Date().toISOString();
     setDoc(
       doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY),
       {
-        key: PENDING_OFFICE_REQUESTS_KEY,
         settingKey: PENDING_OFFICE_REQUESTS_KEY,
         value: JSON.stringify(cleanList),
-        updated_at: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        updatedAt: nowIso,
+        updatedBy: 'system',
       },
       { merge: true }
     ).catch(() => {});
@@ -3254,10 +3288,17 @@ export async function approveOfficeRegistrationRequest(
   setRawLocalStorageItem(legacyScopedDbKey, JSON.stringify(officeDbObj));
 
   // 5. Sync Approved Office, Biodata Register & User Management to Local Registry & Firestore (`masterDbInstance`)
-  const fbConfig = {
+  const fbConfig: OfficeFirebaseConfig = {
     ...buildAutoCloudFirebaseConfig(req.officeName, officeCode),
     officeSlogan: officeProfilePayload.officeSlogan,
     officeBase: officeProfilePayload.officeBase,
+    adminBdNo: cleanBd,
+    adminFullName: displayFullName,
+    adminSurname: displaySurname,
+    adminRank: req.rank || 'LAC',
+    adminTrade: req.trade || 'Radio Fitt',
+    adminRole: userRole,
+    adminContactNo: req.contactNo || '',
   };
 
   // Update local registered offices registry immediately (0ms)
@@ -3285,54 +3326,7 @@ export async function approveOfficeRegistrationRequest(
     setRawLocalStorageItem('baf_registered_offices_v1', JSON.stringify(filteredOffices));
   } catch {}
 
-  registerOfficeInMasterTelemetry(
-    {
-      officeName: req.officeName,
-      officeLogo: officeProfilePayload.officeLogo,
-      officeSlogan: officeProfilePayload.officeSlogan,
-      officeBase: officeProfilePayload.officeBase,
-      officeCode,
-      firebaseConfig: fbConfig,
-      totalUsers: officeDbObj.airmen.length || 1,
-    },
-    officeDbObj.airmen.length || 1
-  ).catch(() => {});
-
-  if (masterDbInstance) {
-    const docPrefix = `off_${safeCode}__`;
-    Promise.all([
-      setDoc(
-        doc(masterDbInstance, 'airmen', `${docPrefix}${airmanId}`),
-        {
-          ...newAirmanRecord,
-          id: `${docPrefix}${airmanId}`,
-          updated_at: nowIso,
-        },
-        { merge: true }
-      ),
-      setDoc(
-        doc(masterDbInstance, 'user_profiles', `${docPrefix}user-login-${cleanBd}`),
-        {
-          ...requesterUserRecord,
-          id: `${docPrefix}user-login-${cleanBd}`,
-          user_id: cleanBd,
-          updated_at: nowIso,
-        },
-        { merge: true }
-      ),
-      setDoc(
-        doc(masterDbInstance, 'app_settings', `${docPrefix}${OFFICE_PROFILE_STORAGE_KEY}`),
-        {
-          key: OFFICE_PROFILE_STORAGE_KEY,
-          value: JSON.stringify(officeProfilePayload),
-          updated_at: nowIso,
-        },
-        { merge: true }
-      ),
-    ]).catch(() => {});
-  }
-
-  // 6. Index the approved User -> Office mapping in Global User-Office Directory
+  // 6. Index the approved User -> Office mapping in Global User-Office Directory immediately (0ms)
   const customOfficeCfg: CustomOfficeConfig = {
     officeName: req.officeName,
     officeLogo: officeProfilePayload.officeLogo,
@@ -3354,7 +3348,7 @@ export async function approveOfficeRegistrationRequest(
     officeConfig: customOfficeCfg,
   });
 
-  // 7. Update request status to APPROVED
+  // 7. Update request status to APPROVED immediately (0ms)
   const approvedReq: PendingOfficeRegistrationRequest = {
     ...req,
     status: 'APPROVED',
@@ -3363,6 +3357,101 @@ export async function approveOfficeRegistrationRequest(
   };
   list[idx] = approvedReq;
   savePendingOfficeRequestsLocal(list, true);
+
+  // 8. Non-blocking background sync to Firestore (using schema-validated fields and valid slash-free document IDs)
+  registerOfficeInMasterTelemetry(
+    {
+      officeName: req.officeName,
+      officeLogo: officeProfilePayload.officeLogo,
+      officeSlogan: officeProfilePayload.officeSlogan,
+      officeBase: officeProfilePayload.officeBase,
+      officeCode,
+      firebaseConfig: fbConfig,
+      totalUsers: officeDbObj.airmen.length || 1,
+    },
+    officeDbObj.airmen.length || 1
+  ).catch(() => {});
+
+  if (masterDbInstance) {
+    try {
+      const docPrefix = `off_${safeCode}__`;
+      const safeAirmanDocId = `${docPrefix}BD_${cleanBd}`;
+      const safeUserDocId = `${docPrefix}user-login-${cleanBd}`;
+      const safeProfileDocId = `${docPrefix}${OFFICE_PROFILE_STORAGE_KEY}`;
+      const safeManifestDocId = `off_${safeCode}_sync_manifest`;
+
+      const firestoreAirmanPayload = {
+        id: safeAirmanDocId,
+        bdNo: cleanBd,
+        rank: String(newAirmanRecord.rank || 'LAC').slice(0, 64),
+        name: String(newAirmanRecord.name || 'Airman').slice(0, 200),
+        fullName: String(newAirmanRecord.fullName || newAirmanRecord.name || 'Airman').slice(0, 250),
+        flightName: String(newAirmanRecord.flightName || '').slice(0, 64),
+        trade: String(newAirmanRecord.trade || 'Radio Fitt').slice(0, 128),
+        seniority: Number(newAirmanRecord.seniority) || 1,
+        serNo: Number(newAirmanRecord.serNo) || 1,
+        code: String(newAirmanRecord.code || shortCode).slice(0, 64),
+        mobileNo: String(newAirmanRecord.mobileNo || '').slice(0, 64),
+        bloodGroup: String(newAirmanRecord.bloodGroup || '').slice(0, 32),
+        addressBlock: String(newAirmanRecord.addressBlock || 'BAF BASE ZHR').slice(0, 500),
+        permanentAddress: String(newAirmanRecord.permanentAddress || '').slice(0, 500),
+        dateJoined: String(newAirmanRecord.postingDate || nowIso.slice(0, 10)).slice(0, 64),
+        remarks: String(newAirmanRecord.remarks || '').slice(0, 500),
+        email: String(newAirmanRecord.email || '').slice(0, 200),
+        active: true,
+        updatedAt: nowIso,
+      };
+
+      const firestoreUserPayload = {
+        id: safeUserDocId,
+        airmanId: airmanId,
+        bdNo: cleanBd,
+        userId: cleanBd,
+        rank: String(requesterUserRecord.rank || 'LAC').slice(0, 64),
+        name: String(requesterUserRecord.name || 'Airman').slice(0, 200),
+        mobileNo: String(requesterUserRecord.mobileNo || '').slice(0, 64),
+        flightName: String(requesterUserRecord.flightName || '').slice(0, 64),
+        trade: String(requesterUserRecord.trade || 'Radio Fitt').slice(0, 128),
+        role: String(requesterUserRecord.role || 'SUPER_ADMIN').slice(0, 32),
+        status: 'ACTIVE',
+        password: String(requesterUserRecord.password || cleanBd).slice(0, 128),
+        pin: String(requesterUserRecord.pin || cleanBd).slice(0, 128),
+        adminPass: '1124',
+        detailOrder: String(requesterUserRecord.detailOrder || '').slice(0, 128),
+        detailedAt: nowIso,
+        detailedBy: 'Master Admin Approval',
+        remarks: String(requesterUserRecord.remarks || '').slice(0, 500),
+        updatedAt: nowIso,
+      };
+
+      const firestoreProfileSettingPayload = {
+        settingKey: safeProfileDocId,
+        value: JSON.stringify(officeProfilePayload),
+        updatedAt: nowIso,
+        updatedBy: 'master_admin',
+      };
+
+      const firestoreManifestPayload = {
+        id: safeManifestDocId,
+        revision: Date.now(),
+        updatedAt: nowIso,
+        updatedBySessionId: CLIENT_SESSION_ID.slice(0, 128),
+        updatedByBdNo: '48456',
+        lastReason: `office_approved|h=fp_${safeCode}_${cleanBd}_${Date.now().toString(36)}`,
+        dataHash: `fp_${safeCode}_${cleanBd}_${Date.now().toString(36)}`,
+        airmenCount: officeDbObj.airmen.length || 1,
+        assignmentsCount: 0,
+        changedCollections: ['airmen', 'user_profiles', 'app_settings'],
+      };
+
+      Promise.all([
+        setDoc(doc(masterDbInstance, 'airmen', safeAirmanDocId), firestoreAirmanPayload, { merge: true }),
+        setDoc(doc(masterDbInstance, 'user_profiles', safeUserDocId), firestoreUserPayload, { merge: true }),
+        setDoc(doc(masterDbInstance, 'app_settings', safeProfileDocId), firestoreProfileSettingPayload, { merge: true }),
+        setDoc(doc(masterDbInstance, 'system_meta', safeManifestDocId), firestoreManifestPayload, { merge: true }),
+      ]).catch(() => {});
+    } catch {}
+  }
 
   return approvedReq;
 }

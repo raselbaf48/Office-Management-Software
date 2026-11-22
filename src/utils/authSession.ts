@@ -282,6 +282,10 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
 
       const idx = parsed.findIndex((u) => (u.bdNo || '').toLowerCase() === cleanBd.toLowerCase());
       if (idx === -1) {
+        const syncedRole =
+          (a as any).role === 'SUPER_ADMIN' || (a as any).role === 'ADMIN'
+            ? (a as any).role
+            : 'USER';
         parsed.push({
           id: `user-login-${cleanBd}`,
           userId: cleanBd,
@@ -292,10 +296,10 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
           mobileNo: a.mobileNo,
           flightName: a.flightName,
           trade: a.trade,
-          role: 'USER',
+          role: syncedRole,
           pin: cleanBd,
           password: cleanBd,
-          adminPass: '',
+          adminPass: syncedRole === 'USER' ? '' : '1124',
           status: a.active === false ? 'SUSPENDED' : 'ACTIVE',
           detailOrder: 'DO-OFFICE/GEN/2026',
           detailedAt: '2026-01-01T00:00:00.000Z',

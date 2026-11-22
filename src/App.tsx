@@ -632,6 +632,7 @@ export default function App() {
             } else {
               handleRoleChange('USER');
             }
+            fetchAirmen();
             
             // Trigger instant data download from Firebase & attach live manifest listener after login
             localDb.attachManifestListener();
@@ -843,7 +844,7 @@ export default function App() {
         return (
           <DutyRatioMatrixView
             role={role}
-            userFlight={userSession?.flightName}
+            onConfirmNavigate={(nextTab) => setActiveTab(nextTab as SidebarTab)}
           />
         );
       case "analytics":
@@ -866,6 +867,23 @@ export default function App() {
     }
   };
 
+  const handleRequestTabChange = (nextTab: SidebarTab) => {
+    if (
+      activeTab === 'duty-ratio' &&
+      nextTab !== 'duty-ratio' &&
+      typeof window !== 'undefined' &&
+      (window as any).__bafDutyRatioHasUnsavedChanges
+    ) {
+      window.dispatchEvent(
+        new CustomEvent('baf_duty_ratio_request_leave', {
+          detail: { targetTab: nextTab },
+        })
+      );
+      return;
+    }
+    setActiveTab(nextTab);
+  };
+
   return (
     <div className={`min-h-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
       <FirebaseQuotaPopupModal checkOnMount={justLoggedIn} />
@@ -873,7 +891,7 @@ export default function App() {
       {/* Left Sidebar Navigation */}
       <Sidebar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleRequestTabChange}
         role={role}
         userFlight={userSession?.flightName}
         conflictCount={conflictCount}

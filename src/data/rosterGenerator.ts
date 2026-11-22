@@ -59,7 +59,7 @@ export function addAssignmentToMap(assignmentMap: Map<string, DutyAssignment>, a
         assignmentMap.set(key, ass);
       } 
       // If both are not deployments, or both are deployments, usually the latest assignment wins
-      else if (!existingIsDep && !newIsDep) {
+      else if ((!existingIsDep && !newIsDep) || (existingIsDep && newIsDep)) {
         assignmentMap.set(key, ass);
       }
     }
@@ -118,7 +118,7 @@ export function resolveAirmanDutyForDate(
   ) : false;
 
   const isHeavyDuty = yestAss ? (
-    ['GD', 'BTF', 'NTF', 'AIRPORT', 'ATT', 'HALISHAHAR'].includes(yestAss.dutyCode) ||
+    ['GD', 'BTF', 'NTF', 'AIRPORT', 'HALISHAHAR'].includes(yestAss.dutyCode) ||
     ((yestAss.dutyCode === 'IDAC' || yestAss.dutyCode === 'IDA') && yestAss.idaShift === 'Night') ||
     (yestAss.notes || '').toLowerCase().includes('idac') ||
     isEscort
@@ -213,14 +213,20 @@ export function calculateDutyStats(
 
   if (year && month) {
     const monthStr = month < 10 ? `0${month}` : `${month}`;
+    const targetPrefix = `${year}-${monthStr}`;
     
     // First, process all explicit assignments for the given month
     assignments.forEach((ass) => {
       if ((ass.disposalScope || 'ALL') !== 'ALL') return;
-      const d = new Date(ass.date);
-      if (d.getFullYear() === year && (d.getMonth() + 1) === month) {
-        const stat = map.get(ass.airmanId);
+      if (String(ass.date || '').startsWith(targetPrefix)) {
+        const digits = SER_TO_DIGITS.get(String(ass.airmanId || '').toLowerCase()) || String(ass.airmanId || '').replace(/\D/g, '');
+        const stat = map.get(ass.airmanId) || (digits ? map.get(digits) : undefined);
         if (!stat) return;
+        const resolvedForDay =
+          assignmentMap.get(`${ass.airmanId}_${ass.date}`) ||
+          (digits ? assignmentMap.get(`BD/${digits}_${ass.date}`) || assignmentMap.get(`${digits}_${ass.date}`) : undefined);
+        if (resolvedForDay && resolvedForDay.dutyCode === 'LEAVE' && ass.dutyCode !== 'LEAVE') return;
+        if (resolvedForDay && !['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(resolvedForDay.dutyCode) && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode)) return;
         
         switch (ass.dutyCode) {
           case 'GD':

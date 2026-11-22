@@ -981,21 +981,31 @@ async function startServer() {
     const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
     const shift = (req.query.shift as string) || 'Morning';
     const flight = (req.query.flight as string) || 'Overall';
-    const stateType = (req.query.stateType as string) || 'PARADE';
+    const stateType = String(req.query.stateType || req.query.documentType || 'PARADE').toUpperCase();
     const isPT = stateType === 'PT' || shift === 'PT';
     const isNightCount = stateType === 'NIGHT_COUNT' || shift === 'Night';
+    const isScopeApplicable = (scope?: string) => {
+      const s = (scope || 'ALL').toUpperCase();
+      if (stateType === 'DASHBOARD') return s === 'ALL' || s === 'A';
+      if (s === 'ALL' || s === 'A') return true;
+      return s === stateType;
+    };
+    const isExplicitStateScope = (scope?: string) => {
+      const s = (scope || 'ALL').toUpperCase();
+      return s === stateType && stateType !== 'ALL' && stateType !== 'DASHBOARD';
+    };
     const db = loadDatabase();
     const allAirmen = (db.airmen || []).filter((a: any) => a.active !== false);
     const targetAirmen = flight === 'Overall' ? allAirmen : allAirmen.filter((a: any) => a.flightName === flight);
     const monthKey = date.slice(0, 7);
-    const dateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date);
+    const dateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date && isScopeApplicable(a.disposalScope));
 
     const [yr, mo, da] = date.split('-').map(Number);
     const yestObj = new Date(Date.UTC(yr, (mo || 1) - 1, da || 1));
     yestObj.setUTCDate(yestObj.getUTCDate() - 1);
     const yestStr = `${yestObj.getUTCFullYear()}-${String(yestObj.getUTCMonth() + 1).padStart(2, '0')}-${String(yestObj.getUTCDate()).padStart(2, '0')}`;
     const yestMonthKey = yestStr.slice(0, 7);
-    const yestAssignments = (db.assignments?.[yestMonthKey] || []).filter((a: any) => a.date === yestStr);
+    const yestAssignments = (db.assignments?.[yestMonthKey] || []).filter((a: any) => a.date === yestStr && (!a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'));
 
     let onParade = 0;
     let onDuty = 0;
@@ -1020,8 +1030,9 @@ async function startServer() {
         const sh = String(rec?.idaShift || rec?.shift || rec?.notes || '').toLowerCase();
         return sh.includes('night') || sh.includes('nt') || sh === 'c';
       };
-      let match = matchesToday[0];
-      if (matchesToday.length > 1) {
+      const explicitOverride = matchesToday.find((r: any) => isExplicitStateScope(r.disposalScope));
+      let match = explicitOverride || matchesToday[0];
+      if (!explicitOverride && matchesToday.length > 1) {
         if (isPT || isNightCount) {
           match = matchesToday.find(isRecIdacNt) || matchesToday.find((r: any) => r.dutyCode !== 'ON_PARADE') || matchesToday[0];
         } else {
@@ -1036,7 +1047,7 @@ async function startServer() {
       const isBaseParade = ['ON_PARADE', 'PT', 'PT_PARADE', 'P', 'PRESENT'].includes(codeUpper);
 
       let yestOffLabel = '';
-      if (!isPT && !isNightCount && (isBaseParade || isIdacNt)) {
+      if (!explicitOverride && !isPT && !isNightCount && (isBaseParade || isIdacNt)) {
         const yestMatch = yestAssignments.find((a: any) => matchAirman(a) && !['ON_PARADE', 'PT', 'PT_PARADE'].includes(String(a.dutyCode || '').toUpperCase()));
         if (yestMatch) {
           const yCode = String(yestMatch.dutyCode || '').toUpperCase().trim();
@@ -1175,7 +1186,9 @@ async function startServer() {
   app.get('/api/roster', (req, res) => {
     const month = (req.query.month as string) || `${new Date().getFullYear()}-${(new Date().getMonth() + 1).toString().padStart(2, '0')}`;
     const db = loadDatabase();
-    const assignments = (db.assignments && db.assignments[month]) || [];
+    const assignments = ((db.assignments && db.assignments[month]) || []).filter(
+      (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
+    );
     res.json({ monthKey: month, assignments });
   });
 
@@ -1187,7 +1200,10 @@ async function startServer() {
     if (db.assignments) {
       Object.keys(db.assignments).forEach((mKey) => {
         if (mKey.startsWith(prefix)) {
-          assignments.push(...(db.assignments[mKey] || []));
+          const monthAss = (db.assignments[mKey] || []).filter(
+            (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
+          );
+          assignments.push(...monthAss);
         }
       });
     }
@@ -1262,21 +1278,29 @@ async function startServer() {
       };
 
       let index = -1;
-      if (isIdac) {
+      if (scope !== 'ALL') {
+        index = list.findIndex((a: any) =>
+          matchAirmanId(a.airmanId) && a.date === dateStr &&
+          (a.disposalScope || 'ALL') === scope
+        );
+      } else if (isIdac) {
         if (idaShift === 'Night') {
           index = list.findIndex((a: any) => 
             matchAirmanId(a.airmanId) && a.date === dateStr &&
+            (a.disposalScope || 'ALL') === 'ALL' &&
             ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night'))
           );
         } else {
           index = list.findIndex((a: any) =>
             matchAirmanId(a.airmanId) && a.date === dateStr &&
+            (a.disposalScope || 'ALL') === 'ALL' &&
             !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night'))
           );
         }
       } else if (isAirport) {
         index = list.findIndex((a: any) =>
           matchAirmanId(a.airmanId) && a.date === dateStr &&
+          (a.disposalScope || 'ALL') === 'ALL' &&
           (a.dutyCode === 'AIRPORT' || a.dutyCode === 'ATT' || a.dutyCode === 'AIRFIELD_DUTY')
         );
       } else {
@@ -1310,30 +1334,33 @@ async function startServer() {
       }
     }
 
-    if (!db.activityHistory) db.activityHistory = [];
-    db.activityHistory.unshift({
-      id: `hist_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      timestamp: new Date().toISOString(),
-      actionType: dutyCode === 'LEAVE' ? 'GRANT_LEAVE' : 'ASSIGN_RANGE',
-      type: dutyCode === 'LEAVE' ? 'GRANT_LEAVE' : 'ASSIGN_RANGE',
-      airmanId,
-      airmanName: airman ? `${airman.rank || ''} ${airman.name || ''}`.trim() : airmanId,
-      airmanRank: airman?.rank || '',
-      airmanTrade: airman?.trade || '',
-      dutyCode,
-      idaShift,
-      fromDate,
-      toDate: toDate || fromDate,
-      notes: notes || ''
-    });
-    if (db.activityHistory.length > 250) db.activityHistory = db.activityHistory.slice(0, 250);
+    const finalScope = disposalScope || 'ALL';
+    if (finalScope === 'ALL') {
+      if (!db.activityHistory) db.activityHistory = [];
+      db.activityHistory.unshift({
+        id: `hist_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        timestamp: new Date().toISOString(),
+        actionType: dutyCode === 'LEAVE' ? 'GRANT_LEAVE' : 'ASSIGN_RANGE',
+        type: dutyCode === 'LEAVE' ? 'GRANT_LEAVE' : 'ASSIGN_RANGE',
+        airmanId,
+        airmanName: airman ? `${airman.rank || ''} ${airman.name || ''}`.trim() : airmanId,
+        airmanRank: airman?.rank || '',
+        airmanTrade: airman?.trade || '',
+        dutyCode,
+        idaShift,
+        fromDate,
+        toDate: toDate || fromDate,
+        notes: notes || ''
+      });
+      if (db.activityHistory.length > 250) db.activityHistory = db.activityHistory.slice(0, 250);
+    }
 
     saveDatabase(db, 'DATABASE_UPDATED');
     res.json({ success: true, count: dates.length, assignedDates: dates });
   });
 
   app.post('/api/roster/delete-range', express.json(), (req, res) => {
-    const { airmanId, fromDate, toDate, dutyCode, idaShift } = req.body || {};
+    const { airmanId, fromDate, toDate, dutyCode, idaShift, disposalScope } = req.body || {};
     if (!airmanId || !fromDate) {
       return res.status(400).json({ error: 'Missing required parameters: airmanId, fromDate' });
     }
@@ -1353,6 +1380,10 @@ async function startServer() {
       if (!db.assignments[monthKey]) continue;
       db.assignments[monthKey] = db.assignments[monthKey].filter((a: any) => {
         if (!matchAirmanId(a.airmanId) || a.date !== dateStr) return true;
+        if (disposalScope) {
+          const aScope = a.disposalScope || 'ALL';
+          if (aScope !== disposalScope) return true;
+        }
         if (dutyCode) {
           const isAirport = ['ATT', 'AIRPORT', 'AIRFIELD_DUTY', 'AIRFIELD'].includes(dutyCode);
           if (isAirport) {
@@ -1363,10 +1394,13 @@ async function startServer() {
             return !['GD', 'BASE_SECURITY', 'SECURITY', 'BASE SECURITY DUTY'].includes(a.dutyCode) && !(a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'));
           }
           if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
+            const isIdacItem = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(a.dutyCode || '').toUpperCase());
+            if (!isIdacItem) return true;
             if (idaShift) {
-              return !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === idaShift || a.shift === idaShift));
+              const rawS = a.idaShift || a.shift || (String(a.id || '').match(/_IDAC?_(Morning|Afternoon|Night)_/i)?.[1]) || 'Morning';
+              return String(rawS).trim().toLowerCase() !== String(idaShift).trim().toLowerCase();
             }
-            return !(a.dutyCode === 'IDAC' || a.dutyCode === 'IDA');
+            return false;
           }
           return a.dutyCode !== dutyCode;
         }

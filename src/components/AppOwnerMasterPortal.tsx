@@ -32,12 +32,14 @@ import {
   Settings,
   Save,
   ShieldCheck,
+  Shield,
   ChevronRight,
   MapPin,
   Sparkles,
   Wrench,
   PowerOff,
 } from 'lucide-react';
+import { Logo155UASU } from './Logo155UASU';
 import {
   getAppConfig,
   saveAppConfig,
@@ -124,6 +126,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [masterUserId, setMasterUserId] = useState<string>('');
   const [masterPin, setMasterPin] = useState<string>('');
   const [showMasterPin, setShowMasterPin] = useState<boolean>(false);
+  const [isMasterIdFocused, setIsMasterIdFocused] = useState<boolean>(false);
+  const [isMasterPinFocused, setIsMasterPinFocused] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string>('');
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
@@ -160,6 +164,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [isSyncingBackground, setIsSyncingBackground] = useState<boolean>(false);
   const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
   const [approvalBanner, setApprovalBanner] = useState<string>('');
+  const [approvedSuccessModal, setApprovedSuccessModal] = useState<PendingOfficeRegistrationRequest | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedProjectId, setCopiedProjectId] = useState<string | null>(null);
   const [enteringProjectId, setEnteringProjectId] = useState<string | null>(null);
@@ -263,9 +268,39 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     if (!isOpen) {
       didInitialTabSelectRef.current = false;
       setConfirmAction(null);
+      setApprovedSuccessModal(null);
       setHistoryOffice(null);
     }
   }, [isOpen, isOwnerAuthenticated]);
+
+  // Auto-Login when valid Master User ID & Master PIN are entered (Matches normal Login Portal behavior)
+  useEffect(() => {
+    if (!isOpen || isOwnerAuthenticated || isLoggingIn) return;
+    const cleanId = masterUserId.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
+    const cleanDigits = cleanId.replace(/\D/g, '');
+    const cleanPin = masterPin.trim();
+    if (!cleanId || cleanPin.length < 4) return;
+
+    const activeMasterId = getMasterUserId();
+    const isValidMasterId =
+      cleanId === activeMasterId ||
+      cleanDigits === activeMasterId ||
+      cleanId === MASTER_USER_ID ||
+      cleanDigits === MASTER_USER_ID;
+
+    const isValidPin =
+      isMasterPinMatch(cleanPin) ||
+      cleanPin === currentMasterCreds.masterPin ||
+      cleanPin === MASTER_USER_PIN ||
+      cleanPin === '1124';
+
+    if (isValidMasterId && isValidPin) {
+      sessionStorage.setItem('baf_master_owner_authenticated', 'true');
+      setOffices(getRegisteredOfficesLocal());
+      setOfficeRequests(getPendingOfficeRequestsLocal());
+      setIsOwnerAuthenticated(true);
+    }
+  }, [masterUserId, masterPin, isOpen, isOwnerAuthenticated, isLoggingIn, currentMasterCreds.masterPin]);
 
   const handleSaveMaintenance = () => {
     const updatedConfig: AppConfig = {
@@ -423,6 +458,29 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     onClose();
   };
 
+  const handleInstantApproveRequest = async (req: PendingOfficeRegistrationRequest) => {
+    if (processingRequestId) return;
+    setProcessingRequestId(req.id);
+    try {
+      const approved = await approveOfficeRegistrationRequest(req.id);
+      setOffices(getRegisteredOfficesLocal());
+      setOfficeRequests(getPendingOfficeRequestsLocal());
+      if (approved) {
+        setApprovedSuccessModal({
+          ...req,
+          status: 'APPROVED',
+          approvedAt: new Date().toISOString(),
+        });
+        // Background cloud refresh
+        fetchRegisteredOfficesFromMaster()
+          .then((list) => setOffices(list))
+          .catch(() => {});
+      }
+    } finally {
+      setProcessingRequestId(null);
+    }
+  };
+
   const executeConfirmedAction = async () => {
     if (!confirmAction) return;
     const actionToRun = confirmAction;
@@ -431,21 +489,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     setIsConfirmExecuting(false);
 
     if (actionToRun.type === 'APPROVE_REQUEST') {
-      const req = actionToRun.req;
-      setProcessingRequestId(req.id);
-      const approved = await approveOfficeRegistrationRequest(req.id);
-      if (approved) {
-        setOffices(getRegisteredOfficesLocal());
-        setOfficeRequests(getPendingOfficeRequestsLocal());
-        setApprovalBanner(
-          `Approved & Created Office "${req.officeName}"! ${req.fullName} (BD/${req.bdNo}) added to Biodata Register & User Management (${req.userRole}).`
-        );
-        // Background cloud refresh
-        fetchRegisteredOfficesFromMaster()
-          .then((list) => setOffices(list))
-          .catch(() => {});
-      }
-      setProcessingRequestId(null);
+      await handleInstantApproveRequest(actionToRun.req);
     } else if (actionToRun.type === 'REJECT_REQUEST') {
       const req = actionToRun.req;
       // Optimistically remove from state immediately so it disappears at 0ms
@@ -736,77 +780,135 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-2 sm:p-4 overflow-y-auto">
       {!isOwnerAuthenticated ? (
-        /* APP OWNER MASTER LOGIN MODAL */
-        <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5 text-slate-900 dark:text-white relative animate-fadeIn">
+        /* APP OWNER MASTER LOGIN MODAL — MATCHES NORMAL LOGIN PORTAL (UserLoginGate.tsx) */
+        <div className="w-full max-w-[340px] sm:max-w-[360px] bg-white/95 dark:bg-[#0d1526]/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800/90 rounded-2xl p-5 sm:p-7 shadow-2xl space-y-4 sm:space-y-5 text-slate-900 dark:text-white text-center relative animate-fadeIn">
           <button
             type="button"
             onClick={onClose}
-            className="absolute top-4 right-4 p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            className="absolute top-3.5 right-3.5 p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            title="Close Master Control Portal"
           >
             <X className="w-4 h-4" />
           </button>
 
-          <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shadow-lg">
-              <ShieldAlert className="w-7 h-7" />
+          {/* Emblem Logo — Same as Normal Login Portal */}
+          <div className="flex justify-center">
+            <Logo155UASU
+              size="lg"
+              logoOverride="/office-management-logo.png?v=15"
+              title="Master Control Center"
+            />
+          </div>
+
+          {/* Header Titles — Same Typography & Pill Style as Normal Login Portal */}
+          <div className="space-y-1.5">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-widest">
+              <Shield className="w-3 h-3" />
+              <span>MASTER CONTROL PORTAL</span>
             </div>
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest">
-              <span>MASTER COMMAND ACCESS</span>
-            </div>
-            <h2 className="text-xl font-black tracking-tight">Master Control Center</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Enter your Master User ID & PIN to access the Multi-Office Command & Approval Portal.
-            </p>
+            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white uppercase">
+              MASTER CONTROL
+            </h1>
           </div>
 
           {authError && (
-            <div className="p-3 bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 rounded-xl flex items-start gap-2 text-xs text-red-700 dark:text-red-200">
-              <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-              <span>{authError}</span>
+            <div className="p-3 bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 rounded-xl flex items-start gap-2.5 text-left animate-fadeIn">
+              <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+              <div className="text-xs text-red-700 dark:text-red-200 leading-relaxed">{authError}</div>
             </div>
           )}
 
-          <form onSubmit={handleMasterLogin} className="space-y-4 text-left" noValidate>
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
-                Master User ID
-              </label>
+          <form onSubmit={handleMasterLogin} className="space-y-4 text-left pt-1" noValidate>
+            {/* Floating Label USER ID Input — Identical to Normal Login Portal */}
+            <div className="relative">
               <div className="relative">
-                <UserCheck className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <UserCheck
+                  className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10 transition-colors duration-200 ${
+                    isMasterIdFocused || masterUserId.trim().length > 0
+                      ? 'text-emerald-500'
+                      : 'text-slate-400'
+                  }`}
+                />
                 <input
+                  id="master-portal-userid-input"
+                  name="username"
                   type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoComplete="username"
                   value={masterUserId}
+                  onFocus={() => setIsMasterIdFocused(true)}
+                  onBlur={() => setIsMasterIdFocused(false)}
                   onChange={(e) => {
-                    setMasterUserId(e.target.value);
+                    const digitsOnly = e.target.value.replace(/\D/g, '');
+                    setMasterUserId(digitsOnly);
                     setAuthError('');
                   }}
-                  placeholder="Enter Master User ID"
-                  className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                  placeholder=" "
+                  className="w-full pl-10 pr-4 pt-4 pb-2 bg-slate-50 dark:bg-[#090f1d] border border-slate-300 dark:border-slate-700/80 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
                   autoFocus
                 />
+                <label
+                  htmlFor="master-portal-userid-input"
+                  className={`absolute pointer-events-none uppercase tracking-wider font-bold transition-all duration-200 px-1.5 rounded ${
+                    isMasterIdFocused || masterUserId.trim().length > 0
+                      ? '-top-2 left-8 text-[10px] bg-white dark:bg-[#0d1526] text-emerald-600 dark:text-emerald-400'
+                      : 'top-1/2 -translate-y-1/2 left-9 text-xs text-slate-400 dark:text-slate-500 bg-transparent'
+                  }`}
+                >
+                  USER ID
+                </label>
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
-                Master PIN
-              </label>
+            {/* Floating Label PIN Input — Identical to Normal Login Portal */}
+            <div className="relative">
               <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <Lock
+                  className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10 transition-colors duration-200 ${
+                    isMasterPinFocused || masterPin.trim().length > 0
+                      ? 'text-emerald-500'
+                      : 'text-slate-400'
+                  }`}
+                />
                 <input
-                  type={showMasterPin ? 'text' : 'password'}
+                  id="master-portal-pin-input"
+                  name="pin"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoComplete="off"
                   value={masterPin}
+                  onFocus={() => setIsMasterPinFocused(true)}
+                  onBlur={() => setIsMasterPinFocused(false)}
                   onChange={(e) => {
-                    setMasterPin(e.target.value);
+                    const digitsOnly = e.target.value.replace(/\D/g, '');
+                    setMasterPin(digitsOnly);
                     setAuthError('');
                   }}
-                  placeholder="••••••••"
-                  className="w-full pl-10 pr-10 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                  placeholder=" "
+                  style={
+                    {
+                      WebkitTextSecurity: showMasterPin ? 'none' : 'disc',
+                    } as React.CSSProperties
+                  }
+                  className="w-full pl-10 pr-10 pt-4 pb-2 bg-slate-50 dark:bg-[#090f1d] border border-slate-300 dark:border-slate-700/80 rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
                 />
+                <label
+                  htmlFor="master-portal-pin-input"
+                  className={`absolute pointer-events-none uppercase tracking-wider font-bold transition-all duration-200 px-1.5 rounded ${
+                    isMasterPinFocused || masterPin.trim().length > 0
+                      ? '-top-2 left-8 text-[10px] bg-white dark:bg-[#0d1526] text-emerald-600 dark:text-emerald-400'
+                      : 'top-1/2 -translate-y-1/2 left-9 text-xs text-slate-400 dark:text-slate-500 bg-transparent'
+                  }`}
+                >
+                  PIN
+                </label>
                 <button
                   type="button"
                   onClick={() => setShowMasterPin(!showMasterPin)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-emerald-500 transition-colors cursor-pointer"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-white p-1 cursor-pointer"
+                  title={showMasterPin ? 'Hide PIN' : 'Show PIN'}
                 >
                   {showMasterPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -816,17 +918,17 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
             <button
               type="submit"
               disabled={isLoggingIn}
-              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-colors disabled:opacity-50"
+              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 cursor-pointer disabled:opacity-50"
             >
               {isLoggingIn ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Authenticating...</span>
+                  <span>Signing In...</span>
                 </>
               ) : (
                 <>
                   <LogIn className="w-4 h-4" />
-                  <span>Open Master Control Center</span>
+                  <span>Login</span>
                 </>
               )}
             </button>
@@ -1426,158 +1528,97 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                 </div>
               )}
 
-              {/* TAB 2: NEW OFFICE APPROVAL REQUESTS */}
+              {/* TAB 2: NEW OFFICE APPROVAL REQUESTS (SINGLE-ROW LAYOUT + INSTANT INDIVIDUAL APPROVAL) */}
               {activeTab === 'approvals' && (
-                <div className="space-y-4">
-                  {visibleRequests.length === 0 ? (
+                <div className="space-y-3">
+                  {pendingRequests.length === 0 ? (
                     <div className="p-12 rounded-2xl bg-white dark:bg-slate-950 border border-dashed border-slate-300 dark:border-slate-800 text-center space-y-2">
                       <ClipboardCheck className="w-9 h-9 text-slate-400 mx-auto" />
                       <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
                         No Pending Office Registration Requests
                       </p>
                       <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                        When a user submits the 3-step "Register a New Office" form on the Login Portal, their request will appear here immediately.
+                        When a user submits the "Register a New Office" form on the Login Portal, their request will appear here immediately for single-click approval.
                       </p>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 gap-4">
-                      {visibleRequests.map((req) => {
+                    <div className="space-y-2.5">
+                      {pendingRequests.map((req) => {
                         const isProcessing = processingRequestId === req.id;
-                        const isApproved = req.status === 'APPROVED';
 
                         return (
                           <div
                             key={req.id}
-                            className={`p-5 rounded-2xl border transition-all space-y-4 shadow-sm ${
-                              isApproved
-                                ? 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-500/30'
-                                : 'bg-white dark:bg-slate-950 border-amber-500/40'
-                            }`}
+                            className="p-3.5 rounded-2xl border bg-white dark:bg-slate-950 border-amber-500/40 hover:border-emerald-500/50 transition-all shadow-sm flex flex-col xl:flex-row xl:items-center justify-between gap-3"
                           >
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                              <div className="flex items-start gap-3.5">
-                                <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center overflow-hidden shrink-0 p-1.5">
-                                  <img
-                                    src={req.officeLogo || '/155-uasu-baf-logo.png'}
-                                    alt={req.officeName}
-                                    className="w-full h-full object-contain"
-                                    onError={(e) => {
-                                      (e.currentTarget as HTMLImageElement).src =
-                                        '/155-uasu-baf-logo.png';
-                                    }}
-                                  />
-                                </div>
-                                <div>
-                                  <div className="flex items-center flex-wrap gap-2">
-                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
-                                      {req.officeName}
-                                    </h3>
-                                    <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-800">
-                                      Code: {req.officeCode}
-                                    </span>
-                                  </div>
-                                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                    {req.officeBase}
-                                    {req.officeSlogan && req.officeSlogan !== 'Intel • Surveillance • Strike'
-                                      ? ` • ${req.officeSlogan}`
-                                      : ''}
-                                  </p>
-                                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
-                                    Submitted: {new Date(req.createdAt).toLocaleString()}
-                                  </p>
-                                </div>
+                            {/* Left: Office Identity */}
+                            <div className="flex items-center gap-3 min-w-[210px] max-w-[260px] shrink-0">
+                              <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center overflow-hidden shrink-0 p-1">
+                                <img
+                                  src={req.officeLogo || '/155-uasu-baf-logo.png'}
+                                  alt={req.officeName}
+                                  className="w-full h-full object-contain"
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLImageElement).src =
+                                      '/155-uasu-baf-logo.png';
+                                  }}
+                                />
                               </div>
-
-                              <div className="flex items-center gap-2 self-end sm:self-center">
-                                {req.status === 'PENDING' ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={isProcessing}
-                                      onClick={() =>
-                                        setConfirmAction({
-                                          type: 'REJECT_REQUEST',
-                                          req,
-                                        })
-                                      }
-                                      className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                      <span>Reject</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={isProcessing}
-                                      onClick={() =>
-                                        setConfirmAction({
-                                          type: 'APPROVE_REQUEST',
-                                          req,
-                                        })
-                                      }
-                                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer transition-colors disabled:opacity-50"
-                                    >
-                                      {isProcessing ? (
-                                        <>
-                                          <Loader2 className="w-4 h-4 animate-spin" />
-                                          <span>Approving...</span>
-                                        </>
-                                      ) : (
-                                        <>
-                                          <CheckCircle2 className="w-4 h-4" />
-                                          <span>Approve & Create Office</span>
-                                        </>
-                                      )}
-                                    </button>
-                                  </>
-                                ) : (
-                                  <span className="px-3 py-1.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-black uppercase tracking-wider flex items-center gap-1.5">
-                                    <CheckCircle2 className="w-4 h-4" />
-                                    <span>APPROVED</span>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <h3 className="text-sm font-black text-slate-900 dark:text-white truncate">
+                                    {req.officeName}
+                                  </h3>
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-100 dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 border border-slate-200 dark:border-slate-800">
+                                    {req.officeCode}
                                   </span>
-                                )}
+                                </div>
+                                <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 truncate">
+                                  {req.officeBase}
+                                </p>
                               </div>
                             </div>
 
-                            {/* Step 2 Requester User Info Grid */}
-                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 text-xs">
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                            {/* Middle (Same Row): Requester Details */}
+                            <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 text-[11px]">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   User ID (BD No)
                                 </p>
-                                <p className="font-mono font-black text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                <p className="font-mono font-black text-emerald-600 dark:text-emerald-400 truncate">
                                   BD/{req.bdNo}
                                 </p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   Full Name
                                 </p>
-                                <p className="font-bold text-slate-900 dark:text-white mt-0.5 truncate">
+                                <p className="font-bold text-slate-900 dark:text-white truncate" title={req.fullName}>
                                   {req.fullName}
                                 </p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   Surname
                                 </p>
-                                <p className="font-bold text-slate-800 dark:text-slate-200 mt-0.5 truncate">
+                                <p className="font-bold text-slate-800 dark:text-slate-200 truncate">
                                   {req.surname}
                                 </p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   Trade
                                 </p>
-                                <p className="font-semibold text-slate-700 dark:text-slate-300 mt-0.5 flex items-center gap-1">
+                                <p className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 truncate">
                                   <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
                                   <span className="truncate">{req.trade}</span>
                                 </p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   User Role
                                 </p>
-                                <p className="font-black text-amber-600 dark:text-amber-400 mt-0.5">
+                                <p className="font-black text-amber-600 dark:text-amber-400 truncate">
                                   {req.userRole === 'SUPER_ADMIN'
                                     ? 'Super Admin'
                                     : req.userRole === 'ADMIN'
@@ -1585,15 +1626,51 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                     : 'User'}
                                 </p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-bold uppercase text-slate-400">
+                              <div className="min-w-0">
+                                <p className="text-[9px] font-bold uppercase text-slate-400">
                                   Contact No
                                 </p>
-                                <p className="font-mono font-semibold text-slate-700 dark:text-slate-300 mt-0.5 flex items-center gap-1">
+                                <p className="font-mono font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 truncate">
                                   <Phone className="w-3 h-3 text-slate-400 shrink-0" />
-                                  <span>{req.contactNo || 'N/A'}</span>
+                                  <span className="truncate">{req.contactNo || 'N/A'}</span>
                                 </p>
                               </div>
+                            </div>
+
+                            {/* Right (Same Row): Individual Single-Request Reject & Instant Approve Buttons */}
+                            <div className="flex items-center justify-end gap-2 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isProcessing}
+                                onClick={() =>
+                                  setConfirmAction({
+                                    type: 'REJECT_REQUEST',
+                                    req,
+                                  })
+                                }
+                                className="px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Reject</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isProcessing}
+                                onClick={() => handleInstantApproveRequest(req)}
+                                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer transition-colors disabled:opacity-50"
+                              >
+                                {isProcessing ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>Approving...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>Approve</span>
+                                  </>
+                                )}
+                              </button>
                             </div>
                           </div>
                         );
@@ -1981,6 +2058,109 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                         }`}
                       {confirmAction.type === 'REMOVE_OFFICE' && 'Yes, Remove Office'}
                     </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SEPARATE POPUP WINDOW FOR NEW OFFICE APPROVAL SUCCESS */}
+          {approvedSuccessModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fadeIn">
+              <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-emerald-500/40 rounded-2xl p-6 shadow-2xl space-y-5 text-slate-900 dark:text-white relative">
+                <button
+                  type="button"
+                  onClick={() => setApprovedSuccessModal(null)}
+                  className="absolute top-4 right-4 p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+
+                <div className="flex flex-col items-center text-center space-y-2">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-500 flex items-center justify-center shadow-lg">
+                    <CheckCircle2 className="w-8 h-8" />
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest">
+                    APPROVAL SUCCESSFUL
+                  </span>
+                  <h3 className="text-lg font-black tracking-tight text-slate-900 dark:text-white">
+                    {approvedSuccessModal.officeName} Approved!
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    The office workspace and requester profile have been created and synced to Biodata Register, Nominal Roll & User Management.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5 text-xs">
+                  <div className="flex items-center gap-3 pb-2.5 border-b border-slate-200 dark:border-slate-800">
+                    <img
+                      src={approvedSuccessModal.officeLogo || '/155-uasu-baf-logo.png'}
+                      alt={approvedSuccessModal.officeName}
+                      className="w-10 h-10 rounded-lg object-contain bg-white dark:bg-slate-900 p-1 border border-slate-200 dark:border-slate-800 shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <p className="font-black text-slate-900 dark:text-white truncate">
+                        {approvedSuccessModal.officeName}
+                      </p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Code: <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">{approvedSuccessModal.officeCode}</span> • {approvedSuccessModal.officeBase}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div>
+                      <span className="text-slate-400 uppercase font-bold text-[9px] block">User ID (BD No)</span>
+                      <span className="font-mono font-black text-emerald-600 dark:text-emerald-400">BD/{approvedSuccessModal.bdNo}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 uppercase font-bold text-[9px] block">Full Name</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{approvedSuccessModal.fullName}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 uppercase font-bold text-[9px] block">Trade & Role</span>
+                      <span className="font-bold text-amber-600 dark:text-amber-400">
+                        {approvedSuccessModal.trade} • {approvedSuccessModal.userRole === 'SUPER_ADMIN' ? 'Super Admin' : approvedSuccessModal.userRole}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 uppercase font-bold text-[9px] block">Contact No</span>
+                      <span className="font-mono font-semibold text-slate-700 dark:text-slate-300">{approvedSuccessModal.contactNo || 'N/A'}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setApprovedSuccessModal(null)}
+                    className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer transition-colors"
+                  >
+                    Close Window
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetOff = offices.find(
+                        (o) =>
+                          String(o.officeCode || o.firebaseConfig?.officeCode || '')
+                            .toUpperCase()
+                            .trim() ===
+                          String(approvedSuccessModal.officeCode || '')
+                            .toUpperCase()
+                            .trim()
+                      );
+                      setApprovedSuccessModal(null);
+                      if (targetOff) {
+                        handleEnterOfficeAsMaster(targetOff);
+                      } else {
+                        setActiveTab('offices');
+                      }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Enter Office</span>
                   </button>
                 </div>
               </div>

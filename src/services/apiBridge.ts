@@ -332,12 +332,12 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
     }
 
     if (pathname === '/api/roster/delete-assignment') {
-      const { airmanId, date, dutyCode, idaShift } = body || {};
+      const { airmanId, date, dutyCode, idaShift, disposalScope } = body || {};
       const perm = verifyDutyWritePermission(airmanId, date);
       if (!perm.canDelete) {
         return jsonResponse({ error: perm.reason || 'Permission denied' }, 403);
       }
-      localDb.deleteAssignment(airmanId, date, dutyCode, idaShift);
+      localDb.deleteAssignment(airmanId, date, dutyCode, idaShift, disposalScope);
       return jsonResponse({ success: true });
     }
 

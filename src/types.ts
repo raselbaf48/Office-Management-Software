@@ -16,6 +16,7 @@ export type DutyCategoryCode =
   | 'LEAVE'        // Leave
   | 'BAKE_N_BITE'
   | 'CANTEEN'  // Bake & Bite
+  | 'DEPLOYMENT'
   | 'DUTY_OFF'     // Duty Off
   | 'ON_PARADE'    // On Parade / Normal Working Status
   | 'ESSN'         // Essential Duty / Task

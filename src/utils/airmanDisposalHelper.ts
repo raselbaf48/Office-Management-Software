@@ -175,18 +175,19 @@ export function getAirmanDisposalForRange(
 
   // Check for Leave
   const leaveAssignments = matchedAssignments.filter((a) => a.dutyCode === 'LEAVE');
+  // Check for Deployment (including custom deployments saved with dutyCode 'ATT' or 'DEPLOYMENT')
+  const isDeploymentAssignment = (a: DutyAssignment): boolean => {
+    const code = String(a.dutyCode || '');
+    const n = (a.notes || '').toLowerCase();
+    if (code === 'DEPLOYMENT' || code === 'CANTEEN' || code === 'BAKE_N_BITE') return true;
+    if (n.includes('canteen') || n.includes('bake') || n.includes('deployment')) return true;
+    if (code === 'ATT' && !n.includes('tdy')) return true;
+    return false;
+  };
+  const depAssignments = matchedAssignments.filter(isDeploymentAssignment);
   // Check for TDY
   const tdyAssignments = matchedAssignments.filter(
-    (a) => a.dutyCode === 'TDY' || a.dutyCode === 'ATT' || a.dutyCode === 'DETT'
-  );
-  // Check for Deployment
-  const depAssignments = matchedAssignments.filter(
-    (a) =>
-      (a.dutyCode as string) === 'DEPLOYMENT' ||
-      a.dutyCode === 'CANTEEN' ||
-      a.dutyCode === 'BAKE_N_BITE' ||
-      (a.notes && a.notes.toLowerCase().includes('canteen')) ||
-      (a.notes && a.notes.toLowerCase().includes('deployment'))
+    (a) => a.dutyCode === 'TDY' || a.dutyCode === 'DETT' || (a.dutyCode === 'ATT' && !isDeploymentAssignment(a))
   );
   // Duty Off assignments (GD Off, Night Off, etc.)
   const dutyOffAssignments = matchedAssignments.filter(
@@ -278,22 +279,6 @@ export function getAirmanDisposalForRange(
       };
     }
 
-    if (depAssignments.length > 0) {
-      const first = depAssignments[0];
-      const detail = getDepDetail(first);
-      const hint = getDateHint(depAssignments);
-      const fullLabel = `⛔ [On Deployment - ${detail}${hint}]`;
-      return {
-        disposalSummary: `On Deployment: ${detail}${hint}`,
-        dropdownLabel: fullLabel,
-        disabled: true,
-        disabledReason: `Currently on Deployment (${detail}). Cannot assign Leave while deployed.`,
-        conflictType: 'DEPLOYMENT',
-        conflictingDates: depAssignments.map((a) => a.date),
-        primaryDutyCode: 'DEPLOYMENT',
-      };
-    }
-
     if (otherDutyAssignments.length > 0) {
       const first = otherDutyAssignments[0];
       const detail = getDutyDetail(first);
@@ -325,8 +310,14 @@ export function getAirmanDisposalForRange(
       const prevMonthKey = prevDateStr.slice(0, 7);
       const prevMonthList = allAssignmentsSource[prevMonthKey] || [];
       const prevAss = prevMonthList.filter((a) => matchAirmanId(a.airmanId, airmanId) && a.date === prevDateStr);
-      if (prevAss.length > 0) {
-        const yestDuty = prevAss[0];
+      if (prevAss.length > 0 && !prevAss.some((a) => a.dutyCode === 'LEAVE')) {
+        const yestDuty =
+          prevAss.find(
+            (a) =>
+              !['CANTEEN', 'BAKE_N_BITE', 'DEPLOYMENT', 'ATT', 'ON_PARADE', 'PT', 'PT_PARADE'].includes(
+                String(a.dutyCode || '')
+              )
+          ) || prevAss[0];
         const yCodeStr = String(yestDuty.dutyCode || '');
         const isEscortDuty =
           (yestDuty.dutyCode as any) === 'ESCORT' ||
@@ -337,7 +328,7 @@ export function getAirmanDisposalForRange(
           (yestDuty.notes || '').toLowerCase().includes('escort');
 
         const isNight =
-          ['GD', 'BTF', 'NTF', 'AIRPORT'].includes(yestDuty.dutyCode as any) ||
+          ['GD', 'BTF', 'NTF', 'AIRPORT', 'HALISHAHAR'].includes(yestDuty.dutyCode as any) ||
           ((yestDuty.dutyCode === 'IDAC' || yestDuty.dutyCode === 'IDA') && yestDuty.idaShift === 'Night') ||
           (yestDuty.notes || '').toLowerCase().includes('idac') ||
           isEscortDuty;
@@ -348,6 +339,7 @@ export function getAirmanDisposalForRange(
           else if (yestDuty.dutyCode === 'BTF') offName = 'BTF Off';
           else if (yestDuty.dutyCode === 'NTF') offName = 'NTF Off';
           else if (yestDuty.dutyCode === 'AIRPORT') offName = 'Airport Off';
+          else if (yestDuty.dutyCode === 'HALISHAHAR') offName = 'Halishahar Off';
           else if ((yestDuty.dutyCode === 'IDAC' || yestDuty.dutyCode === 'IDA') && yestDuty.idaShift === 'Night')
             offName = 'IDAC Nt Off';
           return {
@@ -359,6 +351,19 @@ export function getAirmanDisposalForRange(
           };
         }
       }
+    }
+
+    if (depAssignments.length > 0) {
+      const first = depAssignments[0];
+      const detail = getDepDetail(first);
+      const hint = getDateHint(depAssignments);
+      return {
+        disposalSummary: `On Deployment: ${detail}${hint}`,
+        dropdownLabel: `[On Deployment - ${detail}${hint}]`,
+        disabled: false,
+        conflictType: null,
+        primaryDutyCode: 'DEPLOYMENT',
+      };
     }
 
     return {
@@ -404,22 +409,6 @@ export function getAirmanDisposalForRange(
       };
     }
 
-    if (depAssignments.length > 0) {
-      const first = depAssignments[0];
-      const detail = getDepDetail(first);
-      const hint = getDateHint(depAssignments);
-      const fullLabel = `⛔ [On Deployment - ${detail}${hint}]`;
-      return {
-        disposalSummary: `On Deployment: ${detail}${hint}`,
-        dropdownLabel: fullLabel,
-        disabled: true,
-        disabledReason: `Currently on Deployment (${detail}). Cannot assign TDY while deployed.`,
-        conflictType: 'DEPLOYMENT',
-        conflictingDates: depAssignments.map((a) => a.date),
-        primaryDutyCode: 'DEPLOYMENT',
-      };
-    }
-
     if (otherDutyAssignments.length > 0) {
       const first = otherDutyAssignments[0];
       const detail = getDutyDetail(first);
@@ -443,6 +432,19 @@ export function getAirmanDisposalForRange(
       };
     }
 
+    if (depAssignments.length > 0) {
+      const first = depAssignments[0];
+      const detail = getDepDetail(first);
+      const hint = getDateHint(depAssignments);
+      return {
+        disposalSummary: `On Deployment: ${detail}${hint}`,
+        dropdownLabel: `[On Deployment - ${detail}${hint}]`,
+        disabled: false,
+        conflictType: null,
+        primaryDutyCode: 'DEPLOYMENT',
+      };
+    }
+
     return {
       disposalSummary: 'On Parade',
       dropdownLabel: '',
@@ -454,22 +456,6 @@ export function getAirmanDisposalForRange(
 
   // 3. Target: DEPLOYMENT
   if (targetAction === 'DEPLOYMENT') {
-    if (depAssignments.length > 0) {
-      const first = depAssignments[0];
-      const detail = getDepDetail(first);
-      const hint = getDateHint(depAssignments);
-      const fullLabel = `⛔ [Already on Deployment - ${detail}${hint}]`;
-      return {
-        disposalSummary: `Already on Deployment: ${detail}${hint}`,
-        dropdownLabel: fullLabel,
-        disabled: true,
-        disabledReason: `Already deployed (${detail}). Cannot assign Deployment again.`,
-        conflictType: 'DEPLOYMENT',
-        conflictingDates: depAssignments.map((a) => a.date),
-        primaryDutyCode: 'DEPLOYMENT',
-      };
-    }
-
     if (leaveAssignments.length > 0) {
       const first = leaveAssignments[0];
       const detail = getLeaveDetail(first);
@@ -499,6 +485,22 @@ export function getAirmanDisposalForRange(
         conflictType: 'TDY',
         conflictingDates: tdyAssignments.map((a) => a.date),
         primaryDutyCode: 'TDY',
+      };
+    }
+
+    if (depAssignments.length > 0) {
+      const first = depAssignments[0];
+      const detail = getDepDetail(first);
+      const hint = getDateHint(depAssignments);
+      const fullLabel = `⛔ [Already on Deployment - ${detail}${hint}]`;
+      return {
+        disposalSummary: `Already on Deployment: ${detail}${hint}`,
+        dropdownLabel: fullLabel,
+        disabled: true,
+        disabledReason: `Already deployed (${detail}). Cannot assign Deployment again.`,
+        conflictType: 'DEPLOYMENT',
+        conflictingDates: depAssignments.map((a) => a.date),
+        primaryDutyCode: 'DEPLOYMENT',
       };
     }
 

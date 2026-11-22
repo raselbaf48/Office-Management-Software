@@ -20,6 +20,15 @@ export const DEFAULT_PREPARED_BY: SignatureDetails = {
   digitalSignatureText: '',
 };
 
+export const DEFAULT_CHECKED_BY: SignatureDetails = {
+  name: 'MD SHAHINUZZAMAN',
+  rank: 'WO',
+  designation: 'Checked By',
+  unit: '155 UASU BAF',
+  signDigitally: false,
+  digitalSignatureText: '',
+};
+
 export const DEFAULT_AUTHORIZED_BY: SignatureDetails = {
   name: 'MAHIM RAAD SADAT',
   rank: 'FLT LT',
@@ -35,6 +44,18 @@ function getOfficeDefaultPreparedBy(): SignatureDetails {
     name: '',
     rank: '',
     designation: 'UWO',
+    unit: getActiveOfficeIdentity().officeName || '',
+    signDigitally: false,
+    digitalSignatureText: '',
+  };
+}
+
+function getOfficeDefaultCheckedBy(): SignatureDetails {
+  if (isDefault155UasuOffice()) return DEFAULT_CHECKED_BY;
+  return {
+    name: '',
+    rank: '',
+    designation: 'Checked By',
     unit: getActiveOfficeIdentity().officeName || '',
     signDigitally: false,
     digitalSignatureText: '',
@@ -63,6 +84,15 @@ export function getSavedPreparedBy(): SignatureDetails {
   return fallback;
 }
 
+export function getSavedCheckedBy(): SignatureDetails {
+  const fallback = getOfficeDefaultCheckedBy();
+  try {
+    const saved = localStorage.getItem('baf_sign_checked_by');
+    if (saved) return { ...fallback, ...JSON.parse(saved) };
+  } catch (e) {}
+  return fallback;
+}
+
 export function getSavedAuthorizedBy(): SignatureDetails {
   const fallback = getOfficeDefaultAuthorizedBy();
   try {
@@ -79,6 +109,13 @@ export function savePreparedBy(details: SignatureDetails): void {
   } catch (e) {}
 }
 
+export function saveCheckedBy(details: SignatureDetails): void {
+  try {
+    localStorage.setItem('baf_sign_checked_by', JSON.stringify(details));
+    window.dispatchEvent(new CustomEvent('baf_signatures_updated'));
+  } catch (e) {}
+}
+
 export function saveAuthorizedBy(details: SignatureDetails): void {
   try {
     localStorage.setItem('baf_sign_authorized_by', JSON.stringify(details));
@@ -89,8 +126,8 @@ export function saveAuthorizedBy(details: SignatureDetails): void {
 interface SignatureConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialTab?: 'PREPARED_BY' | 'AUTHORIZED_BY';
-  onSignaturesUpdated?: (prepared: SignatureDetails, authorized: SignatureDetails) => void;
+  initialTab?: 'PREPARED_BY' | 'CHECKED_BY' | 'AUTHORIZED_BY';
+  onSignaturesUpdated?: (prepared: SignatureDetails, authorized: SignatureDetails, checked?: SignatureDetails) => void;
 }
 
 export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
@@ -99,9 +136,10 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
   initialTab = 'PREPARED_BY',
   onSignaturesUpdated,
 }) => {
-  const [activeTab, setActiveTab] = useState<'PREPARED_BY' | 'AUTHORIZED_BY'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'PREPARED_BY' | 'CHECKED_BY' | 'AUTHORIZED_BY'>(initialTab);
 
   const [prepared, setPrepared] = useState<SignatureDetails>(getSavedPreparedBy);
+  const [checked, setChecked] = useState<SignatureDetails>(getSavedCheckedBy);
   const [authorized, setAuthorized] = useState<SignatureDetails>(getSavedAuthorizedBy);
   const [savedSuccess, setSavedSuccess] = useState<string>('');
 
@@ -109,6 +147,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
     if (isOpen) {
       setActiveTab(initialTab);
       setPrepared(getSavedPreparedBy());
+      setChecked(getSavedCheckedBy());
       setAuthorized(getSavedAuthorizedBy());
       setSavedSuccess('');
     }
@@ -124,6 +163,11 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
       name: prepared.name.toUpperCase().trim(),
       unit: prepared.unit.trim() || activeUnit,
     };
+    const cleanChecked = {
+      ...checked,
+      name: checked.name.toUpperCase().trim(),
+      unit: checked.unit.trim() || activeUnit,
+    };
     const cleanAuthorized = {
       ...authorized,
       name: authorized.name.toUpperCase().trim(),
@@ -131,12 +175,14 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
     };
 
     savePreparedBy(cleanPrepared);
+    saveCheckedBy(cleanChecked);
     saveAuthorizedBy(cleanAuthorized);
     setPrepared(cleanPrepared);
+    setChecked(cleanChecked);
     setAuthorized(cleanAuthorized);
 
     if (onSignaturesUpdated) {
-      onSignaturesUpdated(cleanPrepared, cleanAuthorized);
+      onSignaturesUpdated(cleanPrepared, cleanAuthorized, cleanChecked);
     }
 
     setSavedSuccess('Signatures saved successfully! (Auto-saved as last used)');
@@ -149,6 +195,9 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
     if (activeTab === 'PREPARED_BY') {
       setPrepared(DEFAULT_PREPARED_BY);
       savePreparedBy(DEFAULT_PREPARED_BY);
+    } else if (activeTab === 'CHECKED_BY') {
+      setChecked(DEFAULT_CHECKED_BY);
+      saveCheckedBy(DEFAULT_CHECKED_BY);
     } else {
       setAuthorized(DEFAULT_AUTHORIZED_BY);
       saveAuthorizedBy(DEFAULT_AUTHORIZED_BY);
@@ -158,7 +207,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/70 backdrop-blur-xs animate-fadeIn">
-      <div className="bg-white dark:bg-slate-900 rounded-none sm:rounded-2xl border-0 sm:border border-slate-200 dark:border-slate-800 shadow-2xl max-w-lg w-full p-6 space-y-5 relative overflow-hidden h-full sm:h-auto">
+      <div className="bg-white dark:bg-slate-900 rounded-none sm:rounded-2xl border-0 sm:border border-slate-200 dark:border-slate-800 shadow-2xl max-w-xl w-full p-6 space-y-5 relative overflow-hidden h-full sm:h-auto">
         {/* Header */}
         <div className="flex items-start justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
           <div className="flex items-center space-x-3">
@@ -170,7 +219,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                 Signature Authority & Sign-Off
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Configure Prepared By & Authorized By for Parade & PT State documents
+                Configure Prepared By, Checked By & Authorized By for Parade & PT State documents
               </p>
             </div>
           </div>
@@ -182,30 +231,42 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
           </button>
         </div>
 
-        {/* 2-Option Selector Tabs */}
-        <div className="grid grid-cols-2 gap-2 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200 dark:border-slate-700/80">
+        {/* 3-Option Selector Tabs */}
+        <div className="grid grid-cols-3 gap-1.5 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200 dark:border-slate-700/80">
           <button
             type="button"
             onClick={() => setActiveTab('PREPARED_BY')}
-            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-2 ${
+            className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
               activeTab === 'PREPARED_BY'
                 ? 'bg-white dark:bg-emerald-600 text-emerald-950 dark:text-white shadow-xs'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
             }`}
           >
-            <PenTool className="w-3.5 h-3.5" />
+            <PenTool className="w-3.5 h-3.5 shrink-0" />
             <span>Prepared By (Left)</span>
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('CHECKED_BY')}
+            className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
+              activeTab === 'CHECKED_BY'
+                ? 'bg-white dark:bg-emerald-600 text-emerald-950 dark:text-white shadow-xs'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+            }`}
+          >
+            <Shield className="w-3.5 h-3.5 shrink-0" />
+            <span>Checked By (Middle)</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('AUTHORIZED_BY')}
-            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-2 ${
+            className={`py-2 px-2 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
               activeTab === 'AUTHORIZED_BY'
                 ? 'bg-white dark:bg-emerald-600 text-emerald-950 dark:text-white shadow-xs'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
             }`}
           >
-            <FileCheck className="w-3.5 h-3.5" />
+            <FileCheck className="w-3.5 h-3.5 shrink-0" />
             <span>Authorized By (Right)</span>
           </button>
         </div>
@@ -296,8 +357,94 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
               )}
             </div>
           </div>
+        ) : activeTab === 'CHECKED_BY' ? (
+          /* Tab 2: Checked By (Middle) Form */
+          <div className="space-y-4 pt-1">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                NAME <span className="text-[10px] text-emerald-600 font-semibold">(Block Capital)</span>
+              </label>
+              <input
+                type="text"
+                value={checked.name}
+                onChange={(e) => setChecked({ ...checked, name: e.target.value.toUpperCase() })}
+                placeholder="e.g. MD SHAHINUZZAMAN"
+                className="w-full px-3.5 py-2 text-xs uppercase font-mono font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Rank <span className="text-[10px] text-slate-400">(Block / Running)</span>
+                </label>
+                <input
+                  type="text"
+                  value={checked.rank}
+                  onChange={(e) => setChecked({ ...checked, rank: e.target.value })}
+                  placeholder="e.g. WO or SWO"
+                  className="w-full px-3.5 py-2 text-xs font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Designation <span className="text-[10px] text-slate-400">(Normal)</span>
+                </label>
+                <input
+                  type="text"
+                  value={checked.designation}
+                  onChange={(e) => setChecked({ ...checked, designation: e.target.value })}
+                  placeholder="e.g. Checked By or WOIC"
+                  className="w-full px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                Unit <span className="text-[10px] text-slate-400">(Default: {getActiveOfficeIdentity().officeName})</span>
+              </label>
+              <input
+                type="text"
+                value={checked.unit}
+                onChange={(e) => setChecked({ ...checked, unit: e.target.value })}
+                placeholder={getActiveOfficeIdentity().officeName}
+                className="w-full px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            {/* Sign Digitally Option */}
+            <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl space-y-2">
+              <label className="flex items-center space-x-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!checked.signDigitally}
+                  onChange={(e) => setChecked({ ...checked, signDigitally: e.target.checked })}
+                  className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                />
+                <span className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
+                  Sign Digitally (Checked By)
+                </span>
+              </label>
+              {checked.signDigitally && (
+                <div className="pl-6 space-y-1 text-xs text-emerald-800 dark:text-emerald-300">
+                  <p className="text-[11px] font-medium">
+                    Digital signature will be stamped above the name in official documents.
+                  </p>
+                  <input
+                    type="text"
+                    value={checked.digitalSignatureText || ''}
+                    onChange={(e) => setChecked({ ...checked, digitalSignatureText: e.target.value })}
+                    placeholder={`Custom Signature Text (Defaults to "${checked.name || 'MD SHAHINUZZAMAN'}")`}
+                    className="w-full px-3 py-1.5 text-xs rounded-lg border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-600"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
         ) : (
-          /* Tab 2: Authorized By Form */
+          /* Tab 3: Authorized By Form */
           <div className="space-y-4 pt-1">
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
@@ -307,7 +454,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                 type="text"
                 value={authorized.name}
                 onChange={(e) => setAuthorized({ ...authorized, name: e.target.value.toUpperCase() })}
-                placeholder="e.g. MD SHAHINUZZAMAN"
+                placeholder="e.g. MAHIM RAAD SADAT"
                 className="w-full px-3.5 py-2 text-xs uppercase font-mono font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
               />
             </div>
@@ -321,7 +468,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                   type="text"
                   value={authorized.rank}
                   onChange={(e) => setAuthorized({ ...authorized, rank: e.target.value })}
-                  placeholder="e.g. WO or MWO"
+                  placeholder="e.g. FLT LT or SQN LDR"
                   className="w-full px-3.5 py-2 text-xs font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
                 />
               </div>
@@ -334,7 +481,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                   type="text"
                   value={authorized.designation}
                   onChange={(e) => setAuthorized({ ...authorized, designation: e.target.value })}
-                  placeholder="e.g. WOIC Orderly Room or OC"
+                  placeholder="e.g. Adjutant or OC"
                   className="w-full px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-500"
                 />
               </div>
@@ -375,7 +522,7 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
                     type="text"
                     value={authorized.digitalSignatureText || ''}
                     onChange={(e) => setAuthorized({ ...authorized, digitalSignatureText: e.target.value })}
-                    placeholder={`Custom Signature Text (Defaults to "${authorized.name || 'MD SHAHINUZZAMAN'}")`}
+                    placeholder={`Custom Signature Text (Defaults to "${authorized.name || 'MAHIM RAAD SADAT'}")`}
                     className="w-full px-3 py-1.5 text-xs rounded-lg border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none focus:border-emerald-600"
                   />
                 </div>
@@ -387,50 +534,74 @@ export const SignatureConfigModal: React.FC<SignatureConfigModalProps> = ({
         {/* Live Alignment Preview Box with Extra Spacing */}
         <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 text-center">
           <div className="text-[10px] uppercase font-bold text-slate-400 mb-2">Live Document Signature Layout</div>
-          <div className="flex justify-between items-end text-slate-900 dark:text-slate-100 text-[11px] font-sans px-2">
-            {/* Left Preview */}
-            <div className="text-center min-w-[150px]">
+          <div className="flex justify-between items-end text-slate-900 dark:text-slate-100 text-[11px] font-sans px-2 gap-2">
+            {/* Left Preview (Prepared By) */}
+            <div className="text-left min-w-[130px]">
               {prepared.signDigitally ? (
-                <div className="h-10 flex flex-col items-center justify-end pb-1 font-serif italic text-sm text-emerald-800 dark:text-emerald-300 select-none">
+                <div className="h-10 flex flex-col items-start justify-end pb-1 font-serif italic text-xs text-emerald-800 dark:text-emerald-300 select-none">
                   <span>{prepared.digitalSignatureText || prepared.name}</span>
-                  <span className="text-[9px] font-mono not-italic text-emerald-600 dark:text-emerald-400">
+                  <span className="text-[8px] font-mono not-italic text-emerald-600 dark:text-emerald-400">
                     [Digitally Signed]
                   </span>
                 </div>
               ) : (
-                <div className="h-10 flex items-end justify-center pb-1 text-[10px] text-slate-400 italic">
-                  (Signature Space)
+                <div className="h-10 flex items-end justify-start pb-1 text-[9px] text-slate-400 italic">
+                  (Prepared By)
                 </div>
               )}
               <div className="border-t border-slate-400 dark:border-slate-600 pt-1 leading-tight space-y-[2px]">
-                <div className="text-xs font-black uppercase text-slate-900 dark:text-white">
+                <div className="text-[11px] font-black uppercase text-slate-900 dark:text-white">
                   {prepared.name || 'NAME'}
                 </div>
-                <div className="text-[11px] font-bold">{prepared.rank || 'RANK'}</div>
+                <div className="text-[10px] font-bold">{prepared.rank || 'RANK'}</div>
                 <div className="text-[10px] font-normal">{prepared.designation || 'Designation'}</div>
                 <div className="text-[9px] text-slate-500">{prepared.unit || getActiveOfficeIdentity().officeName}</div>
               </div>
             </div>
 
-            {/* Right Preview */}
-            <div className="text-center min-w-[150px]">
-              {authorized.signDigitally ? (
-                <div className="h-10 flex flex-col items-center justify-end pb-1 font-serif italic text-sm text-emerald-800 dark:text-emerald-300 select-none">
-                  <span>{authorized.digitalSignatureText || authorized.name}</span>
-                  <span className="text-[9px] font-mono not-italic text-emerald-600 dark:text-emerald-400">
+            {/* Middle Preview (Checked By) */}
+            <div className="text-left min-w-[130px]">
+              {checked.signDigitally ? (
+                <div className="h-10 flex flex-col items-start justify-end pb-1 font-serif italic text-xs text-emerald-800 dark:text-emerald-300 select-none">
+                  <span>{checked.digitalSignatureText || checked.name}</span>
+                  <span className="text-[8px] font-mono not-italic text-emerald-600 dark:text-emerald-400">
                     [Digitally Signed]
                   </span>
                 </div>
               ) : (
-                <div className="h-10 flex items-end justify-center pb-1 text-[10px] text-slate-400 italic">
-                  (Signature Space)
+                <div className="h-10 flex items-end justify-start pb-1 text-[9px] text-slate-400 italic">
+                  (Checked By)
                 </div>
               )}
               <div className="border-t border-slate-400 dark:border-slate-600 pt-1 leading-tight space-y-[2px]">
-                <div className="text-xs font-black uppercase text-slate-900 dark:text-white">
+                <div className="text-[11px] font-black uppercase text-slate-900 dark:text-white">
+                  {checked.name || 'NAME'}
+                </div>
+                <div className="text-[10px] font-bold">{checked.rank || 'RANK'}</div>
+                <div className="text-[10px] font-normal">{checked.designation || 'Checked By'}</div>
+                <div className="text-[9px] text-slate-500">{checked.unit || getActiveOfficeIdentity().officeName}</div>
+              </div>
+            </div>
+
+            {/* Right Preview (Authorized By) */}
+            <div className="text-left min-w-[130px]">
+              {authorized.signDigitally ? (
+                <div className="h-10 flex flex-col items-start justify-end pb-1 font-serif italic text-xs text-emerald-800 dark:text-emerald-300 select-none">
+                  <span>{authorized.digitalSignatureText || authorized.name}</span>
+                  <span className="text-[8px] font-mono not-italic text-emerald-600 dark:text-emerald-400">
+                    [Digitally Signed]
+                  </span>
+                </div>
+              ) : (
+                <div className="h-10 flex items-end justify-start pb-1 text-[9px] text-slate-400 italic">
+                  (Authorized By)
+                </div>
+              )}
+              <div className="border-t border-slate-400 dark:border-slate-600 pt-1 leading-tight space-y-[2px]">
+                <div className="text-[11px] font-black uppercase text-slate-900 dark:text-white">
                   {authorized.name || 'NAME'}
                 </div>
-                <div className="text-[11px] font-bold">{authorized.rank || 'RANK'}</div>
+                <div className="text-[10px] font-bold">{authorized.rank || 'RANK'}</div>
                 <div className="text-[10px] font-normal">{authorized.designation || 'Designation'}</div>
                 <div className="text-[9px] text-slate-500">{authorized.unit || getActiveOfficeIdentity().officeName}</div>
               </div>

@@ -148,9 +148,12 @@ export interface DutyRatioConfigPanelProps {
   activeTab?: 'DUTY_DISTRIBUTION' | 'MANPOWER' | 'DUTY_LIST';
   targetDate?: string;
   onOpenManpowerExport?: () => void;
+  disposalsProp?: Record<string, string>;
+  onDisposalsChange?: (newDisposals: Record<string, string>) => void;
+  onManpowerChange?: (mp: any) => void;
 }
 
-export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport }) => {
+export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport, disposalsProp, onDisposalsChange, onManpowerChange }) => {
   const [totalDuty, setTotalDuty] = useState(() => {
     const savedDuty = localStorage.getItem('baf_duty_distribution_total_duty');
     return savedDuty ? JSON.parse(savedDuty) : DEFAULT_TOTAL_DUTY;
@@ -214,18 +217,10 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     }
   };
 
-  useEffect(() => {
-    localStorage.setItem('baf_duty_distribution_total_duty', JSON.stringify(totalDuty));
-    localStorage.setItem('baf_duty_distribution_custom_flt', JSON.stringify(customFltDist));
-    window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated'));
-  }, [totalDuty, customFltDist]);
-
-
-  
   const [showNominalRoll, setShowNominalRoll] = useState(false);
   const [nominalRollFlightFilter, setNominalRollFlightFilter] = useState<FlightName | 'All'>('All');
   const [nominalRollRankFilter, setNominalRollRankFilter] = useState<string>('All');
-  const [disposals, setDisposals] = useState<Record<string, string>>(() => {
+  const [internalDisposals, setInternalDisposals] = useState<Record<string, string>>(() => {
     const master = localStorage.getItem('baf_duty_distribution_disposals_master');
     if (master) {
       try { return JSON.parse(master); } catch(e) {}
@@ -246,21 +241,36 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     return {};
   });
 
+  const disposals = disposalsProp !== undefined ? disposalsProp : internalDisposals;
+  const setDisposals = (val: Record<string, string>) => {
+    setInternalDisposals(val);
+    if (onDisposalsChange) onDisposalsChange(val);
+  };
+
   const saveAndSyncDisposals = (updatedDisposals: Record<string, string>) => {
     setDisposals(updatedDisposals);
-    const valStr = JSON.stringify(updatedDisposals);
-    
-    // Save to master key so it remains persistent and unchanged across dates
-    localStorage.setItem('baf_duty_distribution_disposals_master', valStr);
 
+    // If managed by parent (DutyRatioMatrixViewV2), keep in draft until user clicks Save
+    if (onDisposalsChange) {
+      if (matrix && onMatrixChange) {
+        const resetMatrix = matrix.map(t => {
+          if (!t.flightTargets) return t;
+          const copy = { ...t };
+          delete copy.flightTargets;
+          return copy;
+        });
+        onMatrixChange(resetMatrix);
+      }
+      return;
+    }
+
+    const valStr = JSON.stringify(updatedDisposals);
+    localStorage.setItem('baf_duty_distribution_disposals_master', valStr);
     const dateKey = targetDate || 'default';
     const storageKey = 'baf_duty_distribution_disposals_' + dateKey;
     localStorage.setItem(storageKey, valStr);
-    
     const pendingKey = 'baf_pending_disposals_sync_baf_duty_distribution_disposals_master';
     localStorage.setItem(pendingKey, String(Date.now()));
-
-    // Directly and reliably push to Supabase Cloud app_settings
     localDb.syncSettingToCloud('baf_duty_distribution_disposals_master', valStr).then(() => {
       setTimeout(() => {
         localStorage.removeItem(pendingKey);
@@ -268,7 +278,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     });
     localDb.syncSettingToCloud(storageKey, valStr);
 
-    // When Manpower disposals change, auto-reset manual flightTargets so the new Manpower calculation takes effect immediately
     if (matrix && onMatrixChange) {
       const resetMatrix = matrix.map(t => {
         if (!t.flightTargets) return t;
@@ -379,18 +388,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       setIsSyncingCloud(false);
     }
   };
-
-  // Auto-sync once on mount if in DUTY_LIST view
-  useEffect(() => {
-    if (activeTab === 'DUTY_LIST' || activeTab === 'TOTAL_DUTY') {
-      pullDutyListFromCloud().then(res => {
-        if (res.success && res.matrix && onMatrixChange) {
-          onMatrixChange(res.matrix);
-          setLastSyncTime(new Date().toLocaleTimeString());
-        }
-      });
-    }
-  }, [activeTab]);
 
   const [savedCustomList, setSavedCustomList] = useState<string[]>(() => getSavedCustomDisposals());
   const [openDropdownAirmanId, setOpenDropdownAirmanId] = useState<string | null>(null);
@@ -627,8 +624,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const totalSgtAndBelow = totalSgt + totalCpl;
 
   useEffect(() => {
-    localStorage.setItem('baf_duty_distribution_manpower', JSON.stringify(currentManpower));
-    window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated'));
+    if (onManpowerChange) {
+      onManpowerChange(currentManpower);
+    } else {
+      localStorage.setItem('baf_duty_distribution_manpower', JSON.stringify(currentManpower));
+      window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated'));
+    }
   }, [JSON.stringify(currentManpower)]);
 
   const [activeDistributionCell, setActiveDistributionCell] = useState<{ tableId: string; flight: string } | null>(null);
@@ -797,7 +798,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             const newMatrix = [...matrix];
                             newMatrix[idx] = { ...newMatrix[idx], isDisabled: !newMatrix[idx].isDisabled };
                             onMatrixChange(newMatrix);
-                            pushDutyListToCloud(newMatrix).catch(console.warn);
                           }
                         }}
                         className={`p-1.5 rounded-md transition-colors ${table.isDisabled ? 'text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700' : 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30'}`}
@@ -1010,7 +1010,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                                 updated[settingsTableIdx].totalRequiredDaily = val;
                                 updated[settingsTableIdx].totalRequiredMonth = val * 31;
                                 onMatrixChange(updated);
-                                pushDutyListToCloud(updated).catch(console.warn);
                               }
                             }}
                             className="px-3.5 py-2 bg-indigo-600 text-white text-xs sm:text-sm font-bold rounded-lg hover:bg-indigo-700 transition-colors shadow-sm whitespace-nowrap"
@@ -1051,7 +1050,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             updated[settingsTableIdx].totalRequiredMonth = currentReqs.reduce((a, b) => a + (Number(b) || 0), 0);
                             updated[settingsTableIdx].totalRequiredDaily = Math.max(...currentReqs);
                             onMatrixChange(updated);
-                            pushDutyListToCloud(updated).catch(console.warn);
                           };
 
                           const stateStyle =
@@ -1870,7 +1868,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     d.serNo = idx + 1;
                   });
                   onMatrixChange(newMatrix);
-                  pushDutyListToCloud(newMatrix).catch(console.warn);
                 }
                 setDeleteConfirmIdx(null);
               }} className="px-4 py-2 text-sm font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm">Delete</button>
@@ -2243,7 +2240,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     });
 
                     onMatrixChange(sorted);
-                    pushDutyListToCloud(sorted).catch(console.warn);
                   }
                   
                   setIsAddingNewDuty(false);
@@ -2631,7 +2627,6 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       });
 
                       onMatrixChange(sorted);
-                      pushDutyListToCloud(sorted).catch(console.warn);
                     }
                     setEditingDutyIdx(null);
                   }}

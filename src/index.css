@@ -375,3 +375,39 @@ input[type="date"]::-webkit-calendar-picker-indicator {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* Glowing / blinking border alerts for Duty Boxes when Assigned != Required */
+@keyframes dutyGlowYellow {
+  0%, 100% {
+    border-color: #eab308 !important;
+    box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.55), 0 0 10px 2px rgba(250, 204, 21, 0.55);
+  }
+  50% {
+    border-color: #fde047 !important;
+    box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.95), 0 0 18px 4px rgba(234, 179, 8, 0.9);
+  }
+}
+
+@keyframes dutyGlowRed {
+  0%, 100% {
+    border-color: #ef4444 !important;
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.6), 0 0 10px 2px rgba(244, 63, 94, 0.65);
+  }
+  50% {
+    border-color: #fca5a5 !important;
+    box-shadow: 0 0 0 2px rgba(248, 113, 113, 1), 0 0 20px 5px rgba(239, 68, 68, 0.95);
+  }
+}
+
+.duty-box-under-quota {
+  border-width: 2px !important;
+  border-color: #eab308 !important;
+  animation: dutyGlowYellow 1.25s ease-in-out infinite !important;
+}
+
+.duty-box-over-quota {
+  border-width: 2px !important;
+  border-color: #ef4444 !important;
+  animation: dutyGlowRed 1.05s ease-in-out infinite !important;
+}
+

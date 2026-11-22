@@ -637,6 +637,7 @@ export interface SingleParadeExportParams {
   absent?: Airman[];
   otherDisposals?: { title: string; airmen: Airman[] }[];
   leftSig?: { rank: string; name: string; desig: string };
+  middleSig?: { rank: string; name: string; desig: string };
   rightSig?: { rank: string; name: string; desig: string };
 }
 
@@ -1062,10 +1063,14 @@ export async function exportParadeStateSingleDocx(
     ],
   });
 
-  // 2nd Row: 1st Column (Left Officer Sgt Nahid), 2nd & 3rd empty, Last column (Right Officer WO Shahin)
+  // 2nd Row: 1st Column (Left Officer), Middle Column (Checked By), Last column (Right Officer)
   const leftSigName = params.leftSig?.name || 'MD NAHID HASAN KHAN';
   const leftSigRank = params.leftSig?.rank || 'Sgt';
   const leftSigDesig = params.leftSig?.desig || 'UWO';
+
+  const midSigName = params.middleSig?.name || 'MD SHAHINUZZAMAN';
+  const midSigRank = params.middleSig?.rank || 'WO';
+  const midSigDesig = params.middleSig?.desig || 'Checked By';
 
   const rightSigName = params.rightSig?.name || 'MAHIM RAAD SADAT';
   const rightSigRank = params.rightSig?.rank || 'FLT LT';
@@ -1126,14 +1131,57 @@ export async function exportParadeStateSingleDocx(
         ],
       }),
       new TableCell({
-        width: { size: 3360, type: WidthType.DXA },
+        columnSpan: 2,
+        width: { size: 6720, type: WidthType.DXA },
         borders: invisibleBorders,
-        children: [new Paragraph({ children: [] })],
-      }),
-      new TableCell({
-        width: { size: 3360, type: WidthType.DXA },
-        borders: invisibleBorders,
-        children: [new Paragraph({ children: [] })],
+        margins: { top: 120, bottom: 40, left: 1000, right: 40 },
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            spacing: { after: 15, line: 240 },
+            children: [
+              new TextRun({
+                text: midSigName.toUpperCase(),
+                font: 'Arial',
+                bold: true,
+                size: 24,
+              }),
+            ],
+          }),
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            spacing: { after: 15, line: 240 },
+            children: [
+              new TextRun({
+                text: midSigRank,
+                font: 'Arial',
+                bold: true,
+                size: 24,
+              }),
+            ],
+          }),
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            spacing: { after: 15, line: 240 },
+            children: [
+              new TextRun({
+                text: midSigDesig,
+                font: 'Arial',
+                size: 24,
+              }),
+            ],
+          }),
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            children: [
+              new TextRun({
+                text: activeOfficeName,
+                font: 'Arial',
+                size: 24,
+              }),
+            ],
+          }),
+        ],
       }),
       new TableCell({
         width: { size: 3360, type: WidthType.DXA },

@@ -586,6 +586,7 @@ async function runQueryRestFallback(
 
 function filterAndUnscopeOfficeDocs(docs: Array<{ docId?: string; data: any }>): any[] {
   const prefix = getOfficeFirestoreDocPrefix();
+  const altPrefix = prefix ? prefix.replace(/__$/, '_') : '';
   const isDefault = isDefault155UasuOffice();
   const out: any[] = [];
 
@@ -602,19 +603,32 @@ function filterAndUnscopeOfficeDocs(docs: Array<{ docId?: string; data: any }>):
       delete cleaned.__firestoreDocId;
       out.push(cleaned);
     } else {
-      const matchesDocId = rawDocId.startsWith(prefix);
-      const matchesDataId = String(d.id || '').startsWith(prefix);
-      const matchesSettingKey = String(d.settingKey || '').startsWith(prefix);
+      const matchesDocId =
+        rawDocId.startsWith(prefix) || (altPrefix && rawDocId.startsWith(altPrefix));
+      const dataIdStr = String(d.id || '');
+      const matchesDataId =
+        dataIdStr.startsWith(prefix) || (altPrefix && dataIdStr.startsWith(altPrefix));
+      const settingKeyStr = String(d.settingKey || '');
+      const matchesSettingKey =
+        settingKeyStr.startsWith(prefix) || (altPrefix && settingKeyStr.startsWith(altPrefix));
       if (!matchesDocId && !matchesDataId && !matchesSettingKey) {
         continue;
       }
       const cloned = { ...d };
       delete cloned.__firestoreDocId;
-      if (typeof cloned.id === 'string' && cloned.id.startsWith(prefix)) {
-        cloned.id = cloned.id.slice(prefix.length);
+      if (typeof cloned.id === 'string') {
+        if (cloned.id.startsWith(prefix)) {
+          cloned.id = cloned.id.slice(prefix.length);
+        } else if (altPrefix && cloned.id.startsWith(altPrefix)) {
+          cloned.id = cloned.id.slice(altPrefix.length);
+        }
       }
-      if (typeof cloned.settingKey === 'string' && cloned.settingKey.startsWith(prefix)) {
-        cloned.settingKey = cloned.settingKey.slice(prefix.length);
+      if (typeof cloned.settingKey === 'string') {
+        if (cloned.settingKey.startsWith(prefix)) {
+          cloned.settingKey = cloned.settingKey.slice(prefix.length);
+        } else if (altPrefix && cloned.settingKey.startsWith(altPrefix)) {
+          cloned.settingKey = cloned.settingKey.slice(altPrefix.length);
+        }
       }
       out.push(cloned);
     }
@@ -629,7 +643,9 @@ function scopeWriteOpsForActiveOffice(
   if (!prefix) return ops;
 
   return ops.map((op) => {
-    const scopedDocId = op.docId.startsWith(prefix) ? op.docId : sanitizeDocId(`${prefix}${op.docId}`);
+    const baseDocId = op.docId.startsWith(prefix) ? op.docId.slice(prefix.length) : op.docId;
+    const cleanBaseId = sanitizeDocId(baseDocId);
+    const scopedDocId = `${prefix}${cleanBaseId}`.slice(0, 120);
     const scopedData: Record<string, any> = { ...op.data };
     if (typeof scopedData.id === 'string' && !scopedData.id.startsWith(prefix)) {
       scopedData.id = clampStr(`${prefix}${scopedData.id}`, 128) || scopedDocId;

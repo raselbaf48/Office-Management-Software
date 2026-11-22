@@ -32,7 +32,7 @@ import {
   ArrowLeft,
   Calendar,
   Eye,
-  CheckCircle2, Clock, History } from 'lucide-react';
+  CheckCircle2, Clock, History, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { exportDutyRatioDocx } from '../utils/docxExport';
 import { ImportDutyRatioModal } from './ImportDutyRatioModal';
 import { FlightDutyCalendarModal } from './FlightDutyCalendarModal';
@@ -46,13 +46,60 @@ import { localDb } from '../services/localDatabase';
 interface DutyRatioMatrixViewProps {
   role?: UserRole;
   onRequestAdminAccess?: () => void;
+  onConfirmNavigate?: (targetTab: string) => void;
 }
+
+const loadStoredDisposals = (targetDate?: string): Record<string, string> => {
+  try {
+    const master = localStorage.getItem('baf_duty_distribution_disposals_master');
+    if (master) return JSON.parse(master);
+    const current = localStorage.getItem('baf_duty_distribution_disposals_' + (targetDate || 'default'));
+    if (current) return JSON.parse(current);
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('baf_duty_distribution_disposals_')) {
+        const val = localStorage.getItem(k);
+        if (val && val !== '{}') return JSON.parse(val);
+      }
+    }
+  } catch {}
+  return {};
+};
+
+const DAY_NAMES_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTH_NAMES_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   role = 'ADMIN',
   onRequestAdminAccess,
+  onConfirmNavigate,
 }) => {
-  const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => getStoredDutyMatrix());
+  const [targetDate, setTargetDate] = useState(() => {
+    const saved = localStorage.getItem('baf_duty_distribution_target_date');
+    if (saved) return saved;
+    const now = new Date();
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+  });
+
+  const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => {
+    const ver = getDutyRatioVersionForDate(targetDate);
+    if (ver && ver.matrix && ver.matrix.length > 0) return ver.matrix;
+    return getStoredDutyMatrix(targetDate);
+  });
+  const [savedMatrixJson, setSavedMatrixJson] = useState<string>(() => JSON.stringify(matrix));
+
+  const [draftDisposals, setDraftDisposals] = useState<Record<string, string>>(() => loadStoredDisposals(targetDate));
+  const [savedDisposalsJson, setSavedDisposalsJson] = useState<string>(() => JSON.stringify(loadStoredDisposals(targetDate)));
+
+  const [draftManpower, setDraftManpower] = useState<any>(() => {
+    try {
+      const saved = localStorage.getItem('baf_duty_distribution_manpower');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return DEFAULT_MANPOWER;
+  });
+
   const [isSaved, setIsSaved] = useState<boolean>(false);
   const [filterQuery, setFilterQuery] = useState<string>('');
   const [selectedFlightFilter, setSelectedFlightFilter] = useState<FlightName | 'Overall'>('Overall');
@@ -64,6 +111,35 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   const [resetConfirmTableIdx, setResetConfirmTableIdx] = useState<number | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [flightViewMode, setFlightViewMode] = useState<'SCHEDULE' | 'DUTY_CARDS'>('SCHEDULE');
+
+  // Monthly (31 Days) vs Weekly (7 Days) mode
+  const [ratioPeriodMode, setRatioPeriodMode] = useState<'MONTHLY' | 'WEEKLY'>(() => {
+    try {
+      const saved = sessionStorage.getItem('baf_duty_ratio_period_mode');
+      if (saved === 'WEEKLY' || saved === 'MONTHLY') return saved;
+    } catch {}
+    return 'MONTHLY';
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('baf_duty_ratio_period_mode', ratioPeriodMode);
+    } catch {}
+  }, [ratioPeriodMode]);
+
+  const [weeklyStartDate, setWeeklyStartDate] = useState<string>(targetDate);
+  useEffect(() => {
+    setWeeklyStartDate(targetDate);
+  }, [targetDate]);
+
+  const shiftWeeklyStartDate = (deltaDays: number) => {
+    const [y, m, d] = (weeklyStartDate || targetDate).split('-').map(Number);
+    const dt = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1));
+    dt.setUTCDate(dt.getUTCDate() + deltaDays);
+    const nextStr = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+    setWeeklyStartDate(nextStr);
+  };
+
   const [viewMode, setViewMode] = useState<'DUTY_DISTRIBUTION' | 'DUTY_RATIO' | 'MANPOWER' | 'DUTY_LIST'>(() => {
     try {
       const saved = sessionStorage.getItem('baf_duty_matrix_view_mode');
@@ -80,53 +156,82 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     } catch {}
   }, [viewMode]);
 
-  const [targetDate, setTargetDate] = useState(() => {
-    const saved = localStorage.getItem('baf_duty_distribution_target_date');
-    if (saved) return saved;
-    const now = new Date();
-    // Use local date properly
-    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-  });
-
   useEffect(() => {
     localStorage.setItem('baf_duty_distribution_target_date', targetDate);
   }, [targetDate]);
 
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
 
+  // Unsaved changes tracking & navigation guard popup state
+  const hasUnsavedChanges = useMemo(() => {
+    return JSON.stringify(matrix) !== savedMatrixJson || JSON.stringify(draftDisposals) !== savedDisposalsJson;
+  }, [matrix, savedMatrixJson, draftDisposals, savedDisposalsJson]);
+
+  const [unsavedPromptAction, setUnsavedPromptAction] = useState<
+    | { type: 'NAVIGATE_TAB'; targetTab: string }
+    | { type: 'CHANGE_DATE'; nextDate: string }
+    | null
+  >(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__bafDutyRatioHasUnsavedChanges = hasUnsavedChanges;
+    }
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [hasUnsavedChanges]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__bafDutyRatioHasUnsavedChanges = false;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleLeaveRequest = (e: any) => {
+      const targetTab = e?.detail?.targetTab;
+      if (targetTab) {
+        setUnsavedPromptAction({ type: 'NAVIGATE_TAB', targetTab });
+      }
+    };
+    window.addEventListener('baf_duty_ratio_request_leave', handleLeaveRequest);
+    return () => window.removeEventListener('baf_duty_ratio_request_leave', handleLeaveRequest);
+  }, []);
+
+  const loadMatrixForDate = (dateStr: string) => {
+    const ver = getDutyRatioVersionForDate(dateStr);
+    const loadedMatrix = (ver && ver.matrix && ver.matrix.length > 0) ? ver.matrix : getStoredDutyMatrix(dateStr);
+    setMatrix(loadedMatrix);
+    setSavedMatrixJson(JSON.stringify(loadedMatrix));
+    const loadedDisp = loadStoredDisposals(dateStr);
+    setDraftDisposals(loadedDisp);
+    setSavedDisposalsJson(JSON.stringify(loadedDisp));
+  };
+
+  const handleRequestDateChange = (nextDate: string) => {
+    if (nextDate === targetDate) return;
+    if (hasUnsavedChanges) {
+      setUnsavedPromptAction({ type: 'CHANGE_DATE', nextDate });
+      return;
+    }
+    setTargetDate(nextDate);
+    loadMatrixForDate(nextDate);
+  };
+
   const activeVersion = useMemo(() => {
     return getDutyRatioVersionForDate(targetDate);
-  }, [targetDate, matrix]);
+  }, [targetDate, savedMatrixJson]);
 
-  useEffect(() => {
-    const ver = getDutyRatioVersionForDate(targetDate);
-    if (ver && ver.matrix && ver.matrix.length > 0) {
-      setMatrix(ver.matrix);
-    }
-  }, [targetDate]);
-
-  useEffect(() => {
-    const handleUpdate = (e: any) => {
-      if (e?.detail?.matrix && Array.isArray(e.detail.matrix)) {
-        setMatrix(e.detail.matrix);
-        return;
-      }
-      const ver = getDutyRatioVersionForDate(targetDate);
-      if (ver && ver.matrix && ver.matrix.length > 0) {
-        setMatrix(ver.matrix);
-      } else {
-        setMatrix(getStoredDutyMatrix(targetDate));
-      }
-    };
-    window.addEventListener('baf_custom_duties_updated', handleUpdate);
-    window.addEventListener('baf_duty_ratio_updated', handleUpdate);
-    window.addEventListener('baf_duty_ratio_history_updated', handleUpdate);
-    return () => {
-      window.removeEventListener('baf_custom_duties_updated', handleUpdate);
-      window.removeEventListener('baf_duty_ratio_updated', handleUpdate);
-      window.removeEventListener('baf_duty_ratio_history_updated', handleUpdate);
-    };
-  }, [targetDate]);
   const [settingsTab, setSettingsTab] = useState<'Overall' | 'Mechanics' | 'Avionics' | 'GCS' | null>(null);
   const [editingCalendar, setEditingCalendar] = useState<{tableIdx: number, flight: FlightName} | null>(null);
   const [autoAllocateToast, setAutoAllocateToast] = useState<boolean>(false);
@@ -137,20 +242,14 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   });
 
   const handleTriggerAutoAllocate = (allocMode: AllocationMode = 'SINGLE') => {
-    const savedManpower = localStorage.getItem('baf_duty_distribution_manpower');
-    let activeManpower = DEFAULT_MANPOWER;
-    if (savedManpower) {
-      try {
-        activeManpower = JSON.parse(savedManpower);
-      } catch (e) {}
-    }
+    const activeManpower = draftManpower || DEFAULT_MANPOWER;
     const allocatedMatrix = autoAllocateDutyMatrix(matrix, activeManpower, allocMode);
     handleRatioCalculated(allocatedMatrix);
     setAllocatedModeInfo({
       mode: allocMode === 'PACKAGE' ? 'Package (2-3 Days Consecutive)' : 'Single (Gap System)',
       desc: allocMode === 'PACKAGE'
-        ? 'Duties grouped into 2 to 3 consecutive days per block.'
-        : 'Duties spread out with optimal rest gaps between days.',
+        ? 'Duties grouped into 2 to 3 consecutive days per block. Click Save to apply.'
+        : 'Duties spread out with optimal rest gaps between days. Click Save to apply.',
     });
     setIsAutoAllocateModalOpen(false);
     setAutoAllocateToast(true);
@@ -158,6 +257,44 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const daysArray = Array.from({ length: 31 }, (_, i) => i + 1);
+
+  const activeColumns = useMemo(() => {
+    if (ratioPeriodMode === 'MONTHLY') {
+      return Array.from({ length: 31 }, (_, i) => ({
+        key: `m_${i + 1}`,
+        dayNum: i + 1,
+        dayIdx: i,
+        dateStr: '',
+        dateLabel: String(i + 1),
+        fullDateLabel: `Day ${i + 1}`,
+        dayName: '',
+        dayShort: '',
+      }));
+    }
+    const [y, m, d] = (weeklyStartDate || targetDate).split('-').map(Number);
+    const baseDate = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1));
+    return Array.from({ length: 7 }, (_, offset) => {
+      const dt = new Date(baseDate.getTime());
+      dt.setUTCDate(dt.getUTCDate() + offset);
+      const dayOfMonth = dt.getUTCDate();
+      const monthIdx = dt.getUTCMonth();
+      const yearShort = String(dt.getUTCFullYear()).slice(-2);
+      const dow = dt.getUTCDay();
+      const ddStr = String(dayOfMonth).padStart(2, '0');
+      const monStr = MONTH_NAMES_SHORT[monthIdx] || '';
+      const isoStr = `${dt.getUTCFullYear()}-${String(monthIdx + 1).padStart(2, '0')}-${ddStr}`;
+      return {
+        key: `w_${isoStr}`,
+        dayNum: dayOfMonth,
+        dayIdx: Math.max(0, Math.min(30, dayOfMonth - 1)),
+        dateStr: isoStr,
+        dateLabel: `${ddStr} ${monStr}`,
+        fullDateLabel: `${ddStr} ${monStr} ${yearShort}`,
+        dayName: DAY_NAMES_FULL[dow],
+        dayShort: DAY_NAMES_SHORT[dow],
+      };
+    });
+  }, [ratioPeriodMode, weeklyStartDate, targetDate]);
   const [officeAirmen, setOfficeAirmen] = useState(() => localDb.getAirmen());
   useEffect(() => {
     const refresh = () => setOfficeAirmen(localDb.getAirmen());
@@ -261,9 +398,6 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     tableObj.data = flightData;
     updated[tableIndex] = tableObj;
     setMatrix(updated);
-    saveDutyMatrix(updated);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2000);
   };
 
   const handleToggleFlightDutyCell = (
@@ -280,7 +414,6 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     if (forceVal !== undefined) {
       nextVal = forceVal;
     } else {
-      // 1 click on 0 -> 1, click on 1 -> 0
       nextVal = currentVal > 0 ? 0 : 1;
     }
 
@@ -297,10 +430,6 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     });
 
     setMatrix(updated);
-    saveDutyMatrix(updated);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2000);
-    pushDutyListToCloud(updated).catch(err => console.warn('[DutyRatioMatrixViewV2] Realtime sync error:', err));
   };
 
   const handleResetTable = (tableIndex: number) => {
@@ -318,32 +447,72 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     tableObj.data = flightData;
     updated[resetConfirmTableIdx] = tableObj;
     setMatrix(updated);
-    saveDutyMatrix(updated);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2000);
     setResetConfirmTableIdx(null);
   };
 
   const handleSave = () => {
+    // 1. Persist disposals & manpower if edited
+    const valStr = JSON.stringify(draftDisposals);
+    localStorage.setItem('baf_duty_distribution_disposals_master', valStr);
+    const dateKey = targetDate || 'default';
+    const storageKey = 'baf_duty_distribution_disposals_' + dateKey;
+    localStorage.setItem(storageKey, valStr);
+    const pendingKey = 'baf_pending_disposals_sync_baf_duty_distribution_disposals_master';
+    localStorage.setItem(pendingKey, String(Date.now()));
+    localDb.syncSettingToCloud('baf_duty_distribution_disposals_master', valStr).then(() => {
+      setTimeout(() => {
+        localStorage.removeItem(pendingKey);
+      }, 5000);
+    });
+    localDb.syncSettingToCloud(storageKey, valStr);
+
+    if (draftManpower) {
+      localStorage.setItem('baf_duty_distribution_manpower', JSON.stringify(draftManpower));
+    }
+
+    // 2. Persist matrix & version history
     saveDutyMatrix(matrix);
+    const formatted = formatShortDate(targetDate);
+    const title = `All Duty Ratio (${formatted})`;
+    saveDutyRatioVersion({
+      applyFromDate: targetDate,
+      title,
+      matrix,
+      notes: `Saved for Apply From: ${targetDate}`,
+    });
+
+    // 3. Push to cloud
+    pushDutyListToCloud(matrix).catch(err => console.warn('[DutyRatioMatrixViewV2] Cloud sync error:', err));
+
+    // 4. Mark clean
+    setSavedMatrixJson(JSON.stringify(matrix));
+    setSavedDisposalsJson(valStr);
+    if (typeof window !== 'undefined') {
+      (window as any).__bafDutyRatioHasUnsavedChanges = false;
+    }
     setIsSaved(true);
     setTimeout(() => setIsSaved(false), 2500);
+  };
+
+  const handleDiscardChanges = () => {
+    try {
+      setMatrix(JSON.parse(savedMatrixJson));
+      setDraftDisposals(JSON.parse(savedDisposalsJson));
+      if (typeof window !== 'undefined') {
+        (window as any).__bafDutyRatioHasUnsavedChanges = false;
+      }
+    } catch {}
   };
 
   const handleReset = () => {
     if (window.confirm(`Reset all duty ratios to the official ${getActiveOfficeIdentity().officeName} default template?`)) {
       const def = resetDutyMatrixToDefault();
       setMatrix(def);
-      setIsSaved(true);
-      setTimeout(() => setIsSaved(false), 2500);
     }
   };
 
   const handleImportRatioComplete = (newMatrix: DutyRatioTable[]) => {
     setMatrix(newMatrix);
-    saveDutyMatrix(newMatrix);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2500);
   };
 
   // Grand totals calculation
@@ -352,15 +521,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     return sum + (table.flightTargets?.[selectedFlightFilter as 'Mechanics' | 'Avionics' | 'GCS' | 'Admin'] || 0);
   }, 0);
 
-  
   // Calculate Auto Targets with Cross-Duty Workload Balancing
-  const savedManpower = localStorage.getItem('baf_duty_distribution_manpower');
-  let currentManpower = DEFAULT_MANPOWER;
-  if (savedManpower) {
-    try {
-      currentManpower = JSON.parse(savedManpower);
-    } catch (e) {}
-  }
+  const currentManpower = draftManpower || DEFAULT_MANPOWER;
   const autoTargets = calculateBalancedAutoTargets(matrix, currentManpower, false);
 
   const getFlightTarget = (table: DutyRatioTable, fl: FlightName): number => {
@@ -400,10 +562,6 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
   const handleRatioCalculated = (newMatrix: DutyRatioTable[]) => {
     setMatrix(newMatrix);
-    saveDutyMatrix(newMatrix);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2500);
-    pushDutyListToCloud(newMatrix).catch(err => console.warn('[DutyRatioMatrixViewV2] Realtime sync error:', err));
   };
 
   return (
@@ -495,35 +653,110 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
       <div className="flex flex-col items-center justify-center mx-auto">
         <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center justify-center gap-1.5">
           <span>Apply From:</span>
+          {hasUnsavedChanges && (
+            <span className="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700 text-[9px] font-black uppercase animate-pulse">
+              Unsaved Changes
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-center gap-2">
           <DateNavigator
             value={targetDate}
-            onChange={(e) => setTargetDate(e.target.value)}
+            onChange={(e) => handleRequestDateChange(e.target.value)}
             format="dd_mm_yy"
             className="px-3.5 py-1.5 font-bold text-indigo-700 dark:text-indigo-400 text-xs sm:text-sm bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-center shadow-xs hover:border-indigo-500 transition-colors flex items-center justify-center gap-2 min-w-[125px]"
           />
           <button
             type="button"
-            onClick={() => {
-              const formatted = formatShortDate(targetDate);
-              const title = `All Duty Ratio (${formatted})`;
-              saveDutyRatioVersion({
-                applyFromDate: targetDate,
-                title,
-                matrix,
-                notes: `Saved for Apply From: ${targetDate}`,
-              });
-              setIsSaved(true);
-              setTimeout(() => setIsSaved(false), 2500);
-            }}
-            className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer transition-all"
-            title="Save current duty ratio to Ratio History"
+            onClick={handleSave}
+            className={`px-4 py-1.5 active:scale-95 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer transition-all ${
+              hasUnsavedChanges
+                ? 'bg-amber-600 hover:bg-amber-700 ring-2 ring-amber-400/60 shadow-md'
+                : 'bg-emerald-600 hover:bg-emerald-700'
+            }`}
+            title="Save and apply current duty ratio changes"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>Save</span>
+            <span>{hasUnsavedChanges ? 'Save & Apply' : 'Save'}</span>
+          </button>
+          {hasUnsavedChanges && (
+            <button
+              type="button"
+              onClick={handleDiscardChanges}
+              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-rose-950/50 text-slate-700 dark:text-slate-300 hover:text-rose-700 dark:hover:text-rose-300 border border-slate-300 dark:border-slate-700 text-xs font-bold rounded-lg transition-colors cursor-pointer"
+              title="Discard unsaved changes"
+            >
+              Discard
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* MONTHLY (31 DAYS) vs WEEKLY (7 DAYS) TOP OPTION */}
+      <div className="flex flex-col items-center justify-center gap-2 w-full">
+        <div className="inline-flex items-center p-1 rounded-xl bg-slate-200/80 dark:bg-slate-800 border border-slate-300/70 dark:border-slate-700 shadow-xs">
+          <button
+            type="button"
+            onClick={() => setRatioPeriodMode('MONTHLY')}
+            className={`px-4 py-1.5 rounded-lg text-xs sm:text-sm font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+              ratioPeriodMode === 'MONTHLY'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+            }`}
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            <span>Monthly (31 Days)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setRatioPeriodMode('WEEKLY')}
+            className={`px-4 py-1.5 rounded-lg text-xs sm:text-sm font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+              ratioPeriodMode === 'WEEKLY'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>Weekly (7 Days)</span>
           </button>
         </div>
+
+        {ratioPeriodMode === 'WEEKLY' && activeColumns.length === 7 && (
+          <div className="flex flex-wrap items-center justify-center gap-2 bg-indigo-50/90 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/70 px-3 py-1.5 rounded-xl shadow-2xs">
+            <button
+              type="button"
+              onClick={() => shiftWeeklyStartDate(-7)}
+              className="p-1 rounded-lg bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-700 transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold px-2"
+              title="Previous 7 Days"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              <span>Prev 7 Days</span>
+            </button>
+            <div className="px-2.5 py-0.5 text-xs sm:text-sm font-black text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
+              <span>{activeColumns[0].fullDateLabel} ({activeColumns[0].dayShort})</span>
+              <span className="text-indigo-400">—</span>
+              <span>{activeColumns[6].fullDateLabel} ({activeColumns[6].dayShort})</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => shiftWeeklyStartDate(7)}
+              className="p-1 rounded-lg bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-700 transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold px-2"
+              title="Next 7 Days"
+            >
+              <span>Next 7 Days</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            {weeklyStartDate !== targetDate && (
+              <button
+                type="button"
+                onClick={() => setWeeklyStartDate(targetDate)}
+                className="px-2 py-1 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 hover:underline cursor-pointer"
+              >
+                Reset to Apply Date
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* TAB NAVIGATION */}
@@ -555,6 +788,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             matrix={matrix}
             onMatrixChange={handleRatioCalculated}
             targetDate={targetDate}
+            disposalsProp={draftDisposals}
+            onDisposalsChange={setDraftDisposals}
+            onManpowerChange={setDraftManpower}
           />
         )}
 
@@ -692,6 +928,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
         {/* Existing Mapping for Overall Rendering */}
         {viewMode === 'DUTY_RATIO' && selectedFlightFilter === 'Overall' && matrix.filter(t => !t.isDisabled).map((table, tableIdx) => {
           const tableTotal = flights.reduce((sum, fl) => sum + (table.data?.[fl] || []).reduce((a,b) => a+b, 0), 0);
+          const tableVisibleTotal = flights.reduce(
+            (sum, fl) => sum + activeColumns.reduce((acc, col) => acc + (table.data?.[fl]?.[col.dayIdx] || 0), 0),
+            0
+          );
           // Keep specific styling for first tables
           let colors = {
             header: 'bg-slate-800 text-white',
@@ -713,7 +953,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                   </span>
                 </div>
 
-                <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-2 sm:space-x-3">
+                  {ratioPeriodMode === 'WEEKLY' && (
+                    <span className="text-xs font-bold bg-indigo-500/30 border border-white/20 px-2.5 py-1 rounded-lg">
+                      7-Day Total: <strong className="font-mono">{tableVisibleTotal}</strong>
+                    </span>
+                  )}
                   <span className="text-xs font-bold bg-white/20 px-2.5 py-1 rounded-lg">
                     Month Total: <strong className="font-mono">
                       {selectedFlightFilter === 'Overall' 
@@ -730,28 +975,56 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                   </button>
                 </div>
               </div>
-                {/* Table Body (Days 1 to 31) */}
+                {/* Table Body (Monthly 31 Days or Weekly 7 Days with Date + Day) */}
                 <div className="w-full overflow-x-auto">
-                  <table className="w-full text-xs text-center border-collapse table-auto md:table-fixed min-w-[940px]">
+                  <table className={`w-full text-xs text-center border-collapse table-auto md:table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[600px]' : 'min-w-[940px]'}`}>
                     <colgroup>
-                      <col className="w-20 sm:w-24 min-w-[80px]" />
-                      {daysArray.map((d) => (
-                        <col key={d} className="w-[26px] sm:w-[28px] min-w-[24px]" />
+                      <col className="w-24 sm:w-28 min-w-[90px]" />
+                      {activeColumns.map((col) => (
+                        <col
+                          key={col.key}
+                          className={ratioPeriodMode === 'WEEKLY' ? 'w-[76px] sm:w-[96px] min-w-[72px]' : 'w-[26px] sm:w-[28px] min-w-[24px]'}
+                        />
                       ))}
-                      <col className={showAllTableInfo ? "w-[84px] sm:w-[92px] min-w-[80px]" : "w-[54px] sm:w-[60px] min-w-[50px]"} />
+                      <col className={showAllTableInfo ? "w-[88px] sm:w-[96px] min-w-[84px]" : "w-[64px] sm:w-[72px] min-w-[58px]"} />
                     </colgroup>
                     <thead>
                       <tr className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
-                        <th className="p-1.5 sm:p-2 text-center sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-20 sm:w-24 min-w-[80px] border-r border-slate-200 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]">
-                          Date
+                        <th className="p-1.5 sm:p-2 text-center sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-24 sm:w-28 min-w-[90px] border-r border-slate-200 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]">
+                          {ratioPeriodMode === 'WEEKLY' ? 'Date & Day' : 'Date'}
                         </th>
-                        {daysArray.map((d) => (
-                          <th key={d} className={`p-0.5 sm:p-1 font-mono text-[11px] text-center align-middle ${d % 2 === 0 ? 'bg-slate-200/70 dark:bg-slate-700/70' : 'bg-slate-100/70 dark:bg-slate-800/70'}`}>
-                            {d}
+                        {activeColumns.map((col, colIdx) => (
+                          <th
+                            key={col.key}
+                            className={`p-0.5 sm:p-1 font-mono text-[11px] text-center align-middle ${
+                              colIdx % 2 === 1 ? 'bg-slate-200/70 dark:bg-slate-700/70' : 'bg-slate-100/70 dark:bg-slate-800/70'
+                            }`}
+                          >
+                            {ratioPeriodMode === 'WEEKLY' ? (
+                              <div className="flex flex-col items-center justify-center py-1 px-0.5 leading-tight">
+                                <span className="text-[11px] sm:text-xs font-black text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                  {col.fullDateLabel}
+                                </span>
+                                <span className="text-[10px] sm:text-[11px] font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap mt-0.5">
+                                  {col.dayName}
+                                </span>
+                              </div>
+                            ) : (
+                              col.dayNum
+                            )}
                           </th>
                         ))}
                         <th className="p-1 font-bold border-l border-slate-200 dark:border-slate-700 text-center align-middle bg-slate-100 dark:bg-slate-800/80">
-                          {showAllTableInfo ? (
+                          {ratioPeriodMode === 'WEEKLY' ? (
+                            <div className="flex flex-col items-center justify-center leading-tight">
+                              <span className="text-[10px] sm:text-[11px] font-black uppercase tracking-wider text-slate-800 dark:text-slate-200">
+                                7-Day
+                              </span>
+                              <span className="text-[9px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                                (Month)
+                              </span>
+                            </div>
+                          ) : showAllTableInfo ? (
                             <div className="flex flex-col items-center justify-center leading-tight">
                               <span className="text-[11px] font-black uppercase tracking-wider text-slate-800 dark:text-slate-200">
                                 Total
@@ -775,6 +1048,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                         .map((flight, flightIdx) => {
                           const flightArr = table.data?.[flight] || Array(31).fill(0);
                           const rowSum = flightArr.reduce((a, b) => a + b, 0);
+                          const visibleRowSum = activeColumns.reduce((sum, col) => sum + (flightArr[col.dayIdx] || 0), 0);
                           const isAltRow = flightIdx % 2 === 1;
 
                           return (
@@ -799,10 +1073,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                 </div>
                               </td>
 
-                              {daysArray.map((dayNum, dayIdx) => {
+                              {activeColumns.map((col, colIdx) => {
+                                const dayIdx = col.dayIdx;
+                                const dayNum = col.dayNum;
                                 const val = flightArr[dayIdx] || 0;
                                 const isPositive = val > 0;
-                                const isAltCol = dayNum % 2 === 0;
+                                const isAltCol = colIdx % 2 === 1;
 
                                 // Calculate daily quota for this specific duty across all flights on this day
                                 const dutyDaySum = flights.reduce((sum, fl) => sum + (table.data?.[fl]?.[dayIdx] || 0), 0);
@@ -819,7 +1095,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                                 return (
                                   <td
-                                    key={dayNum}
+                                    key={col.key}
                                     onClick={() => handleToggleFlightDutyCell(table.id, flight, dayIdx)}
                                     onContextMenu={(e) => {
                                       e.preventDefault();
@@ -831,7 +1107,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                       const cur = flightArr[dayIdx] || 0;
                                       handleToggleFlightDutyCell(table.id, flight, dayIdx, cur === 2 ? 0 : 2);
                                     }}
-                                    title={`Date ${dayNum} (${flight} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
+                                    title={`${ratioPeriodMode === 'WEEKLY' ? `${col.fullDateLabel} (${col.dayName})` : `Date ${dayNum}`} (${flight} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
                                     className={`p-0.5 border border-slate-200/60 dark:border-slate-800/60 text-center align-middle cursor-pointer select-none transition-colors hover:bg-indigo-500/10 ${
                                       isAltRow
                                         ? (isAltCol ? 'bg-slate-100/30 dark:bg-slate-800/25' : 'bg-slate-50/20 dark:bg-slate-800/10')
@@ -867,7 +1143,16 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                 );
                               })}
 
-                              {showAllTableInfo ? (
+                              {ratioPeriodMode === 'WEEKLY' ? (
+                                <td className={`p-1 font-mono border-l border-slate-200 dark:border-slate-700 text-center align-middle ${
+                                  isAltRow ? 'bg-slate-100/80 dark:bg-slate-800/80' : 'bg-slate-50/50 dark:bg-slate-800/40'
+                                }`}>
+                                  <div className="flex flex-col items-center justify-center leading-tight">
+                                    <span className="font-black text-xs text-indigo-700 dark:text-indigo-300">{visibleRowSum}</span>
+                                    <span className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold">({rowSum})</span>
+                                  </div>
+                                </td>
+                              ) : showAllTableInfo ? (
                                 <td className={`p-1 font-mono border-l border-slate-200 dark:border-slate-700 text-center align-middle ${
                                   isAltRow ? 'bg-slate-100/80 dark:bg-slate-800/80' : 'bg-slate-50/50 dark:bg-slate-800/40'
                                 }`}>
@@ -905,7 +1190,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                       {/* Daily Total Row (Sum across all flights for each day) */}
                       <tr className="bg-slate-100/90 dark:bg-slate-800/90 font-bold border-t-2 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100">
-                        <td className="p-1.5 sm:p-2 text-center font-black sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-20 sm:w-24 min-w-[80px] border-r border-slate-300 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]">
+                        <td className="p-1.5 sm:p-2 text-center font-black sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-24 sm:w-28 min-w-[90px] border-r border-slate-300 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]">
                           <div className="flex flex-col items-center justify-center leading-tight">
                             <span className="uppercase text-[10px] sm:text-[11px] font-black tracking-wider text-slate-800 dark:text-slate-200">
                               {showAllTableInfo ? 'Total / Req' : 'Daily Total'}
@@ -916,7 +1201,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                           </div>
                         </td>
 
-                        {daysArray.map((dayNum, dayIdx) => {
+                        {activeColumns.map((col) => {
+                          const dayIdx = col.dayIdx;
+                          const dayNum = col.dayNum;
                           const dailySum = flights.reduce(
                             (sum, fl) => sum + (table.data?.[fl]?.[dayIdx] || 0),
                             0
@@ -935,9 +1222,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                           return (
                             <td
-                              key={dayNum}
+                              key={col.key}
                               className="p-0.5 border border-slate-200/60 dark:border-slate-700/60 text-center align-middle"
-                              title={`Date ${dayNum}: Total ${dailySum} / Required ${dailyReq}`}
+                              title={`${ratioPeriodMode === 'WEEKLY' ? `${col.fullDateLabel} (${col.dayName})` : `Date ${dayNum}`}: Total ${dailySum} / Required ${dailyReq}`}
                             >
                               {showAllTableInfo ? (
                                 <div className={`mx-auto rounded-md flex flex-col items-center justify-center font-mono py-0.5 px-0.5 min-w-[22px] sm:min-w-[24px] ${
@@ -973,7 +1260,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                           return (
                             <td className="p-1 font-mono font-bold bg-slate-200/60 dark:bg-slate-800/80 border-l border-slate-300 dark:border-slate-700 text-xs text-center align-middle">
-                              {showAllTableInfo ? (
+                              {ratioPeriodMode === 'WEEKLY' ? (
+                                <div className="flex flex-col items-center justify-center leading-tight">
+                                  <span className="font-black text-xs text-indigo-700 dark:text-indigo-300">{tableVisibleTotal}</span>
+                                  <span className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold">({tableTotal})</span>
+                                </div>
+                              ) : showAllTableInfo ? (
                                 <div className="flex items-center justify-center">
                                   <div className={`inline-flex items-center justify-center gap-1 px-1.5 py-0.5 rounded-lg font-mono text-xs shadow-xs border transition-all ${
                                     isTotalExceeded
@@ -1085,40 +1377,89 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
               <div className="px-4 py-3 flex items-center justify-between bg-slate-800 text-white">
                 <div className="flex items-center space-x-3">
                   <span className="font-mono font-black text-sm tracking-wider">
-                    {selectedFlightFilter} Duty Schedule
+                    {selectedFlightFilter} Duty Schedule {ratioPeriodMode === 'WEEKLY' ? '(Weekly 7 Days)' : '(Monthly 31 Days)'}
                   </span>
                 </div>
-                <div className="text-xs font-bold bg-white/20 px-2.5 py-1 rounded-lg">
-                  Month Total: <strong className="font-mono">{flightTotalsOverall[selectedFlightFilter as FlightName]}</strong>
-                  {showAllTableInfo && (
-                    <span className="ml-1 text-white/80">
-                      / {targetFlightTotal}
-                    </span>
+                <div className="flex items-center space-x-2">
+                  {ratioPeriodMode === 'WEEKLY' && (
+                    <div className="text-xs font-bold bg-indigo-500/30 border border-white/20 px-2.5 py-1 rounded-lg">
+                      7-Day Total:{' '}
+                      <strong className="font-mono">
+                        {matrix
+                          .filter(t => !t.isDisabled)
+                          .reduce(
+                            (sum, t) =>
+                              sum +
+                              activeColumns.reduce(
+                                (acc, col) => acc + (t.data?.[selectedFlightFilter as FlightName]?.[col.dayIdx] || 0),
+                                0
+                              ),
+                            0
+                          )}
+                      </strong>
+                    </div>
                   )}
+                  <div className="text-xs font-bold bg-white/20 px-2.5 py-1 rounded-lg">
+                    Month Total: <strong className="font-mono">{flightTotalsOverall[selectedFlightFilter as FlightName]}</strong>
+                    {showAllTableInfo && (
+                      <span className="ml-1 text-white/80">
+                        / {targetFlightTotal}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="w-full overflow-x-auto">
-                <table className="w-full text-xs text-center border-collapse table-fixed min-w-[760px] sm:min-w-[960px]">
+                <table className={`w-full text-xs text-center border-collapse table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[620px]' : 'min-w-[760px] sm:min-w-[960px]'}`}>
                   <colgroup>
-                    <col className="w-20 sm:w-36 max-w-[85px] sm:max-w-none" />
-                    {daysArray.map((d) => (
-                      <col key={d} className="w-[22px] sm:w-[26px]" />
+                    <col className="w-24 sm:w-40 max-w-[95px] sm:max-w-none" />
+                    {activeColumns.map((col) => (
+                      <col key={col.key} className={ratioPeriodMode === 'WEEKLY' ? 'w-[76px] sm:w-[96px]' : 'w-[22px] sm:w-[26px]'} />
                     ))}
-                    <col className={showAllTableInfo ? "w-[72px] sm:w-[92px]" : "w-[46px] sm:w-[56px]"} />
+                    <col className={showAllTableInfo ? "w-[76px] sm:w-[96px]" : "w-[56px] sm:w-[68px]"} />
                   </colgroup>
                   <thead>
                     <tr className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
-                      <th className="p-1 sm:p-2 text-center sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-20 sm:w-36 max-w-[85px] sm:max-w-none border-r border-slate-200 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] overflow-hidden">
-                        <span className="sm:hidden text-[10px] font-black uppercase tracking-tight">Duty</span>
-                        <span className="hidden sm:inline">Duty Name / Date</span>
+                      <th className="p-1 sm:p-2 text-center sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-24 sm:w-40 max-w-[95px] sm:max-w-none border-r border-slate-200 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] overflow-hidden">
+                        <span className="sm:hidden text-[10px] font-black uppercase tracking-tight">
+                          {ratioPeriodMode === 'WEEKLY' ? 'Duty / Day' : 'Duty'}
+                        </span>
+                        <span className="hidden sm:inline">
+                          {ratioPeriodMode === 'WEEKLY' ? 'Duty Name / Date & Day' : 'Duty Name / Date'}
+                        </span>
                       </th>
-                      {daysArray.map((d) => (
-                        <th key={d} className={`p-0.5 sm:p-1 font-mono text-[11px] align-middle ${d % 2 === 0 ? 'bg-slate-200/70 dark:bg-slate-700/70' : 'bg-slate-100/70 dark:bg-slate-800/70'}`}>
-                          {d}
+                      {activeColumns.map((col, colIdx) => (
+                        <th
+                          key={col.key}
+                          className={`p-0.5 sm:p-1 font-mono text-[11px] align-middle ${
+                            colIdx % 2 === 1 ? 'bg-slate-200/70 dark:bg-slate-700/70' : 'bg-slate-100/70 dark:bg-slate-800/70'
+                          }`}
+                        >
+                          {ratioPeriodMode === 'WEEKLY' ? (
+                            <div className="flex flex-col items-center justify-center py-1 px-0.5 leading-tight">
+                              <span className="text-[11px] sm:text-xs font-black text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                {col.fullDateLabel}
+                              </span>
+                              <span className="text-[10px] sm:text-[11px] font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap mt-0.5">
+                                {col.dayName}
+                              </span>
+                            </div>
+                          ) : (
+                            col.dayNum
+                          )}
                         </th>
                       ))}
                       <th className="p-1 font-bold border-l border-slate-200 dark:border-slate-700 text-center align-middle bg-slate-100 dark:bg-slate-800/80">
-                        {showAllTableInfo ? (
+                        {ratioPeriodMode === 'WEEKLY' ? (
+                          <div className="flex flex-col items-center justify-center leading-tight">
+                            <span className="text-[10px] sm:text-[11px] font-black uppercase tracking-wider text-slate-800 dark:text-slate-200">
+                              7-Day
+                            </span>
+                            <span className="text-[9px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                              (Month)
+                            </span>
+                          </div>
+                        ) : showAllTableInfo ? (
                           <div className="flex flex-col items-center justify-center leading-tight">
                             <span className="text-[11px] font-black uppercase tracking-wider text-slate-800 dark:text-slate-200">
                               Total
@@ -1137,8 +1478,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {matrix.filter(t => !t.isDisabled).map((table, tableIdx) => {
-                      const rowData = table.data[selectedFlightFilter as FlightName];
+                      const rowData = table.data[selectedFlightFilter as FlightName] || Array(31).fill(0);
                       const rowSum = rowData.reduce((a, b) => a + b, 0);
+                      const visibleRowSum = activeColumns.reduce((sum, col) => sum + (rowData[col.dayIdx] || 0), 0);
                       const target = getFlightTarget(table, selectedFlightFilter as FlightName);
                       const isAltRow = tableIdx % 2 === 1;
 
@@ -1154,7 +1496,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                               : 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
                           }`}
                         >
-                          <td className={`p-1 sm:p-2 text-center font-bold text-slate-900 dark:text-white sticky left-0 z-10 border-r border-slate-200 dark:border-slate-800 align-middle text-[11px] leading-tight shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] w-20 sm:w-36 max-w-[85px] sm:max-w-none overflow-hidden ${
+                          <td className={`p-1 sm:p-2 text-center font-bold text-slate-900 dark:text-white sticky left-0 z-10 border-r border-slate-200 dark:border-slate-800 align-middle text-[11px] leading-tight shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] w-24 sm:w-40 max-w-[95px] sm:max-w-none overflow-hidden ${
                             isAltRow
                               ? 'bg-slate-100/95 dark:bg-slate-800/95'
                               : 'bg-white dark:bg-slate-900'
@@ -1181,10 +1523,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                               )}
                             </div>
                           </td>
-                          {daysArray.map((dayNum, dayIdx) => {
+                          {activeColumns.map((col, colIdx) => {
+                            const dayIdx = col.dayIdx;
+                            const dayNum = col.dayNum;
                             const val = rowData[dayIdx] || 0;
                             const isPositive = val > 0;
-                            const isAltCol = dayNum % 2 === 0;
+                            const isAltCol = colIdx % 2 === 1;
 
                             // Calculate daily quota for this specific duty across all flights on this day
                             const dutyDaySum = flights.reduce((sum, fl) => sum + (table.data[fl]?.[dayIdx] || 0), 0);
@@ -1201,7 +1545,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                             return (
                               <td
-                                key={dayNum}
+                                key={col.key}
                                 onClick={() => handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx)}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
@@ -1213,7 +1557,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                   const cur = rowData[dayIdx] || 0;
                                   handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx, cur === 2 ? 0 : 2);
                                 }}
-                                title={`Date ${dayNum} (${selectedFlightFilter} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
+                                title={`${ratioPeriodMode === 'WEEKLY' ? `${col.fullDateLabel} (${col.dayName})` : `Date ${dayNum}`} (${selectedFlightFilter} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
                                 className={`p-0.5 border border-slate-200/60 dark:border-slate-800/60 text-center align-middle cursor-pointer select-none transition-colors hover:bg-indigo-500/10 ${
                                   isAltRow
                                     ? (isAltCol ? 'bg-slate-100/30 dark:bg-slate-800/25' : 'bg-slate-50/20 dark:bg-slate-800/10')
@@ -1248,7 +1592,16 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                               </td>
                             );
                           })}
-                          {showAllTableInfo ? (
+                          {ratioPeriodMode === 'WEEKLY' ? (
+                            <td className={`p-1 font-mono border-l border-slate-200 dark:border-slate-700 text-center align-middle ${
+                              isAltRow ? 'bg-slate-100/80 dark:bg-slate-800/80' : 'bg-slate-50/50 dark:bg-slate-800/40'
+                            }`}>
+                              <div className="flex flex-col items-center justify-center leading-tight">
+                                <span className="font-black text-xs text-indigo-700 dark:text-indigo-300">{visibleRowSum}</span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold">({rowSum})</span>
+                              </div>
+                            </td>
+                          ) : showAllTableInfo ? (
                             <td className={`p-1 font-mono border-l border-slate-200 dark:border-slate-700 text-center align-middle ${
                               isAltRow ? 'bg-slate-100/80 dark:bg-slate-800/80' : 'bg-slate-50/50 dark:bg-slate-800/40'
                             }`}>
@@ -1278,7 +1631,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     })}
                     {/* Daily Total Row */}
                     <tr className="bg-slate-100/90 dark:bg-slate-800/90 font-bold border-t-2 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100">
-                      <td className="p-1 sm:p-2 text-center font-black sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-20 sm:w-36 max-w-[85px] sm:max-w-none border-r border-slate-300 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] overflow-hidden">
+                      <td className="p-1 sm:p-2 text-center font-black sticky left-0 bg-slate-100 dark:bg-slate-800 z-10 w-24 sm:w-40 max-w-[95px] sm:max-w-none border-r border-slate-300 dark:border-slate-700 align-middle shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] overflow-hidden">
                         <div className="flex flex-col items-center justify-center leading-tight">
                           <span className="uppercase text-[9px] sm:text-[11px] font-black tracking-tight text-slate-800 dark:text-slate-200">
                             {showAllTableInfo ? 'Total' : 'Daily'}
@@ -1291,20 +1644,18 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                       {(() => {
                         const activeDuties = matrix.filter(t => !t.isDisabled);
                         const flightTotal = targetFlightTotal > 0 ? targetFlightTotal : (flightTotalsOverall[selectedFlightFilter as FlightName] || 0);
-                        const daysCount = daysArray.length || 31;
+                        const daysCount = 31;
                         const baseDaily = Math.floor(flightTotal / daysCount);
                         const extraDays = flightTotal % daysCount;
                         const minAllowed = baseDaily;
                         const maxAllowed = extraDays > 0 ? baseDaily + 1 : baseDaily;
 
-                        return daysArray.map((dayNum, dayIdx) => {
+                        return activeColumns.map((col) => {
+                          const dayIdx = col.dayIdx;
+                          const dayNum = col.dayNum;
                           const dailySum = activeDuties.reduce((sum, table) => sum + (table.data[selectedFlightFilter as FlightName]?.[dayIdx] || 0), 0);
                           const isPositive = dailySum > 0;
 
-                          // Balanced distribution evaluation as per user golden rule:
-                          // - If between minAllowed and maxAllowed: fully balanced!
-                          // - If > maxAllowed: excess (+1 red, +2 pink/orange)
-                          // - If < minAllowed: shortage (-1 light blue, -2 dark blue)
                           let badgeClass = 'bg-slate-200/80 dark:bg-slate-700/80 text-slate-800 dark:text-slate-200 font-bold';
                           let diffDesc = `Balanced target (${dailySum})`;
 
@@ -1340,9 +1691,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
                           return (
                             <td
-                              key={dayNum}
+                              key={col.key}
                               className="p-0.5 border border-slate-200/60 dark:border-slate-700/60 text-center align-middle"
-                              title={`Date ${dayNum}: Flight Total ${dailySum} (Target range: ${minAllowed} - ${maxAllowed}) - ${diffDesc}`}
+                              title={`${ratioPeriodMode === 'WEEKLY' ? `${col.fullDateLabel} (${col.dayName})` : `Date ${dayNum}`}: Flight Total ${dailySum} (Target range: ${minAllowed} - ${maxAllowed}) - ${diffDesc}`}
                             >
                               {isPositive ? (
                                 <span className={`inline-flex items-center justify-center w-5.5 h-5.5 sm:w-6 sm:h-6 rounded-md font-mono text-xs transition-all ${badgeClass}`}>
@@ -1357,12 +1708,28 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                       })()}
                       {(() => {
                         const flightTotal = flightTotalsOverall[selectedFlightFilter as FlightName];
+                        const visibleFlightTotal = matrix
+                          .filter(t => !t.isDisabled)
+                          .reduce(
+                            (sum, t) =>
+                              sum +
+                              activeColumns.reduce(
+                                (acc, col) => acc + (t.data?.[selectedFlightFilter as FlightName]?.[col.dayIdx] || 0),
+                                0
+                              ),
+                            0
+                          );
                         const isTotalExceeded = flightTotal > targetFlightTotal;
                         const isTotalShortage = flightTotal < targetFlightTotal;
 
                         return (
                           <td className="p-1 font-mono font-bold bg-slate-200/60 dark:bg-slate-800/80 border-l border-slate-300 dark:border-slate-700 text-xs text-center align-middle">
-                            {showAllTableInfo ? (
+                            {ratioPeriodMode === 'WEEKLY' ? (
+                              <div className="flex flex-col items-center justify-center leading-tight">
+                                <span className="font-black text-xs text-indigo-700 dark:text-indigo-300">{visibleFlightTotal}</span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold">({flightTotal})</span>
+                              </div>
+                            ) : showAllTableInfo ? (
                               <div className="flex items-center justify-center">
                                 <div className={`inline-flex items-center justify-center gap-1 px-1.5 py-0.5 rounded-lg font-mono text-xs shadow-xs border transition-all ${
                                   isTotalExceeded
@@ -1433,10 +1800,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                       const val = parseInt((document.getElementById('globalReqInput') as HTMLInputElement).value, 10);
                       if (isNaN(val)) return;
                       const updated = [...matrix];
-                      updated[settingsTableIdx].dailyRequirements = new Array(31).fill(val);
-                      updated[settingsTableIdx].totalRequiredDaily = val;
+                      updated[settingsTableIdx] = {
+                        ...updated[settingsTableIdx],
+                        dailyRequirements: new Array(31).fill(val),
+                        totalRequiredDaily: val,
+                      };
                       setMatrix(updated);
-                      saveDutyMatrix(updated);
                     }}
                     className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-colors"
                   >
@@ -1457,11 +1826,13 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                           onChange={(e) => {
                             const val = parseInt(e.target.value, 10) || 0;
                             const updated = [...matrix];
-                            const currentReqs = updated[settingsTableIdx].dailyRequirements || new Array(31).fill(updated[settingsTableIdx].totalRequiredDaily || 0);
+                            const currentReqs = [...(updated[settingsTableIdx].dailyRequirements || new Array(31).fill(updated[settingsTableIdx].totalRequiredDaily || 0))];
                             currentReqs[idx] = val;
-                            updated[settingsTableIdx].dailyRequirements = currentReqs;
+                            updated[settingsTableIdx] = {
+                              ...updated[settingsTableIdx],
+                              dailyRequirements: currentReqs,
+                            };
                             setMatrix(updated);
-                            saveDutyMatrix(updated);
                           }}
                           className="w-full text-center px-1 py-1.5 text-sm font-mono font-bold bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                         />
@@ -1501,11 +1872,14 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
           onClose={() => setEditingCalendar(null)}
           onSave={(newData) => {
             const updated = [...matrix];
-            updated[editingCalendar.tableIdx].data[editingCalendar.flight] = newData;
+            updated[editingCalendar.tableIdx] = {
+              ...updated[editingCalendar.tableIdx],
+              data: {
+                ...updated[editingCalendar.tableIdx].data,
+                [editingCalendar.flight]: newData,
+              },
+            };
             setMatrix(updated);
-            saveDutyMatrix(updated);
-            setIsSaved(true);
-            setTimeout(() => setIsSaved(false), 2000);
             setEditingCalendar(null);
           }}
         />
@@ -1528,9 +1902,6 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
           currentMatrix={matrix}
           onImport={(newMatrix) => {
             setMatrix(newMatrix);
-            saveDutyMatrix(newMatrix);
-            setIsSaved(true);
-            setTimeout(() => setIsSaved(false), 2500);
           }}
         />
       )}
@@ -1582,9 +1953,85 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
           setTargetDate(selected.applyFromDate);
           if (selected.matrix && selected.matrix.length > 0) {
             setMatrix(selected.matrix);
+            setSavedMatrixJson(JSON.stringify(selected.matrix));
           }
         }}
       />
+
+      {/* Unsaved Changes Confirmation Popup Modal */}
+      {unsavedPromptAction !== null && (
+        <div className="fixed inset-0 z-[120] bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-amber-300 dark:border-amber-700/80 overflow-hidden">
+            <div className="px-5 py-4 bg-amber-50 dark:bg-amber-950/50 border-b border-amber-200 dark:border-amber-800/70 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                  Unsaved Changes in Duty Ratio Matrix
+                </h3>
+                <p className="text-xs text-amber-800 dark:text-amber-300 font-medium">
+                  Save required to apply your changes
+                </p>
+              </div>
+            </div>
+
+            <div className="p-5 text-sm text-slate-600 dark:text-slate-300 space-y-2 leading-relaxed">
+              <p>
+                আপনি <strong>Duty Ratio Matrix</strong>-এ কিছু পরিবর্তন করেছেন কিন্তু এখনো <strong>Save</strong> করেননি।
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Save না করলে এই পরিবর্তনগুলো অ্যাপ্লাই হবে না। অন্য পেজে যাওয়ার আগে কি পরিবর্তনগুলো Save করতে চান?
+              </p>
+            </div>
+
+            <div className="px-5 py-4 bg-slate-50 dark:bg-slate-800/60 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setUnsavedPromptAction(null)}
+                className="px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancel (Stay Here)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const action = unsavedPromptAction;
+                  setUnsavedPromptAction(null);
+                  handleDiscardChanges();
+                  if (action.type === 'NAVIGATE_TAB') {
+                    onConfirmNavigate?.(action.targetTab);
+                  } else if (action.type === 'CHANGE_DATE') {
+                    setTargetDate(action.nextDate);
+                    loadMatrixForDate(action.nextDate);
+                  }
+                }}
+                className="px-3.5 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 border border-rose-300 dark:border-rose-800 rounded-xl transition-colors cursor-pointer"
+              >
+                Don't Save
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const action = unsavedPromptAction;
+                  setUnsavedPromptAction(null);
+                  handleSave();
+                  if (action.type === 'NAVIGATE_TAB') {
+                    onConfirmNavigate?.(action.targetTab);
+                  } else if (action.type === 'CHANGE_DATE') {
+                    setTargetDate(action.nextDate);
+                    loadMatrixForDate(action.nextDate);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save & Continue</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 </div>
   );
 };

@@ -47,6 +47,7 @@ import { PrintableParadeStateModal } from './PrintableParadeStateModal';
 import {
  SignatureConfigModal,
  getSavedPreparedBy,
+ getSavedCheckedBy,
  getSavedAuthorizedBy,
  SignatureDetails,
 } from './SignatureConfigModal';
@@ -170,8 +171,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  // Signature Config Modal state
  const [showSignatureModal, setShowSignatureModal] = useState<boolean>(false);
- const [signatureInitialTab, setSignatureInitialTab] = useState<'PREPARED_BY' | 'AUTHORIZED_BY'>('PREPARED_BY');
+ const [signatureInitialTab, setSignatureInitialTab] = useState<'PREPARED_BY' | 'CHECKED_BY' | 'AUTHORIZED_BY'>('PREPARED_BY');
  const [preparedBy, setPreparedBy] = useState<SignatureDetails>(getSavedPreparedBy);
+ const [checkedBy, setCheckedBy] = useState<SignatureDetails>(getSavedCheckedBy);
  const [authorizedBy, setAuthorizedBy] = useState<SignatureDetails>(getSavedAuthorizedBy);
 
  // Single Airman Row Quick Edit Popover
@@ -307,6 +309,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  useEffect(() => {
  const handleSigUpdated = () => {
  setPreparedBy(getSavedPreparedBy());
+ setCheckedBy(getSavedCheckedBy());
  setAuthorizedBy(getSavedAuthorizedBy());
  };
  window.addEventListener('baf_signatures_updated', handleSigUpdated);
@@ -317,7 +320,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  useEffect(() => {
     const fetchStatuses = () => {
       if (!showAddDisposalModal || !disposalFromDate) return;
-      fetch(`/api/parade-state?date=${disposalFromDate}&shift=Morning`)
+      const stateType = isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE';
+      fetch(`/api/parade-state?date=${disposalFromDate}&shift=Morning&stateType=${stateType}`)
         .then((r) => r.json())
         .then((data) => {
           const map = {};
@@ -338,7 +342,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
     fetchStatuses();
     window.addEventListener('baf_state_updated', fetchStatuses);
     return () => window.removeEventListener('baf_state_updated', fetchStatuses);
-  }, [showAddDisposalModal, disposalFromDate]);
+  }, [showAddDisposalModal, disposalFromDate, isPtDocument, isOthersDocument]);
 
  // Format Date: e.g. "14 Aug 26"
  const formatDateShort = (dStr: string) => {
@@ -517,6 +521,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const handleSaveSingleRowDuty = async (code: DutyCategoryCode, idaShift?: IDAShift, notes?: string, proxyForFlight?: FlightName) => {
  if (!activeEditCell) return;
  const monthKey = activeEditCell.date.slice(0, 7);
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
  try {
  const res = await fetch('/api/roster/assign', {
  method: 'PUT',
@@ -529,7 +534,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  dutyCode: code,
  idaShift,
  proxyForFlight,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: effectiveScope,
  notes,
  },
  }),
@@ -549,6 +554,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  // Handle single row duty delete
  const handleDeleteRowDuty = async () => {
  if (!activeEditCell) return;
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
  try {
  const res = await fetch('/api/roster/delete-assignment', {
  method: 'POST',
@@ -556,6 +562,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  body: JSON.stringify({
  airmanId: activeEditCell.airman.id,
  date: activeEditCell.date,
+ disposalScope: effectiveScope,
  }),
  });
  if (res.ok) {
@@ -593,7 +600,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  });
  }
 
- const effectiveScope = isPtDocument ? 'PT' : (disposalScope === 'PT' ? 'PT' : 'PARADE');
+ const effectiveScope = isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE';
 
  const promises = selectedDisposalAirmenIds.map((airmanId) =>
  fetch('/api/roster/assign-range', {
@@ -727,7 +734,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  dutyCode: effectiveDutyCode,
  fromDate: editDisposalFromDate,
  toDate: editDisposalToDate,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: isPtDocument ? 'PT' : isOthersDocument ? ('OTHERS' as any) : 'PARADE',
  notes: effectiveNotes,
  }),
  });
@@ -897,6 +904,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  } else {
  const stats = getFlightStats(selectedFlight);
  const p = getSavedPreparedBy();
+ const c = getSavedCheckedBy();
  const a = getSavedAuthorizedBy();
  await exportParadeStateSingleDocx({
  dateStr: formatDateShort(fromDate),
@@ -922,6 +930,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  absent: absentList.map((i) => i.airman),
  otherDisposals,
  leftSig: { name: p.name, rank: p.rank, desig: p.designation },
+ middleSig: { name: c.name, rank: c.rank, desig: c.designation },
  rightSig: { name: a.name, rank: a.rank, desig: a.designation },
     }, `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`);
  }
@@ -2030,7 +2039,16 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {/* LEFT SIGNATURE BLOCK (Prepared By) */}
- <div className="text-left font-bold min-w-[210px]">
+ <div
+ onClick={() => {
+ if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') {
+ setSignatureInitialTab('PREPARED_BY');
+ setShowSignatureModal(true);
+ }
+ }}
+ className={`text-left font-bold min-w-[210px] ${(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+ title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Prepared By signature' : undefined}
+ >
  {preparedBy.signDigitally && (
  <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
  <span className="font-bold underline">
@@ -2049,8 +2067,46 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </div>
  </div>
 
+ {/* MIDDLE SIGNATURE BLOCK (Checked By) */}
+ <div
+ onClick={() => {
+ if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') {
+ setSignatureInitialTab('CHECKED_BY');
+ setShowSignatureModal(true);
+ }
+ }}
+ className={`text-left font-bold min-w-[210px] ${(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+ title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Checked By signature' : undefined}
+ >
+ {checkedBy.signDigitally && (
+ <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
+ <span className="font-bold underline">
+ {checkedBy.digitalSignatureText || checkedBy.name}
+ </span>
+ <span className="block text-[8px] font-mono not-italic text-slate-600">
+ [Digitally Signed • BAF Verified]
+ </span>
+ </div>
+ )}
+ <div className="border-t border-slate-900 dark:border-white print:border-black pt-1.5">
+ <div className="text-xs uppercase font-black">{checkedBy.name}</div>
+ <div className="text-[11px] font-normal">{checkedBy.rank}</div>
+ <div className="text-[11px] font-normal">{checkedBy.designation}</div>
+ <div className="text-[10px] uppercase font-bold">{checkedBy.unit || activeOfficeName}</div>
+ </div>
+ </div>
+
  {/* RIGHT SIGNATURE BLOCK (Authorized By) */}
- <div className="text-left font-bold min-w-[210px]">
+ <div
+ onClick={() => {
+ if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') {
+ setSignatureInitialTab('AUTHORIZED_BY');
+ setShowSignatureModal(true);
+ }
+ }}
+ className={`text-left font-bold min-w-[210px] ${(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+ title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Authorized By signature' : undefined}
+ >
  {authorizedBy.signDigitally && (
  <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
  <span className="font-bold underline">
@@ -2687,14 +2743,15 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  />
  )}
 
- {/* Signature Configuration Modal (Prepared By / Authorized By) */}
+ {/* Signature Configuration Modal (Prepared By / Checked By / Authorized By) */}
  <SignatureConfigModal
  isOpen={showSignatureModal}
  onClose={() => setShowSignatureModal(false)}
  initialTab={signatureInitialTab}
- onSignaturesUpdated={(prep, auth) => {
+ onSignaturesUpdated={(prep, auth, chk) => {
  setPreparedBy(prep);
  setAuthorizedBy(auth);
+ if (chk) setCheckedBy(chk);
  }}
  />
  </div>
