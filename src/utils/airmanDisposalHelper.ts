@@ -164,13 +164,35 @@ export function getAirmanDisposalForRange(
       ? localDb.getDb()?.assignments || {}
       : {};
 
-  // Collect all matching assignments for this airman on these dates
+  // Collect all matching assignments for this airman on these dates (including synthesized active Leave/TDY)
   const matchedAssignments: DutyAssignment[] = [];
+  const monthRosterCache = new Map<string, DutyAssignment[]>();
   for (const dateStr of dates) {
     const monthKey = dateStr.slice(0, 7);
     const monthList = allAssignmentsSource[monthKey] || [];
     const found = monthList.filter((a) => matchAirmanId(a.airmanId, airmanId) && a.date === dateStr);
     matchedAssignments.push(...found);
+
+    if (typeof window !== 'undefined') {
+      if (!monthRosterCache.has(monthKey)) {
+        try {
+          monthRosterCache.set(monthKey, localDb.getRoster(monthKey).assignments || []);
+        } catch {
+          monthRosterCache.set(monthKey, []);
+        }
+      }
+      const rosterDay = (monthRosterCache.get(monthKey) || []).filter(
+        (a) =>
+          matchAirmanId(a.airmanId, airmanId) &&
+          a.date === dateStr &&
+          (a.dutyCode === 'LEAVE' || a.dutyCode === 'TDY')
+      );
+      rosterDay.forEach((r) => {
+        if (!matchedAssignments.some((m) => m.date === r.date && m.dutyCode === r.dutyCode)) {
+          matchedAssignments.push(r);
+        }
+      });
+    }
   }
 
   // Check for Leave

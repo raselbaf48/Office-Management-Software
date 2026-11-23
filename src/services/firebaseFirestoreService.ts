@@ -860,6 +860,12 @@ export async function fetchSyncManifestFromFirebase(force: boolean = false): Pro
               cachedManifestResult = decodeFirestoreRestFields(docJson.fields) as SyncManifest;
               return cachedManifestResult;
             }
+          } else {
+            const errText = await res.text().catch(() => `HTTP ${res.status}`);
+            if (res.status === 429 || isQuotaExceededError(errText)) {
+              setFirestoreQuotaExceeded(true, errText);
+              return null;
+            }
           }
         } catch {} finally {
           clearTimeout(timer);
@@ -999,22 +1005,36 @@ async function pollSharedManifestOnce(force: boolean = false) {
   } catch {}
 }
 
+function stopSharedManifestListener() {
+  if (sharedManifestTimer) {
+    clearInterval(sharedManifestTimer);
+    sharedManifestTimer = null;
+  }
+}
+
 function ensureSharedManifestListener() {
-  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) {
+    stopSharedManifestListener();
+    return;
+  }
   if (manifestListeners.size === 0) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (sharedManifestTimer) return;
 
-  void pollSharedManifestOnce();
+  void pollSharedManifestOnce(false);
   sharedManifestTimer = setInterval(() => {
+    if (isFirestoreQuotaExceeded()) {
+      stopSharedManifestListener();
+      return;
+    }
     void pollSharedManifestOnce(true);
-  }, 15 * 1000); // 15 seconds background manifest poll when active
+  }, 120 * 1000); // 2 minutes background manifest poll to conserve Firestore free-tier read quota
 }
 
 export function subscribeToSyncManifest(
   callback: (manifest: SyncManifest) => void
 ): () => void {
-  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) {
+  if (!isFirebaseConfigured || !dbLite) {
     return () => {};
   }
 
@@ -1028,30 +1048,38 @@ export function subscribeToSyncManifest(
   if (typeof window !== 'undefined' && !sharedManifestOnlineBound) {
     sharedManifestOnlineBound = true;
     window.addEventListener('online', () => {
-      if (manifestListeners.size > 0) {
+      if (manifestListeners.size > 0 && !isFirestoreQuotaExceeded()) {
         ensureSharedManifestListener();
-        void pollSharedManifestOnce(true);
+        void pollSharedManifestOnce(false);
       }
     });
     window.addEventListener('focus', () => {
-      if (manifestListeners.size > 0) {
-        void pollSharedManifestOnce(true);
+      if (manifestListeners.size > 0 && !isFirestoreQuotaExceeded()) {
+        void pollSharedManifestOnce(false);
       }
     });
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && manifestListeners.size > 0) {
-        void pollSharedManifestOnce(true);
+      if (document.visibilityState === 'visible' && manifestListeners.size > 0 && !isFirestoreQuotaExceeded()) {
+        void pollSharedManifestOnce(false);
+      }
+    });
+    window.addEventListener('baf_firebase_quota_status', (e: any) => {
+      if (e?.detail?.exceeded) {
+        stopSharedManifestListener();
+      } else if (manifestListeners.size > 0) {
+        ensureSharedManifestListener();
       }
     });
   }
 
-  ensureSharedManifestListener();
+  if (!isFirestoreQuotaExceeded()) {
+    ensureSharedManifestListener();
+  }
 
   return () => {
     manifestListeners.delete(callback);
-    if (manifestListeners.size === 0 && sharedManifestTimer) {
-      clearInterval(sharedManifestTimer);
-      sharedManifestTimer = null;
+    if (manifestListeners.size === 0) {
+      stopSharedManifestListener();
     }
   };
 }
@@ -1129,11 +1157,23 @@ export async function deleteAirmanFromFirebase(airmanOrList: any | any[]): Promi
   });
   try {
     await commitSetOps(tombstoneOps, 'airmen');
-  } catch {}
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      setFirestoreQuotaExceeded(true, (err as any)?.message);
+      return;
+    }
+  }
+  if (isFirestoreQuotaExceeded()) return;
   const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
-  await Promise.allSettled(
+  const delResults = await Promise.allSettled(
     scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
   );
+  for (const r of delResults) {
+    if (r.status === 'rejected' && isQuotaExceededError(r.reason)) {
+      setFirestoreQuotaExceeded(true, (r.reason as any)?.message);
+      break;
+    }
+  }
 }
 
 // -------------------- 2. DUTY ASSIGNMENTS --------------------
@@ -1325,11 +1365,23 @@ export async function deleteUserProfileFromFirebase(userOrList: any | any[]): Pr
   });
   try {
     await commitSetOps(tombstoneOps, 'user_profiles');
-  } catch {}
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      setFirestoreQuotaExceeded(true, (err as any)?.message);
+      return;
+    }
+  }
+  if (isFirestoreQuotaExceeded()) return;
   const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
-  await Promise.allSettled(
+  const delResults = await Promise.allSettled(
     scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
   );
+  for (const r of delResults) {
+    if (r.status === 'rejected' && isQuotaExceededError(r.reason)) {
+      setFirestoreQuotaExceeded(true, (r.reason as any)?.message);
+      break;
+    }
+  }
 }
 
 // -------------------- 5. APP SETTINGS --------------------
@@ -1553,6 +1605,7 @@ export async function purgeActiveCustomOfficeCloudData(options?: {
   );
 
   for (const colName of collectionsToClean) {
+    if (isFirestoreQuotaExceeded()) break;
     try {
       const snap = await withFirestoreTimeout(
         getDocs(collection(dbLite, colName)),
@@ -1584,12 +1637,17 @@ export async function purgeActiveCustomOfficeCloudData(options?: {
 
       const CHUNK = 350;
       for (let i = 0; i < docIdsToDelete.length; i += CHUNK) {
+        if (isFirestoreQuotaExceeded()) break;
         const slice = docIdsToDelete.slice(i, i + CHUNK);
         const batch = writeBatch(dbLite);
         slice.forEach((id) => batch.delete(doc(dbLite, colName, id)));
         await withFirestoreTimeout(batch.commit(), 12000, `purgeBatch:${colName}`);
       }
     } catch (err) {
+      if (isQuotaExceededError(err)) {
+        setFirestoreQuotaExceeded(true, (err as any)?.message);
+        break;
+      }
       console.warn(`[FirebaseService] purgeActiveCustomOfficeCloudData warning on ${colName}:`, err);
     }
   }

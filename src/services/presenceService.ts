@@ -190,6 +190,7 @@ export function stopPresenceRealtimeSubscription() {
 function startPresenceHeartbeat(_bdNo: string) {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => {
+    if (isFirestoreQuotaExceeded()) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     if (currentLoggedBdNo) {
@@ -406,6 +407,10 @@ function ensureLoginHistoryRealtimeSubscription() {
 
   void refreshLoginHistoryFromCloud();
   const pollInterval = setInterval(() => {
+    if (isFirestoreQuotaExceeded()) {
+      stopLoginHistoryRealtimeSubscription();
+      return;
+    }
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     void refreshLoginHistoryFromCloud();
   }, PRESENCE_POLL_INTERVAL_MS);

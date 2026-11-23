@@ -21,6 +21,7 @@ import { sortAirmenBySeniority, normalizeAirmenSeniority, reorderAirmanSeniority
 import {
   isFirebaseConfigured,
   isFirestoreQuotaExceeded,
+  getFirestoreQuotaExceededAt,
   isQuotaExceededError,
   getQuotaConsoleUpgradeUrl,
   CLIENT_SESSION_ID,
@@ -666,7 +667,10 @@ export class LocalDatabaseEngine {
         }
       }, MULTI_USER_POLL_INTERVAL_MS);
 
-      // Quota Recovery & Pending Delta Auto-Backup Check (runs every 45s + on focus/online/visibilitychange)
+      // Quota Recovery & Pending Delta Auto-Backup Check
+      let lastQuotaRecoveryProbeAt = 0;
+      const QUOTA_RECOVERY_PROBE_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown when quota is exceeded
+
       const checkQuotaRecoveryAndFlushDeltas = async () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
         if (typeof navigator !== 'undefined' && !navigator.onLine) return;
@@ -677,6 +681,12 @@ export class LocalDatabaseEngine {
 
         if (isFirestoreQuotaExceeded()) {
           if (hasPendingDeltas()) {
+            const now = Date.now();
+            const lastConfirmedAt = Math.max(lastQuotaRecoveryProbeAt, getFirestoreQuotaExceededAt());
+            if (now - lastConfirmedAt < QUOTA_RECOVERY_PROBE_COOLDOWN_MS) {
+              return;
+            }
+            lastQuotaRecoveryProbeAt = now;
             const probe = await probeFirebaseConnectionAndQuota(true);
             if (probe.ok && !probe.quotaExceeded) {
               // Quota just reset! Immediately back up ONLY the changed items first
@@ -695,7 +705,7 @@ export class LocalDatabaseEngine {
 
       setInterval(() => {
         void checkQuotaRecoveryAndFlushDeltas();
-      }, 45 * 1000);
+      }, 2 * 60 * 1000);
 
       window.addEventListener('online', () => {
         void checkQuotaRecoveryAndFlushDeltas();
@@ -971,7 +981,7 @@ export class LocalDatabaseEngine {
         this.db.airmen = normalizeAirmenSeniority(enrichedMerged);
       }
 
-      // 2. Duty Assignments: only pull from local server if Firebase is not configured or quota is full or local assignments are empty
+      // 2. Duty Assignments: safely MERGE server records with local records (never wipe newer local Leave/Duty edits)
       const hasExistingLocalAssignments = Object.keys(this.db.assignments || {}).some(
         (k) => Array.isArray(this.db.assignments[k]) && this.db.assignments[k].length > 0
       );
@@ -982,18 +992,40 @@ export class LocalDatabaseEngine {
       ) {
         if (!this.db.assignments) this.db.assignments = {};
         Object.keys(srvDb.assignments).forEach((mKey) => {
-          const seenKeys = new Set<string>();
-          const incoming: any[] = [];
+          const existingLocal = Array.isArray(this.db.assignments[mKey]) ? this.db.assignments[mKey] : [];
+          const mergedByKey = new Map<string, any>();
+
+          const makeKey = (a: any) =>
+            a?.id ||
+            `${normalizeCanonicalAirmanId(a?.airmanId)}_${a?.date}_${a?.dutyCode}_${a?.idaShift || ''}_${a?.disposalScope || 'ALL'}`;
+
+          // Seed with local edits first so local assignments are preserved
+          existingLocal.forEach((rawLocal: any) => {
+            if (!rawLocal || isCorruptedAssignmentRecord(rawLocal)) return;
+            const normL = normalizeAssignmentRecord(rawLocal);
+            mergedByKey.set(makeKey(normL), normL);
+          });
+
+          // Merge server records: add missing entries or update if server record is strictly newer
           (srvDb.assignments[mKey] || []).forEach((rawA: any) => {
             if (isCorruptedAssignmentRecord(rawA)) return;
             const normA = normalizeAssignmentRecord(rawA);
-            if (!seenKeys.has(normA.id)) {
-              seenKeys.add(normA.id);
-              incoming.push(normA);
+            const k = makeKey(normA);
+            const curr = mergedByKey.get(k);
+            if (!curr) {
+              mergedByKey.set(k, normA);
+            } else {
+              const currTs = curr.updatedAt ? Date.parse(curr.updatedAt) || 0 : 0;
+              const srvTs = normA.updatedAt ? Date.parse(normA.updatedAt) || 0 : 0;
+              if (srvTs > currTs) {
+                mergedByKey.set(k, normA);
+              }
             }
           });
-          if (JSON.stringify(this.db.assignments[mKey] || []) !== JSON.stringify(incoming)) {
-            this.db.assignments[mKey] = incoming;
+
+          const mergedList = Array.from(mergedByKey.values());
+          if (JSON.stringify(existingLocal) !== JSON.stringify(mergedList)) {
+            this.db.assignments[mKey] = mergedList;
             changed = true;
           }
         });
@@ -1248,9 +1280,18 @@ export class LocalDatabaseEngine {
         return true;
       }
 
-      // On quota recovery or when quota flag is currently set, verify Firebase quota live from server
+      // On quota recovery or when quota flag is currently set, verify Firebase quota live only if not recently confirmed
       if (options?.isQuotaRecovery || isFirestoreQuotaExceeded()) {
-        const probe = await probeFirebaseConnectionAndQuota(true);
+        const recentlyConfirmedQuota =
+          !options?.isQuotaRecovery &&
+          isFirestoreQuotaExceeded() &&
+          getFirestoreQuotaExceededAt() > 0 &&
+          Date.now() - getFirestoreQuotaExceededAt() < 10 * 60 * 1000;
+
+        const probe = recentlyConfirmedQuota
+          ? { ok: false, quotaExceeded: true, errorMsg: 'Firebase daily quota exceeded. Using Local Cloud Storage.' }
+          : await probeFirebaseConnectionAndQuota(true);
+
         if (probe.quotaExceeded || isFirestoreQuotaExceeded()) {
           await this.pullDatabaseFromServer();
           await this.pullAllSettingsFromServer();
@@ -3823,23 +3864,106 @@ export class LocalDatabaseEngine {
       addList(list, targetMonth);
     });
 
+    // Synthesize active global Leave / TDY spans from activityHistory (matching getParadeState behavior)
+    // so multi-month leaves (e.g., Recreation Leave RL) are never missing from Roster / Assign Duty Modal
+    const validPrefixes = [targetMonth, ...(prevMonthKey ? [prevMonthKey] : [])];
+    this.appendSynthesizedLeaveTdy(dedup, validPrefixes);
+
     return { monthKey: targetMonth, assignments: Array.from(dedup.values()) };
+  }
+
+  private appendSynthesizedLeaveTdy(dedup: Map<string, DutyAssignment>, validPrefixes: string[]): void {
+    const history = this.db.activityHistory || [];
+    if (history.length === 0 || validPrefixes.length === 0) return;
+
+    // Track explicit CLEAR_RANGE timestamps so cleared dates are never resurrected
+    const clearRanges: Array<{ airId: string; from: string; to: string; ts: number }> = [];
+    history.forEach((h: any) => {
+      const actType = String(h?.actionType || h?.type || '').toUpperCase();
+      if (actType === 'CLEAR_RANGE' || actType === 'DELETE_RANGE') {
+        const airId = h.airmanId || h.airman_id;
+        const from = h.fromDate || h.from_date || h.date;
+        const to = h.toDate || h.to_date || from;
+        if (airId && from && to) {
+          clearRanges.push({
+            airId: normalizeCanonicalAirmanId(airId) || airId,
+            from,
+            to,
+            ts: h.timestamp ? Date.parse(h.timestamp) || 0 : 0,
+          });
+        }
+      }
+    });
+
+    // Index existing LEAVE / TDY dates already present in dedup by canonical airmanId + date + code
+    const existingKeys = new Set<string>();
+    dedup.forEach((a) => {
+      const normAir = normalizeCanonicalAirmanId(a.airmanId) || a.airmanId;
+      existingKeys.add(`${normAir}_${a.date}_${String(a.dutyCode || '').toUpperCase()}`);
+    });
+
+    history.forEach((h: any) => {
+      if (!h) return;
+      const hScope = String(h.disposalScope || 'ALL').toUpperCase();
+      if (hScope !== 'ALL' && hScope !== 'A') return;
+      const actType = String(h.actionType || h.type || '').toUpperCase();
+      const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase();
+      if (actType !== 'GRANT_LEAVE' && rawCode !== 'LEAVE' && rawCode !== 'TDY') return;
+
+      const airIdRaw = h.airmanId || h.airman_id;
+      const from = h.fromDate || h.from_date || h.date;
+      const to = h.toDate || h.to_date || from;
+      if (!airIdRaw || !from || !to) return;
+
+      const normAir = normalizeCanonicalAirmanId(airIdRaw) || airIdRaw;
+      const code = rawCode === 'TDY' ? 'TDY' : 'LEAVE';
+      const hTs = h.timestamp ? Date.parse(h.timestamp) || 0 : 0;
+
+      const dates = getDatesInRange(from, to);
+      for (const dStr of dates) {
+        if (!validPrefixes.some((p) => dStr.startsWith(p))) continue;
+        const dupCheck = `${normAir}_${dStr}_${code}`;
+        if (existingKeys.has(dupCheck)) continue;
+
+        const wasClearedAfter = clearRanges.some(
+          (c) => this.isSameAirmanId(c.airId, normAir) && c.from <= dStr && c.to >= dStr && c.ts > hTs
+        );
+        if (wasClearedAfter) continue;
+
+        const key = `${normAir}_${dStr}_${code}__ALL`;
+        dedup.set(key, {
+          airmanId: normAir,
+          date: dStr,
+          dutyCode: code as any,
+          dutyName: code,
+          notes: h.notes || h.description || '',
+          disposalScope: 'ALL',
+          updatedAt: h.updatedAt || h.timestamp || new Date().toISOString(),
+        });
+        existingKeys.add(dupCheck);
+      }
+    });
   }
 
   public getRosterYear(year?: number): { year: number; assignments: DutyAssignment[] } {
     const targetYear = year || new Date().getFullYear();
     const prefix = `${targetYear}-`;
-    const assignments: DutyAssignment[] = [];
+    const dedup = new Map<string, DutyAssignment>();
     Object.keys(this.db.assignments).forEach((mKey) => {
       if (mKey.startsWith(prefix)) {
         const list = (this.db.assignments[mKey] || []).filter((a) => {
+          if (!a || !a.date || (a as any).isDeleted) return false;
           const scope = String(a?.disposalScope || 'ALL').toUpperCase();
           return scope === 'ALL' || scope === 'A';
         });
-        assignments.push(...list);
+        list.forEach((a) => {
+          const key = `${a.airmanId}_${a.date}_${a.dutyCode}_${a.idaShift || ''}_ALL`;
+          dedup.set(key, a);
+        });
       }
     });
-    return { year: targetYear, assignments };
+    this.appendSynthesizedLeaveTdy(dedup, [prefix]);
+    return { year: targetYear, assignments: Array.from(dedup.values()) };
   }
 
   private isSameAirmanId(idA?: string, idB?: string): boolean {

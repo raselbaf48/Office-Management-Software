@@ -87,6 +87,7 @@ interface TopHeaderProps {
   activeTab: SidebarTab;
   onOpenMobileSidebar: () => void;
   role?: UserRole;
+  userFlight?: string;
   userSession?: UserSession | null;
   onOpenAdminLogin?: () => void;
   onLogoutAdmin?: () => void;

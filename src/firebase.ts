@@ -1358,7 +1358,7 @@ export async function saveMasterCredentials(
     setRawLocalStorageItem(MASTER_CREDENTIALS_STORAGE_KEY, JSON.stringify(creds));
     window.dispatchEvent(new CustomEvent('baf_master_credentials_updated', { detail: creds }));
   }
-  if (masterDbInstance) {
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     try {
       await setDoc(
         doc(masterDbInstance, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY),
@@ -1370,7 +1370,9 @@ export async function saveMasterCredentials(
         },
         { merge: true }
       );
-    } catch {}
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    }
   }
   return creds;
 }
@@ -1471,7 +1473,7 @@ function saveRemovedOfficeCodes(codes: string[], syncToCloud: boolean = true): v
   if (typeof window !== 'undefined') {
     setRawLocalStorageItem(REMOVED_OFFICES_STORAGE_KEY, JSON.stringify(unique));
   }
-  if (syncToCloud && masterDbInstance) {
+  if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
     setDoc(
       doc(masterDbInstance, 'app_settings', REMOVED_OFFICES_STORAGE_KEY),
@@ -1482,7 +1484,9 @@ function saveRemovedOfficeCodes(codes: string[], syncToCloud: boolean = true): v
         updatedBy: 'master_admin',
       },
       { merge: true }
-    ).catch(() => {});
+    ).catch((err) => {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+    });
   }
 }
 
@@ -1559,7 +1563,7 @@ export async function toggleRegisteredOfficeStatus(
   }
 
   // Non-blocking background sync to Firestore
-  if (masterDbInstance) {
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     getDocs(collection(masterDbInstance, 'registered_offices'))
       .then((snap) => {
         const updates: Promise<any>[] = [];
@@ -1592,7 +1596,9 @@ export async function toggleRegisteredOfficeStatus(
         });
         return Promise.all(updates);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+      });
   }
 }
 
@@ -1654,7 +1660,7 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
   }
 
   // 7. Non-blocking background soft-remove in Firestore registered_offices collection (compatible with allow delete: if false)
-  if (masterDbInstance) {
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
     getDocs(collection(masterDbInstance, 'registered_offices'))
       .then((snap) => {
@@ -1687,7 +1693,9 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
         });
         return Promise.all(updates);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+      });
   }
 }
 
@@ -1852,7 +1860,7 @@ export async function fetchOfficeLoginHistory(officeCodeInput?: string): Promise
   const localLogs = getOfficeLoginHistoryLocal(code);
 
   let cloudLogs: any[] = [];
-  if (masterDbInstance) {
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     try {
       const snap = await getDoc(doc(masterDbInstance, 'app_settings', cloudDocId));
       if (snap.exists()) {
@@ -1864,7 +1872,9 @@ export async function fetchOfficeLoginHistory(officeCodeInput?: string): Promise
           if (Array.isArray(parsed)) cloudLogs = parsed;
         }
       }
-    } catch {}
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    }
   }
 
   const mergedMap = new Map<string, any>();
@@ -1909,7 +1919,7 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
         window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: [] }));
       }
     }
-    if (masterDbInstance) {
+    if (masterDbInstance && !isFirestoreQuotaExceeded()) {
       setDoc(
         doc(masterDbInstance, 'app_settings', cloudDocId),
         {
@@ -1919,7 +1929,9 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
           updatedBy: 'master_admin',
         },
         { merge: true }
-      ).catch(() => {});
+      ).catch((err) => {
+        if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+      });
     }
   } catch {}
 }
@@ -2879,6 +2891,10 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
         officeByCode.set(c, o);
       });
 
+      if (isFirestoreQuotaExceeded()) {
+        return localMap;
+      }
+
       // 2. Fetch single document app_settings/baf_global_user_office_map_v1 (1 read instead of N user_profiles reads)
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
       if (snap.exists()) {
@@ -2903,8 +2919,11 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
       }
 
       // 3. Only scan user_profiles collection when explicitly forced (prevents full-collection scan on boot/login)
-      if (force) {
-        const usersSnap = await getDocs(collection(masterDbInstance!, 'user_profiles')).catch(() => null);
+      if (force && !isFirestoreQuotaExceeded()) {
+        const usersSnap = await getDocs(collection(masterDbInstance!, 'user_profiles')).catch((err) => {
+          if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+          return null;
+        });
         if (usersSnap) {
           usersSnap.forEach((docSnap) => {
             const docId = docSnap.id;
@@ -2988,7 +3007,9 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
       }
 
       saveGlobalUserOfficeMap(localMap, false);
-    } catch {}
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    }
     return localMap;
   })().finally(() => {
     inFlightGlobalUserMapPromise = null;
@@ -3071,7 +3092,9 @@ export function savePendingOfficeRequestsLocal(
         updatedBy: 'system',
       },
       { merge: true }
-    ).catch(() => {});
+    ).catch((err) => {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+    });
   }
 }
 
@@ -3130,7 +3153,9 @@ export async function fetchPendingOfficeRequestsFromMaster(force: boolean = fals
           }
         }
       }
-    } catch {}
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    }
 
     const merged = Array.from(byId.values())
       .filter((item) => item.status !== 'REJECTED' && !rejectedIds.has(String(item.id)))
@@ -3487,7 +3512,7 @@ export async function approveOfficeRegistrationRequest(
     officeDbObj.airmen.length || 1
   ).catch(() => {});
 
-  if (masterDbInstance) {
+  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     try {
       const docPrefix = `off_${safeCode}__`;
       const safeAirmanDocId = `${docPrefix}BD_${cleanBd}`;
@@ -3564,7 +3589,9 @@ export async function approveOfficeRegistrationRequest(
         setDoc(doc(masterDbInstance, 'user_profiles', safeUserDocId), firestoreUserPayload, { merge: true }),
         setDoc(doc(masterDbInstance, 'app_settings', safeProfileDocId), firestoreProfileSettingPayload, { merge: true }),
         setDoc(doc(masterDbInstance, 'system_meta', safeManifestDocId), firestoreManifestPayload, { merge: true }),
-      ]).catch(() => {});
+      ]).catch((err) => {
+        if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+      });
     } catch {}
   }
 
@@ -3673,11 +3700,15 @@ let quotaExceededMemory: boolean = (() => {
 
 export function isQuotaExceededError(error: unknown): boolean {
   if (!error) return false;
+  const status = Number((error as any)?.status || (error as any)?.statusCode || 0);
   const code = String((error as any)?.code || '').toLowerCase();
   const msg = String((error as any)?.message || error || '').toLowerCase();
   return (
+    status === 429 ||
     code.includes('resource-exhausted') ||
+    code.includes('resource_exhausted') ||
     msg.includes('resource-exhausted') ||
+    msg.includes('resource_exhausted') ||
     msg.includes('quota exceeded') ||
     msg.includes('quota limit exceeded') ||
     msg.includes('free daily read units') ||
@@ -3685,6 +3716,34 @@ export function isQuotaExceededError(error: unknown): boolean {
     msg.includes('maximum backoff delay') ||
     msg.includes('429')
   );
+}
+
+let quotaExceededAtMemory: number = (() => {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const saved = window.localStorage.getItem(QUOTA_EXCEEDED_KEY);
+    if (!saved) return 0;
+    const savedTime = Date.parse(saved);
+    return isNaN(savedTime) ? 0 : savedTime;
+  } catch {
+    return 0;
+  }
+})();
+
+export function getFirestoreQuotaExceededAt(): number {
+  if (typeof window !== 'undefined') {
+    try {
+      const saved = window.localStorage.getItem(QUOTA_EXCEEDED_KEY);
+      if (saved) {
+        const savedTime = Date.parse(saved);
+        if (!isNaN(savedTime)) {
+          quotaExceededAtMemory = savedTime;
+          return savedTime;
+        }
+      }
+    } catch {}
+  }
+  return quotaExceededAtMemory;
 }
 
 export function isFirestoreQuotaExceeded(): boolean {
@@ -3700,9 +3759,11 @@ export function isFirestoreQuotaExceeded(): boolean {
             window.localStorage.removeItem(QUOTA_EXCEEDED_KEY);
             window.localStorage.removeItem(QUOTA_MSG_KEY);
             quotaExceededMemory = false;
+            quotaExceededAtMemory = 0;
             return false;
           }
           quotaExceededMemory = true;
+          quotaExceededAtMemory = savedTime;
           return true;
         }
       }
@@ -3719,11 +3780,12 @@ export function getQuotaConsoleUpgradeUrl(): string {
 export function setFirestoreQuotaExceeded(exceeded: boolean = false, errorMsg?: string): void {
   const prev = quotaExceededMemory;
   quotaExceededMemory = exceeded;
+  quotaExceededAtMemory = exceeded ? Date.now() : 0;
 
   if (typeof window !== 'undefined') {
     try {
       if (exceeded) {
-        window.localStorage.setItem(QUOTA_EXCEEDED_KEY, new Date().toISOString());
+        window.localStorage.setItem(QUOTA_EXCEEDED_KEY, new Date(quotaExceededAtMemory).toISOString());
         if (errorMsg) window.localStorage.setItem(QUOTA_MSG_KEY, errorMsg);
       } else {
         window.localStorage.removeItem(QUOTA_EXCEEDED_KEY);

@@ -588,7 +588,24 @@ async function startServer() {
 
   app.post('/api/pwa-icon-upload', express.json({ limit: '15mb' }), (req, res) => {
     try {
-      const { hash, icon192, icon512, maskable512, officeName, officeCode, officeSlogan, is155Office } = req.body || {};
+      const {
+        hash,
+        iconHash,
+        icon192,
+        icon192DataUrl,
+        icon512,
+        icon512DataUrl,
+        maskable512,
+        maskable512DataUrl,
+        officeName,
+        officeCode,
+        officeSlogan,
+        is155Office,
+      } = req.body || {};
+      const resolvedHash = String(hash || iconHash || '').trim();
+      const resolvedIcon192 = icon192 || icon192DataUrl;
+      const resolvedIcon512 = icon512 || icon512DataUrl;
+      const resolvedMaskable512 = maskable512 || maskable512DataUrl;
       const cleanName = String(officeName || '').trim();
       const isGeneric =
         !cleanName ||
@@ -597,16 +614,16 @@ async function startServer() {
         cleanName === 'Office Management System';
 
       let buffers: { icon192: Buffer; icon512: Buffer; maskable512: Buffer } | undefined;
-      if (hash && icon192 && icon512) {
+      if (resolvedHash && resolvedIcon192 && resolvedIcon512) {
         const stripDataPrefix = (dataUrl: string) =>
           Buffer.from(String(dataUrl).replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
-        const buf192 = stripDataPrefix(icon192);
-        const buf512 = stripDataPrefix(icon512);
-        const bufMask = maskable512 ? stripDataPrefix(maskable512) : buf512;
+        const buf192 = stripDataPrefix(resolvedIcon192);
+        const buf512 = stripDataPrefix(resolvedIcon512);
+        const bufMask = resolvedMaskable512 ? stripDataPrefix(resolvedMaskable512) : buf512;
 
         buffers = { icon192: buf192, icon512: buf512, maskable512: bufMask };
-        dynamicPwaIconStore.set(String(hash), buffers);
+        dynamicPwaIconStore.set(resolvedHash, buffers);
       }
 
       if (!isGeneric) {
@@ -620,13 +637,13 @@ async function startServer() {
             officeCode: String(officeCode || '').trim(),
             officeSlogan: String(officeSlogan || '').trim(),
             is155Office: detected155,
-            iconHash: detected155 ? '' : String(hash || activePwaOfficeState.iconHash || ''),
+            iconHash: detected155 ? '' : String(resolvedHash || activePwaOfficeState.iconHash || ''),
           },
           buffers
         );
       }
 
-      res.json({ success: true, hash: hash || '' });
+      res.json({ success: true, hash: resolvedHash });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to store PWA icons' });
     }
@@ -1036,6 +1053,71 @@ async function startServer() {
     res.json(db.assignments || {});
   });
 
+  const appendHistoryLeaveTdyToList = (db: any, list: any[], validPrefixes: string[]) => {
+    const history = Array.isArray(db?.activityHistory) ? db.activityHistory : [];
+    if (history.length === 0) return list;
+    const out = [...list];
+    const cleanDigits = (id: any) => String(id || '').replace(/\D/g, '');
+    const existingKeys = new Set(
+      out.map((a: any) => `${cleanDigits(a.airmanId) || a.airmanId}_${a.date}_${String(a.dutyCode || '').toUpperCase()}`)
+    );
+    const clearRanges: Array<{ digits: string; from: string; to: string; ts: number }> = [];
+    history.forEach((h: any) => {
+      const act = String(h?.actionType || h?.type || '').toUpperCase();
+      if (act === 'CLEAR_RANGE' || act === 'DELETE_RANGE') {
+        const from = h.fromDate || h.from_date || h.date;
+        const to = h.toDate || h.to_date || from;
+        if (from && to) {
+          clearRanges.push({
+            digits: cleanDigits(h.airmanId || h.airman_id),
+            from,
+            to,
+            ts: h.timestamp ? Date.parse(h.timestamp) || 0 : 0,
+          });
+        }
+      }
+    });
+
+    history.forEach((h: any) => {
+      if (!h) return;
+      const scope = String(h.disposalScope || 'ALL').toUpperCase();
+      if (scope !== 'ALL' && scope !== 'A') return;
+      const act = String(h.actionType || h.type || '').toUpperCase();
+      const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase();
+      if (act !== 'GRANT_LEAVE' && rawCode !== 'LEAVE' && rawCode !== 'TDY') return;
+      const airId = h.airmanId || h.airman_id;
+      const from = h.fromDate || h.from_date || h.date;
+      const to = h.toDate || h.to_date || from;
+      if (!airId || !from || !to) return;
+
+      const code = rawCode === 'TDY' ? 'TDY' : 'LEAVE';
+      const digits = cleanDigits(airId);
+      const hTs = h.timestamp ? Date.parse(h.timestamp) || 0 : 0;
+      const dates = getDatesInRange(from, to);
+      for (const dStr of dates) {
+        if (!validPrefixes.some((p) => dStr.startsWith(p))) continue;
+        const k = `${digits || airId}_${dStr}_${code}`;
+        if (existingKeys.has(k)) continue;
+        const clearedAfter = clearRanges.some(
+          (c) => digits && c.digits === digits && c.from <= dStr && c.to >= dStr && c.ts > hTs
+        );
+        if (clearedAfter) continue;
+        out.push({
+          id: `asn_${String(airId).replace(/[^a-zA-Z0-9_-]/g, '_')}_${dStr}_${code}_n_ALL`,
+          airmanId: airId,
+          date: dStr,
+          dutyCode: code,
+          dutyName: code,
+          notes: h.notes || h.description || '',
+          disposalScope: 'ALL',
+          updatedAt: h.updatedAt || h.timestamp || new Date().toISOString(),
+        });
+        existingKeys.add(k);
+      }
+    });
+    return out;
+  };
+
   app.get('/api/parade-state', (req, res) => {
     const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
     const shift = (req.query.shift as string) || 'Morning';
@@ -1057,7 +1139,8 @@ async function startServer() {
     const allAirmen = (db.airmen || []).filter((a: any) => a.active !== false);
     const targetAirmen = flight === 'Overall' ? allAirmen : allAirmen.filter((a: any) => a.flightName === flight);
     const monthKey = date.slice(0, 7);
-    const dateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date && isScopeApplicable(a.disposalScope));
+    const rawDateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date && isScopeApplicable(a.disposalScope));
+    const dateAssignments = appendHistoryLeaveTdyToList(db, rawDateAssignments, [date]);
 
     const [yr, mo, da] = date.split('-').map(Number);
     const yestObj = new Date(Date.UTC(yr, (mo || 1) - 1, da || 1));
@@ -1090,12 +1173,22 @@ async function startServer() {
         return sh.includes('night') || sh.includes('nt') || sh === 'c';
       };
       const explicitOverride = matchesToday.find((r: any) => isExplicitStateScope(r.disposalScope));
-      let match = explicitOverride || matchesToday[0];
-      if (!explicitOverride && matchesToday.length > 1) {
+      const isDepRec = (r: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(r?.dutyCode || '').toUpperCase());
+      const leaveRec = matchesToday.find((r: any) => String(r?.dutyCode || '').toUpperCase() === 'LEAVE');
+      const tdyRec = matchesToday.find((r: any) => ['TDY', 'DETT'].includes(String(r?.dutyCode || '').toUpperCase()));
+      let match = explicitOverride || leaveRec || tdyRec || matchesToday[0];
+      if (!explicitOverride && !leaveRec && !tdyRec && matchesToday.length > 1) {
         if (isPT || isNightCount) {
-          match = matchesToday.find(isRecIdacNt) || matchesToday.find((r: any) => r.dutyCode !== 'ON_PARADE') || matchesToday[0];
+          match =
+            matchesToday.find(isRecIdacNt) ||
+            matchesToday.find((r: any) => !isDepRec(r) && r.dutyCode !== 'ON_PARADE') ||
+            matchesToday.find((r: any) => r.dutyCode !== 'ON_PARADE') ||
+            matchesToday[0];
         } else {
-          match = matchesToday.find((r: any) => !isRecIdacNt(r) && r.dutyCode !== 'ON_PARADE') || matchesToday[0];
+          match =
+            matchesToday.find((r: any) => !isRecIdacNt(r) && !isDepRec(r) && r.dutyCode !== 'ON_PARADE') ||
+            matchesToday.find((r: any) => !isRecIdacNt(r) && r.dutyCode !== 'ON_PARADE') ||
+            matchesToday[0];
         }
       }
 
@@ -1242,12 +1335,14 @@ async function startServer() {
     });
   });
 
+
   app.get('/api/roster', (req, res) => {
     const month = (req.query.month as string) || `${new Date().getFullYear()}-${(new Date().getMonth() + 1).toString().padStart(2, '0')}`;
     const db = loadDatabase();
-    const assignments = ((db.assignments && db.assignments[month]) || []).filter(
+    const rawAssignments = ((db.assignments && db.assignments[month]) || []).filter(
       (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
     );
+    const assignments = appendHistoryLeaveTdyToList(db, rawAssignments, [month]);
     res.json({ monthKey: month, assignments });
   });
 
@@ -1255,17 +1350,18 @@ async function startServer() {
     const year = parseInt((req.query.year as string) || `${new Date().getFullYear()}`, 10);
     const db = loadDatabase();
     const prefix = `${year}-`;
-    const assignments: any[] = [];
+    const rawAssignments: any[] = [];
     if (db.assignments) {
       Object.keys(db.assignments).forEach((mKey) => {
         if (mKey.startsWith(prefix)) {
           const monthAss = (db.assignments[mKey] || []).filter(
             (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
           );
-          assignments.push(...monthAss);
+          rawAssignments.push(...monthAss);
         }
       });
     }
+    const assignments = appendHistoryLeaveTdyToList(db, rawAssignments, [prefix]);
     res.json({ year, assignments });
   });
 
@@ -1417,9 +1513,11 @@ async function startServer() {
           (a.dutyCode === 'AIRPORT' || a.dutyCode === 'ATT' || a.dutyCode === 'AIRFIELD_DUTY')
         );
       } else {
+        const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
         index = list.findIndex((a: any) =>
           matchAirmanId(a.airmanId) && a.date === dateStr &&
           !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night')) &&
+          isDepCode(a.dutyCode) === isDepCode(dutyCode) &&
           (a.disposalScope || 'ALL') === scope
         );
       }
