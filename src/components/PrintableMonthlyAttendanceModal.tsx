@@ -253,6 +253,9 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
     }
 
     if (dutyCode === 'IDAC' || dutyCode === 'IDA') {
+      if ((ass?.notes || '').includes('IDAC A+C')) {
+        return { label: 'IDAC\n"A+C"', type: 'DUTY' };
+      }
       const s = (ass?.idaShift || '').toLowerCase();
       const shiftCode = s.startsWith('m') ? 'IDAC\n"A"' : s.startsWith('a') ? 'IDAC\n"B"' : 'IDAC\n"C"';
       return { label: shiftCode, type: 'DUTY' };

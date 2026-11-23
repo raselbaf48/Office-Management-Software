@@ -54,6 +54,23 @@ export function addAssignmentToMap(assignmentMap: Map<string, DutyAssignment>, a
       const existingIsDep = isDeployment(existing.dutyCode);
       const newIsDep = isDeployment(ass.dutyCode);
       
+      const isIdacCode = (code: string) => ['IDAC', 'IDA', 'IDAC CENTER', 'IDA CENTER'].includes(String(code || '').toUpperCase().trim());
+      if (isIdacCode(existing.dutyCode) && isIdacCode(ass.dutyCode)) {
+        const s1 = (existing.idaShift || '').toLowerCase();
+        const s2 = (ass.idaShift || '').toLowerCase();
+        const hasMorning = s1 === 'morning' || s2 === 'morning' || !s1 || !s2 || (existing.notes || '').includes('IDAC A+C');
+        const hasNight = s1 === 'night' || s2 === 'night' || (existing.notes || '').includes('IDAC A+C');
+        if (hasMorning && hasNight && s1 !== s2) {
+          assignmentMap.set(key, {
+            ...ass,
+            dutyCode: 'IDAC',
+            idaShift: 'Night',
+            notes: 'IDAC A+C',
+          });
+          return;
+        }
+      }
+
       // If the existing is a deployment and the new one is not, the new one overwrites it.
       if (existingIsDep && !newIsDep) {
         assignmentMap.set(key, ass);

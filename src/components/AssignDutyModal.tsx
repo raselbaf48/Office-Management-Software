@@ -1330,15 +1330,32 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               });
             }
             if (isIdac) {
+              const targetShift = shiftToUse || 'Morning';
+              filtered = filtered.filter((a) => {
+                if (!isSameAirman(a.airmanId, airman.id)) return true;
+                if (isDepCode(a.dutyCode)) return true;
+                if (['IDAC', 'IDA'].includes(String(a.dutyCode || ''))) {
+                  const existingShift = resolveCanonicalIdacShift(a);
+                  if (
+                    (targetShift === 'Morning' && existingShift === 'Night') ||
+                    (targetShift === 'Night' && existingShift === 'Morning')
+                  ) {
+                    return true;
+                  }
+                  return false;
+                }
+                if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
+                  return true;
+                }
+                return false;
+              });
+            } else {
               filtered = filtered.filter(
                 (a) =>
-                  !(
-                    isSameAirman(a.airmanId, airman.id) &&
-                    ['IDAC', 'IDA', 'DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))
-                  )
+                  !isSameAirman(a.airmanId, airman.id) ||
+                  isDepCode(a.dutyCode) ||
+                  ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
               );
-            } else {
-              filtered = filtered.filter((a) => !isSameAirman(a.airmanId, airman.id) || isDepCode(a.dutyCode));
             }
             return [...filtered, newAssignment];
           };
@@ -1361,9 +1378,35 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                 });
               }
               if (isIdac) {
-                list = list.filter((a) => !(isSameAirman(a.airmanId, airman.id) && a.date === dStr && (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA')));
+                const targetShift = shiftToUse || 'Morning';
+                list = list.filter((a) => {
+                  if (!isSameAirman(a.airmanId, airman.id) || a.date !== dStr) return true;
+                  if (isDepCode(a.dutyCode)) return true;
+                  if (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') {
+                    const existingShift = resolveCanonicalIdacShift(a);
+                    if (
+                      (targetShift === 'Morning' && existingShift === 'Night') ||
+                      (targetShift === 'Night' && existingShift === 'Morning')
+                    ) {
+                      return true;
+                    }
+                    return false;
+                  }
+                  if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
+                    return true;
+                  }
+                  return false;
+                });
               } else {
-                list = list.filter((a) => !(isSameAirman(a.airmanId, airman.id) && a.date === dStr && !isDepCode(a.dutyCode)));
+                list = list.filter(
+                  (a) =>
+                    !(
+                      isSameAirman(a.airmanId, airman.id) &&
+                      a.date === dStr &&
+                      !isDepCode(a.dutyCode) &&
+                      !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
+                    )
+                );
               }
               list.push({ ...newAssignment, date: dStr });
               localDb.db.assignments[mKey] = list;
@@ -1621,7 +1664,14 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       if (prevAssignments.some((a) => a.dutyCode === 'LEAVE')) return null;
 
       const yestAss =
-        prevAssignments.find((a) => !isDeploymentCode(a.dutyCode) && !isGenericStr(a.dutyCode)) || prevAssignments[0];
+        prevAssignments.find(
+          (a) =>
+            !isDeploymentCode(a.dutyCode) &&
+            !isGenericStr(a.dutyCode) &&
+            ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') ? resolveCanonicalIdacShift(a) === 'Night' : true)
+        ) ||
+        prevAssignments.find((a) => !isDeploymentCode(a.dutyCode) && !isGenericStr(a.dutyCode)) ||
+        prevAssignments[0];
       if (!yestAss || isDeploymentCode(yestAss.dutyCode)) return null;
 
       const isHeavy = (() => {
@@ -2352,15 +2402,22 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                         }}
                         className={`p-2 rounded-xl border text-left transition-all relative flex flex-col justify-start cursor-pointer ${
                           isSelected
-                            ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-500 shadow-sm ring-2 ring-emerald-500/30'
+                            ? 'bg-teal-600 dark:bg-teal-600 text-white border-white shadow-md duty-box-selected'
                             : 'bg-white dark:bg-slate-800/90 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700/80 hover:border-emerald-400 hover:shadow-xs'
                         } ${quotaBorderAlertClass}`}
                       >
                         {/* Header: Duty Name & Ratio Badge (e.g. 3/3) */}
-                        <div className="flex items-center justify-between gap-1 border-b border-slate-100 dark:border-slate-700/60 pb-1.5 mb-1.5">
-                          <span className={`text-[11px] font-black truncate leading-tight flex items-center gap-1 ${isSelected ? 'text-emerald-950 dark:text-emerald-100' : 'text-slate-900 dark:text-slate-100'}`} title={displayName}>
+                        <div className={`flex items-center justify-between gap-1 border-b pb-1.5 mb-1.5 ${
+                          isSelected ? 'border-teal-400/50' : 'border-slate-100 dark:border-slate-700/60'
+                        }`}>
+                          <span className={`text-[11px] font-black truncate leading-tight flex items-center gap-1 ${isSelected ? 'text-white' : 'text-slate-900 dark:text-slate-100'}`} title={displayName}>
+                            {isSelected && (
+                              <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-white text-teal-700 shrink-0 shadow-2xs">
+                                <Check className="w-2.5 h-2.5 stroke-[3.5]" />
+                              </span>
+                            )}
                             {isDutyLocked && isSelected && (
-                              <Lock className="w-3 h-3 text-amber-500 stroke-[2.5] shrink-0" />
+                              <Lock className="w-3 h-3 text-amber-300 stroke-[2.5] shrink-0" />
                             )}
                             <span className="truncate">{displayName}</span>
                           </span>
@@ -2369,9 +2426,11 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                               <span
                                 className={`text-[9.5px] font-black px-1.5 py-0.2 rounded-full ${
                                   isOverQuota
-                                    ? 'bg-rose-600 text-white'
+                                    ? 'bg-rose-600 text-white ring-1 ring-white/40'
                                     : isUnderQuota
-                                    ? 'bg-amber-500 text-slate-950'
+                                    ? 'bg-amber-400 text-slate-950 ring-1 ring-white/40'
+                                    : isSelected
+                                    ? 'bg-white text-teal-900 shadow-2xs'
                                     : 'bg-emerald-600 text-white shadow-2xs'
                                 }`}
                               >
@@ -2379,7 +2438,11 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                               </span>
                             ) : (
                               <span className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded-full ${
-                                isOverQuota ? 'bg-rose-600 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                isOverQuota
+                                  ? 'bg-rose-600 text-white'
+                                  : isSelected
+                                  ? 'bg-white text-teal-900'
+                                  : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
                               }`}>
                                 {assignedList.length}
                               </span>
@@ -2390,21 +2453,25 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                         {/* Detailed Airmen List */}
                         <div className="space-y-1">
                           {assignedList.length === 0 ? (
-                            <p className="text-[10px] text-slate-400 dark:text-slate-500 italic py-0.5">
+                            <p className={`text-[10px] italic py-0.5 ${isSelected ? 'text-teal-100' : 'text-slate-400 dark:text-slate-500'}`}>
                               — None
                             </p>
                           ) : (
                             assignedList.map((item, idx) => (
                               <div
                                 key={`${item.airman.id}-${item.assignment.dutyCode}-${item.assignment.idaShift || ''}-${idx}`}
-                                className="text-[10.5px] leading-tight font-semibold text-slate-800 dark:text-slate-200 truncate bg-slate-50/80 dark:bg-slate-900/60 px-1.5 py-0.5 rounded border border-slate-200/50 dark:border-slate-700/50 flex items-center justify-between group"
+                                className={`text-[10.5px] leading-tight font-semibold truncate px-1.5 py-0.5 rounded border flex items-center justify-between group ${
+                                  isSelected
+                                    ? 'bg-teal-800/80 text-white border-teal-400/40'
+                                    : 'text-slate-800 dark:text-slate-200 bg-slate-50/80 dark:bg-slate-900/60 border-slate-200/50 dark:border-slate-700/50'
+                                }`}
                                 title={`${formatAirmanName(item.airman.rank)} ${item.airman.name}`}
                               >
                                 <div className="truncate flex items-center">
-                                  <span className="text-slate-400 dark:text-slate-500 font-bold mr-1">{idx + 1}.</span>
+                                  <span className={`font-bold mr-1 ${isSelected ? 'text-teal-200' : 'text-slate-400 dark:text-slate-500'}`}>{idx + 1}.</span>
                                   <span className="truncate">{formatAirmanName(item.airman.rank)} {item.airman.name}</span>
                                   {(item.assignment.dutyCode === 'IDAC' || item.assignment.dutyCode === 'IDA') && item.assignment.idaShift && (
-                                    <span className="ml-1 text-[9.5px] text-teal-600 dark:text-teal-400 font-bold">
+                                    <span className={`ml-1 text-[9.5px] font-bold ${isSelected ? 'text-amber-300' : 'text-teal-600 dark:text-teal-400'}`}>
                                       ({item.assignment.idaShift[0]})
                                     </span>
                                   )}
@@ -2419,7 +2486,11 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                                       : undefined;
                                     handleToggleAssignAirman(item.airman, 'unassign', dt.code, shiftForRemove);
                                   }}
-                                  className="text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 ml-1 p-0.5 rounded hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors shrink-0 cursor-pointer"
+                                  className={`ml-1 p-0.5 rounded transition-colors shrink-0 cursor-pointer ${
+                                    isSelected
+                                      ? 'text-teal-200 hover:text-white hover:bg-rose-500/80'
+                                      : 'text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50'
+                                  }`}
                                   title={`Deselect ${formatAirmanName(item.airman.rank)} ${item.airman.name}`}
                                 >
                                   <X className="w-3 h-3" />
@@ -2485,7 +2556,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                   </p>
                 </div>
               ) : (
-                <div className={`grid gap-2 ${availableIdaShifts.length === 1 ? 'grid-cols-1' : availableIdaShifts.length === 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-3'}`}>
+                <div className={`grid gap-2.5 ${availableIdaShifts.length === 1 ? 'grid-cols-1' : availableIdaShifts.length === 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-3'}`}>
                   {availableIdaShifts.map((s) => {
                     const shiftCardScope: FlightName | 'All' =
                       isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : 'All';
@@ -2539,12 +2610,17 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                         }}
                         className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-start ${
                           isShiftSelected
-                            ? 'bg-teal-600 text-white border-teal-700 shadow-md ring-2 ring-teal-400/40'
+                            ? 'bg-teal-600 text-white border-white shadow-md duty-box-selected'
                             : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-teal-200 dark:border-teal-900/80 hover:border-teal-400'
                         } ${shiftBorderAlertClass}`}
                       >
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-black text-xs flex items-center gap-1">
+                          <span className="font-black text-xs flex items-center gap-1.5">
+                            {isShiftSelected && (
+                              <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-white text-teal-700 shrink-0 shadow-2xs">
+                                <Check className="w-3 h-3 stroke-[3.5]" />
+                              </span>
+                            )}
                             {isDutyLocked && isShiftSelected && (
                               <Lock className="w-3 h-3 text-amber-300 stroke-[2.5] shrink-0" />
                             )}
@@ -2553,9 +2629,9 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                           <span
                             className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
                               isShiftOver
-                                ? 'bg-rose-600 text-white shadow-xs'
+                                ? 'bg-rose-600 text-white shadow-xs ring-1 ring-white/40'
                                 : isShiftUnder
-                                ? 'bg-amber-400 text-slate-950 shadow-xs'
+                                ? 'bg-amber-400 text-slate-950 shadow-xs ring-1 ring-white/40'
                                 : isShiftSelected
                                 ? 'bg-white text-teal-900'
                                 : 'bg-teal-100 dark:bg-teal-900 text-teal-800 dark:text-teal-200'

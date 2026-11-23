@@ -1387,16 +1387,26 @@ async function startServer() {
           (a.disposalScope || 'ALL') === scope
         );
       } else if (isIdac) {
+        const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
         if (idaShift === 'Night') {
-          index = list.findIndex((a: any) => 
+          index = list.findIndex((a: any) =>
             matchAirmanId(a.airmanId) && a.date === dateStr &&
             (a.disposalScope || 'ALL') === 'ALL' &&
-            ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night'))
+            (a.dutyCode === 'ON_PARADE' ||
+              ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
+                (a.idaShift === 'Night' || a.shift === 'Night' || a.idaShift === 'Afternoon' || a.shift === 'Afternoon')))
+          );
+        } else if (idaShift === 'Afternoon') {
+          index = list.findIndex((a: any) =>
+            matchAirmanId(a.airmanId) && a.date === dateStr &&
+            (a.disposalScope || 'ALL') === 'ALL' &&
+            !isDepCode(a.dutyCode)
           );
         } else {
           index = list.findIndex((a: any) =>
             matchAirmanId(a.airmanId) && a.date === dateStr &&
             (a.disposalScope || 'ALL') === 'ALL' &&
+            !isDepCode(a.dutyCode) &&
             !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (a.idaShift === 'Night' || a.shift === 'Night'))
           );
         }

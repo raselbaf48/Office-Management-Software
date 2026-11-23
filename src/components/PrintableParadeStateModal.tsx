@@ -1149,7 +1149,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
        const isIdac = codeUpper === 'IDAC' || codeUpper === 'IDA' || notesLower.includes('idac') || notesLower.includes('ida center');
        const isIdacNt = isIdac && (
          shiftLower === 'night' || shiftLower === 'c' || shiftLower === 'nt' ||
-         notesLower.includes('night') || notesLower.includes('nt') || notesLower.includes('shift c') || notesLower.includes('"c"')
+         (!shiftLower && (notesLower.includes('night') || notesLower.includes('nt') || notesLower.includes('shift c') || notesLower.includes('"c"')))
        );
        const isPtIdacA = isPtDocument && isIdac && !isIdacNt && (
          shiftLower === 'morning' || shiftLower === 'a' || !idaShift ||
@@ -1598,7 +1598,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const idaAft = pList.filter((s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Afternoon');
  const idaNight = pList.filter(
    (s) =>
-     (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Night') ||
+     (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && (s.idaShift?.trim() === 'Night' || s.notes?.includes('IDAC Night'))) ||
      ((s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF') && s.idaShift?.trim() === 'Night')
  );
  const dutyOff = pList.filter((s) => s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF');

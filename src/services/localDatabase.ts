@@ -3872,13 +3872,18 @@ export class LocalDatabaseEngine {
           (a.disposalScope || 'ALL') === scope
       );
     } else if (assignment.dutyCode === 'IDAC' || assignment.dutyCode === 'IDA') {
-      index = list.findIndex(
-        (a) =>
-          this.isSameAirmanId(a.airmanId, assignment.airmanId) &&
-          a.date === assignment.date &&
-          (a.disposalScope || 'ALL') === 'ALL' &&
-          (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA' || a.dutyCode === 'ON_PARADE')
-      );
+      const targetShift = resolveCanonicalIdacShift(assignment);
+      index = list.findIndex((a) => {
+        if (!this.isSameAirmanId(a.airmanId, assignment.airmanId) || a.date !== assignment.date || (a.disposalScope || 'ALL') !== 'ALL') return false;
+        if (a.dutyCode === 'ON_PARADE') return true;
+        if (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') {
+          const existingShift = resolveCanonicalIdacShift(a);
+          if (targetShift === 'Night') return existingShift === 'Night' || existingShift === 'Afternoon';
+          if (targetShift === 'Morning') return existingShift !== 'Night';
+          return true;
+        }
+        return false;
+      });
     } else {
       index = list.findIndex(
         (a) =>
@@ -4004,13 +4009,18 @@ export class LocalDatabaseEngine {
             (a.disposalScope || 'ALL') === scope
         );
       } else if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
-        index = list.findIndex(
-          (a) =>
-            this.isSameAirmanId(a.airmanId, airmanId) &&
-            a.date === dateStr &&
-            (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA' || a.dutyCode === 'ON_PARADE') &&
-            (a.disposalScope || 'ALL') === scope
-        );
+        const targetShift = resolveCanonicalIdacShift({ dutyCode, idaShift, notes });
+        index = list.findIndex((a) => {
+          if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== dateStr || (a.disposalScope || 'ALL') !== scope) return false;
+          if (a.dutyCode === 'ON_PARADE') return true;
+          if (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') {
+            const existingShift = resolveCanonicalIdacShift(a);
+            if (targetShift === 'Night') return existingShift === 'Night' || existingShift === 'Afternoon';
+            if (targetShift === 'Morning') return existingShift !== 'Night';
+            return true;
+          }
+          return false;
+        });
       } else {
         index = list.findIndex((a) => this.isSameAirmanId(a.airmanId, airmanId) && a.date === dateStr && !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night') && isDep(a.dutyCode) === isDep(dutyCode) && (a.disposalScope || 'ALL') === scope);
       }
@@ -4054,13 +4064,19 @@ export class LocalDatabaseEngine {
       } else {
         list.push(assignment);
       }
-      // Remove any other lingering duplicate IDAC records for this airman on this date within the same scope
+      // Remove any other lingering duplicate IDAC records for this airman on this date within the same scope (allowing Morning A and Night C to coexist)
       if (scope === 'ALL' && ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
-        this.db.assignments[monthKey] = list.filter(
-          (a, idx) =>
-            idx === (index >= 0 ? index : list.length - 1) ||
-            !(this.isSameAirmanId(a.airmanId, airmanId) && a.date === dateStr && (a.disposalScope || 'ALL') === 'ALL' && (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA'))
-        );
+        const targetShift = resolveCanonicalIdacShift({ dutyCode, idaShift, notes });
+        this.db.assignments[monthKey] = list.filter((a, idx) => {
+          if (idx === (index >= 0 ? index : list.length - 1)) return true;
+          if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== dateStr || (a.disposalScope || 'ALL') !== 'ALL') return true;
+          if (a.dutyCode !== 'IDAC' && a.dutyCode !== 'IDA') return true;
+          const existingShift = resolveCanonicalIdacShift(a);
+          if ((targetShift === 'Morning' && existingShift === 'Night') || (targetShift === 'Night' && existingShift === 'Morning')) {
+            return true;
+          }
+          return false;
+        });
       }
     }
 
@@ -4142,10 +4158,18 @@ export class LocalDatabaseEngine {
         let index = -1;
         const isDep = (code: any) => code && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(code);
         if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
-          index = list.findIndex((a) => this.isSameAirmanId(a.airmanId, airmanId) && a.date === dateStr && (
-            a.dutyCode === 'IDAC' || a.dutyCode === 'IDA' ||
-            ['ON_PARADE', 'DUTY', 'DUTY_ON', 'IDAC CENTER', 'IDA CENTER'].includes(a.dutyCode as any)
-          ));
+          const targetShift = resolveCanonicalIdacShift({ dutyCode, idaShift, notes });
+          index = list.findIndex((a) => {
+            if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== dateStr) return false;
+            if (['ON_PARADE', 'DUTY', 'DUTY_ON'].includes(a.dutyCode as any)) return true;
+            if (['IDAC', 'IDA', 'IDAC CENTER', 'IDA CENTER'].includes(a.dutyCode as any)) {
+              const existingShift = resolveCanonicalIdacShift(a);
+              if (targetShift === 'Night') return existingShift === 'Night' || existingShift === 'Afternoon';
+              if (targetShift === 'Morning') return existingShift !== 'Night';
+              return true;
+            }
+            return false;
+          });
         } else {
           const scope = disposalScope || 'ALL';
           index = list.findIndex((a) => this.isSameAirmanId(a.airmanId, airmanId) && a.date === dateStr && !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === 'Night') && (a.disposalScope || 'ALL') === scope && isDep(a.dutyCode) === isDep(dutyCode));
@@ -5286,10 +5310,19 @@ export class LocalDatabaseEngine {
         otherOff++;
       }
 
-      if ((['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) && idaShift === 'Night') {
+      const alsoHasIdacNight = dateAssignments.some(
+        (a) =>
+          this.isSameAirmanId(a.airmanId, airman.id) &&
+          (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
+          resolveCanonicalIdacShift(a) === 'Night'
+      );
+      if (
+        ((['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) && idaShift === 'Night') ||
+        alsoHasIdacNight
+      ) {
         const shiftNote = 'IDAC Night';
         if (!notes) notes = shiftNote;
-        else if (!notes.includes('IDAC')) notes = `${shiftNote} - ${notes}`;
+        else if (!notes.includes('IDAC Night')) notes = `${shiftNote} - ${notes}`;
       }
 
       return {

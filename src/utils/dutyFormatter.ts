@@ -46,10 +46,13 @@ export function resolveConfiguredDutyBaseShortName(
     nameLower.includes('ida center')
   ) {
     let targetShift: 'morning' | 'afternoon' | 'night' = 'morning';
-    if (
-      shiftLower === 'night' ||
-      shiftLower === 'nt' ||
-      shiftLower === 'c' ||
+    if (shiftLower === 'night' || shiftLower === 'nt' || shiftLower === 'c') {
+      targetShift = 'night';
+    } else if (shiftLower === 'afternoon' || shiftLower === 'aft' || shiftLower === 'b') {
+      targetShift = 'afternoon';
+    } else if (shiftLower === 'morning' || shiftLower === 'm' || shiftLower === 'a') {
+      targetShift = 'morning';
+    } else if (
       notesLower.includes('night') ||
       notesLower.includes('"nt"') ||
       notesLower.includes(' nt') ||
@@ -59,9 +62,6 @@ export function resolveConfiguredDutyBaseShortName(
     ) {
       targetShift = 'night';
     } else if (
-      shiftLower === 'afternoon' ||
-      shiftLower === 'aft' ||
-      shiftLower === 'b' ||
       notesLower.includes('afternoon') ||
       notesLower.includes('aft') ||
       notesLower.includes('"b"') ||

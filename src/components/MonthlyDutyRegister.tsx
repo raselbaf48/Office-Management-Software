@@ -1705,8 +1705,12 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                         } else if (dutyCode === 'AIRPORT' || (dutyCode as any) === 'APT' || (dutyCode as any) === 'AIRFIELD') {
                           displayLabel = 'AFLD';
                         } else if (dutyCode === 'IDAC' || dutyCode === 'IDA') {
-                          const s = (ass?.idaShift || '').toLowerCase();
-                          displayLabel = s.startsWith('m') ? 'IDAC "A"' : s.startsWith('a') ? 'IDAC "B"' : 'IDAC "C"';
+                          if ((ass?.notes || '').includes('IDAC A+C')) {
+                            displayLabel = 'IDAC "A+C"';
+                          } else {
+                            const s = (ass?.idaShift || '').toLowerCase();
+                            displayLabel = s.startsWith('m') ? 'IDAC "A"' : s.startsWith('a') ? 'IDAC "B"' : 'IDAC "C"';
+                          }
                         } else if (isOtherDisposal) {
                           // Resolve specific disposal name (e.g., Course, Exam, Driving, etc.)
                           const cleanNote = ass?.notes?.trim();
@@ -1979,13 +1983,15 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                           onClick={() => setBulkDutyCode(dt.code)}
                           className={`p-2 rounded-xl text-xs font-bold text-left border transition-all flex flex-col justify-between space-y-1 ${quotaGlowClass} ${
                             isSelected
-                              ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-xs bg-emerald-50/50 dark:bg-emerald-950/30'
+                              ? 'bg-teal-600 dark:bg-teal-600 text-white border-white shadow-md duty-box-selected'
                               : 'bg-white dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-slate-300'
                           }`}
                         >
                           <div className="flex items-center justify-between w-full">
-                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${dt.badgeBg} ${dt.badgeText}`}>
-                              {dt.shortName}
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                              isSelected ? 'bg-white text-teal-800' : `${dt.badgeBg} ${dt.badgeText}`
+                            }`}>
+                              {isSelected ? `✓ ${dt.shortName}` : dt.shortName}
                             </span>
 
                             {/* Required Count / Ratio Badge */}
@@ -1993,16 +1999,18 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                               <span
                                 className={`text-[10px] font-black px-1.5 py-0.5 rounded ${
                                   isOverQuota
-                                    ? 'bg-red-100 dark:bg-red-900/60 text-red-800 dark:text-red-200 border border-red-400 dark:border-red-600'
+                                    ? 'bg-rose-600 text-white border border-rose-300'
                                     : isUnderQuota
-                                    ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-400 dark:border-amber-600'
+                                    ? 'bg-amber-400 text-slate-950 border border-amber-300'
+                                    : isSelected
+                                    ? 'bg-white text-teal-900'
                                     : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700'
                                 }`}
                               >
                                 {reqCount} No.
                               </span>
                             ) : (
-                              <span className="text-[9px] text-slate-400 font-normal">
+                              <span className={`text-[9px] font-normal ${isSelected ? 'text-teal-100' : 'text-slate-400'}`}>
                                 Optional
                               </span>
                             )}
@@ -2012,7 +2020,9 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                             <span className="truncate text-[11px] font-bold">{dt.name}</span>
                             {reqCount > 0 && (
                               <span className={`text-[9px] font-extrabold ${
-                                isOverQuota
+                                isSelected
+                                  ? 'text-white'
+                                  : isOverQuota
                                   ? 'text-red-600 dark:text-red-400'
                                   : isUnderQuota
                                   ? 'text-amber-600 dark:text-amber-400'
