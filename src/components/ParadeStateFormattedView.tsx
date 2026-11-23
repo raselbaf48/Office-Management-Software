@@ -1923,15 +1923,23 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  className="mt-2 pt-1 text-[11px]"
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
- <div className="flex flex-wrap items-start justify-between gap-6">
+ {(() => {
+   const numOnParadeSubCols = onPtList.length > 30 ? 3 : onPtList.length > 15 ? 2 : 1;
+   const hasColA = bakeBiteList.length > 0 || tdyList.length > 0 || canteenList.length > 0 || leaveList.length > 0 || essnList.length > 0;
+   const hasColB = cmhList.length > 0 || sickReportList.length > 0 || drillCatCList.length > 0 || receptionList.length > 0 || gamesList.length > 0;
+   const activeOtherDisposalCols = (hasColA ? 1 : 0) + (hasColB ? 1 : 0);
+   const canPlaceDutyOffBeside = dutyOnList.length > 0 && dutyOffList.length > 0 && (numOnParadeSubCols + activeOtherDisposalCols <= 4);
+
+   return (
+ <div className="flex flex-wrap items-start justify-start gap-8">
  {/* 1ST COLUMN: ON PARADE / ON PT (1 TO 15 ON LEFT, 16+ ON RIGHT, NIL IF EMPTY) */}
- <div className="min-w-[240px] flex-shrink-0">
+ <div className="min-w-[200px] flex-shrink-0 pr-3">
  <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1.5 capitalize tracking-wide">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </h3>
 
  {onPtList.length > 0 ? (
- <div className="flex items-start space-x-6">
+ <div className="flex items-start gap-8">
  {/* Left side: 1 to 15 */}
  <ol className="space-y-0.5 font-normal leading-tight">
  {onPtList.slice(0, 15).map((item, idx) => (
@@ -1970,10 +1978,10 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  
  {/* DISPOSALS (ONLY SHOWN IF NOT EMPTY / >0 AIRMEN, NO EMPTY HEADINGS) */}
- <div className="flex-1 flex flex-wrap gap-5">
+ <div className="flex-1 flex flex-wrap items-start justify-start gap-7">
  {/* DISPOSAL COL A */}
- {(bakeBiteList.length > 0 || tdyList.length > 0 || canteenList.length > 0 || leaveList.length > 0 || essnList.length > 0) && (
- <div className="w-48 flex flex-col space-y-3">
+ {hasColA && (
+ <div className="min-w-[130px] max-w-[180px] flex flex-col space-y-3">
  {bakeBiteList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Bake & Bite</h3>
@@ -2010,8 +2018,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  )}
 
  {/* DISPOSAL COL B */}
- {(cmhList.length > 0 || sickReportList.length > 0 || drillCatCList.length > 0 || receptionList.length > 0 || gamesList.length > 0) && (
- <div className="w-48 flex flex-col space-y-3">
+ {hasColB && (
+ <div className="min-w-[135px] max-w-[185px] flex flex-col space-y-3">
  {cmhList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">
@@ -2047,16 +2055,16 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </div>
  )}
 
- {/* DISPOSAL COL C */}
- {(dutyOnList.length > 0 || dutyOffList.length > 0 || Object.keys(customDisposalsMap).length > 0) && (
- <div className="w-48 flex flex-col space-y-3">
+ {/* DISPOSAL COL C: DUTY ON (+ DUTY OFF BELOW ONLY IF NO HORIZONTAL ROOM) */}
+ {(dutyOnList.length > 0 || (!canPlaceDutyOffBeside && dutyOffList.length > 0) || Object.keys(customDisposalsMap).length > 0) && (
+ <div className="min-w-[175px] flex flex-col space-y-3">
  {dutyOnList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty On</h3>
  {renderDisposalAirmenList(dutyOnList, 'DUTY_ON', 'Duty On')}
  </div>
  )}
- {dutyOffList.length > 0 && (
+ {!canPlaceDutyOffBeside && dutyOffList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty Off</h3>
  {renderDisposalAirmenList(dutyOffList, 'DUTY_OFF', 'Duty Off')}
@@ -2077,8 +2085,20 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  })}
  </div>
  )}
+
+ {/* DISPOSAL COL D: DUTY OFF BESIDE DUTY ON WHEN HORIZONTAL SPACE IS AVAILABLE */}
+ {canPlaceDutyOffBeside && dutyOffList.length > 0 && (
+ <div className="min-w-[160px] flex flex-col space-y-3">
+ <div>
+ <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty Off</h3>
+ {renderDisposalAirmenList(dutyOffList, 'DUTY_OFF', 'Duty Off')}
  </div>
  </div>
+ )}
+ </div>
+ </div>
+   );
+ })()}
  </div>
  
               {/* SPACER ROW: 0.9 INCH HEIGHT TO PROVIDE AMPLE SIGNATURE HEADROOM */}

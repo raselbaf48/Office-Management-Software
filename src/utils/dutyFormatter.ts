@@ -269,11 +269,11 @@ export function formatDutyOnShortName(
   // Check if this is a configured duty from Duty Settings (e.g. Sy, BTF, NTF, Airfield, Halishahar, Esct, custom duty)
   const configuredBaseShort = resolveConfiguredDutyBaseShortName(dutyCode, idaShift, notes, dutyName);
   if (configuredBaseShort) {
-    // User rule: "State e Duty on thakle pase Duty lekha thakbe Sy Duty bt duty off thakle duty lekha thakbe na Sy Off"
-    if (/duty$/i.test(configuredBaseShort)) {
-      return configuredBaseShort;
+    // User rule: In Duty On, only "Sy" gets "Duty" appended ("Sy Duty"), while all other duties (BTF, NTF, Airfield, IDAC "A", IDAC "B", Halishahar, Esct, etc.) show just their short name without "Duty"
+    if (/^(sy|gd)$/i.test(configuredBaseShort.trim())) {
+      return 'Sy Duty';
     }
-    return `${configuredBaseShort} Duty`;
+    return configuredBaseShort;
   }
 
   // Non-duty disposals (Canteen, Orderly Room, UWO, Bake & Bite, TDY, Leave)
@@ -326,39 +326,39 @@ export function formatDutyOnShortName(
 
   if (isRawCode(code) || isRawCode(dutyName)) {
     const rawTarget = isRawCode(code) ? code : (dutyName || '');
-    if (rawTarget.includes('1794394')) return 'Esct Duty';
+    if (rawTarget.includes('1794394')) return 'Esct';
     const customMatch = getCustomDuties().find(d => d.code === rawTarget);
     const resolvedName = customMatch?.shortName ||
       getCustomDutyName(rawTarget) ||
       DUTY_TYPE_MAP.get(rawTarget as any)?.name ||
       customMatch?.name;
     if (resolvedName && !isRawCode(resolvedName)) {
-      if (resolvedName.toLowerCase().includes('escort')) return 'Esct Duty';
+      if (resolvedName.toLowerCase().includes('escort')) return 'Esct';
       const base = resolvedName.replace(/\s+(duty|off)$/i, '').trim() || resolvedName;
-      return `${base} Duty`;
+      return /^(sy|gd)$/i.test(base) ? 'Sy Duty' : base;
     }
   }
 
   // Custom fallback: clean any internal "imported" tag and avoid returning generic "DUTY" or raw codes
   if (dutyName && !isRawCode(dutyName) && !dutyName.toLowerCase().includes('imported') && !isGenericDuty(dutyName)) {
-    if (dutyName.toLowerCase().includes('escort')) return 'Esct Duty';
+    if (dutyName.toLowerCase().includes('escort')) return 'Esct';
     const base = dutyName.replace(/\s+(duty|off)$/i, '').trim() || dutyName;
-    return `${base} Duty`;
+    return /^(sy|gd)$/i.test(base) ? 'Sy Duty' : base;
   }
   if (notesStr && !isRawCode(notesStr) && !notesLower.includes('imported') && !isGenericDuty(notesStr)) {
-    if (notesLower.includes('escort')) return 'Esct Duty';
+    if (notesLower.includes('escort')) return 'Esct';
     const base = notesStr.replace(/\s+(duty|off)$/i, '').trim() || notesStr;
-    return `${base} Duty`;
+    return /^(sy|gd)$/i.test(base) ? 'Sy Duty' : base;
   }
 
   if (isRawCode(code)) {
-    return code.includes('1794394') ? 'Esct Duty' : 'Special Duty';
+    return code.includes('1794394') ? 'Esct' : 'Special Duty';
   }
 
   const isBaseline = ['ON_PARADE', 'PT', 'PT_PARADE', 'P', 'PRESENT'].includes(code);
   if (code && !isGenericDuty(code) && !isBaseline) {
     const base = code.replace(/\s+(duty|off)$/i, '').trim() || code;
-    return `${base} Duty`;
+    return /^(sy|gd)$/i.test(base) ? 'Sy Duty' : base;
   }
   return 'Sy Duty';
 }

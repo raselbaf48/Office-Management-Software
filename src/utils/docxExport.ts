@@ -819,7 +819,7 @@ export async function exportParadeStateSingleDocx(
             new TextRun({
               text: `${idx + 1}. ${item.displayName}`,
               font: 'Arial',
-              size: 24,
+              size: 22,
             }),
           ],
         })
@@ -847,6 +847,9 @@ export async function exportParadeStateSingleDocx(
   const dutyOnDisplay = dutyOn.map((item) => {
     let dutyNote = item.note && !item.note.toLowerCase().includes('imported') ? item.note : 'Sy Duty';
     if (dutyNote === 'GD' || dutyNote === 'SY' || dutyNote === 'Sy') dutyNote = 'Sy Duty';
+    if (!/^(sy\s+duty|office\s+duty|special\s+duty)$/i.test(dutyNote.trim())) {
+      dutyNote = dutyNote.replace(/\s+duty$/i, '').trim();
+    }
     return {
       displayName: `${formatRank(item.airman.rank)} ${formatRunningLetter(item.airman.name)} - ${dutyNote}`,
     };
@@ -856,6 +859,7 @@ export async function exportParadeStateSingleDocx(
   const onParade1To15 = onParade.slice(0, 15);
   const onParade16To30 = onParade.slice(15, 30);
   const onParade31Plus = onParade.slice(30, 45);
+  const numOnParadeCols = onParade.length > 30 ? 3 : onParade.length > 15 ? 2 : 1;
 
   const col1Children: (Paragraph | Table)[] = [
     new Paragraph({
@@ -897,73 +901,84 @@ export async function exportParadeStateSingleDocx(
   } else {
     const maxRows = Math.max(onParade1To15.length, onParade16To30.length, onParade31Plus.length);
     const innerRows: TableRow[] = [];
+    const subColWidth = 1920; // Increased from 1680 DXA so sub-columns have clear horizontal breathing room
     for (let i = 0; i < maxRows; i++) {
       const col1Item = onParade1To15[i];
       const col2Item = onParade16To30[i];
       const col3Item = onParade31Plus[i];
-      
+
       const col1Text = col1Item ? `${i + 1}. ${formatRank(col1Item.rank)} ${formatRunningLetter(col1Item.name)}` : '';
       const col2Text = col2Item ? `${16 + i}. ${formatRank(col2Item.rank)} ${formatRunningLetter(col2Item.name)}` : '';
       const col3Text = col3Item ? `${31 + i}. ${formatRank(col3Item.rank)} ${formatRunningLetter(col3Item.name)}` : '';
 
-      innerRows.push(
-        new TableRow({ cantSplit: true,
+      const rowCells: TableCell[] = [
+        new TableCell({
+          width: { size: subColWidth, type: WidthType.DXA },
+          borders: invisibleBorders,
+          margins: { top: 0, bottom: 20, left: 0, right: 160 },
           children: [
-            new TableCell({
-              width: { size: 1680, type: WidthType.DXA },
-              borders: invisibleBorders,
-              margins: { top: 0, bottom: 20, left: 0, right: 0 },
-              children: [
-                new Paragraph({
-                  spacing: { after: 15, line: 240 },
-                  children: col1Text ? [new TextRun({ text: col1Text, font: 'Arial', size: 22 })] : [],
-                }),
-              ],
-            }),
-            new TableCell({
-              width: { size: 1680, type: WidthType.DXA },
-              borders: invisibleBorders,
-              margins: { top: 0, bottom: 20, left: 0, right: 0 },
-              children: [
-                new Paragraph({
-                  spacing: { after: 15, line: 240 },
-                  children: col2Text ? [new TextRun({ text: col2Text, font: 'Arial', size: 22 })] : [],
-                }),
-              ],
-            }),
-            new TableCell({
-              width: { size: 1680, type: WidthType.DXA },
-              borders: invisibleBorders,
-              margins: { top: 0, bottom: 20, left: 0, right: 0 },
-              children: [
-                new Paragraph({
-                  spacing: { after: 15, line: 240 },
-                  children: col3Text ? [new TextRun({ text: col3Text, font: 'Arial', size: 22 })] : [],
-                }),
-              ],
+            new Paragraph({
+              spacing: { after: 15, line: 240 },
+              children: col1Text ? [new TextRun({ text: col1Text, font: 'Arial', size: 22 })] : [],
             }),
           ],
+        }),
+        new TableCell({
+          width: { size: subColWidth, type: WidthType.DXA },
+          borders: invisibleBorders,
+          margins: { top: 0, bottom: 20, left: 40, right: 160 },
+          children: [
+            new Paragraph({
+              spacing: { after: 15, line: 240 },
+              children: col2Text ? [new TextRun({ text: col2Text, font: 'Arial', size: 22 })] : [],
+            }),
+          ],
+        }),
+      ];
+
+      if (numOnParadeCols === 3) {
+        rowCells.push(
+          new TableCell({
+            width: { size: subColWidth, type: WidthType.DXA },
+            borders: invisibleBorders,
+            margins: { top: 0, bottom: 20, left: 40, right: 160 },
+            children: [
+              new Paragraph({
+                spacing: { after: 15, line: 240 },
+                children: col3Text ? [new TextRun({ text: col3Text, font: 'Arial', size: 22 })] : [],
+              }),
+            ],
+          })
+        );
+      }
+
+      innerRows.push(
+        new TableRow({
+          cantSplit: true,
+          children: rowCells,
         })
       );
     }
+    const subColWidths = numOnParadeCols === 3 ? [subColWidth, subColWidth, subColWidth] : [subColWidth, subColWidth];
     const onParadeSubTable = new Table({
-    layout: TableLayoutType.AUTOFIT,
-      width: { size: 5040, type: WidthType.DXA },
-      columnWidths: [1680, 1680, 1680],
+      layout: TableLayoutType.FIXED,
+      width: { size: subColWidth * numOnParadeCols, type: WidthType.DXA },
+      columnWidths: subColWidths,
       borders: invisibleBorders,
       rows: innerRows,
     });
     col1Children.push(onParadeSubTable);
   }
 
+  const col1Width = numOnParadeCols === 3 ? 6040 : numOnParadeCols === 2 ? 4120 : 2200;
   const col1 = new TableCell({
-    width: { size: 5040, type: WidthType.DXA },
+    width: { size: col1Width, type: WidthType.DXA },
     borders: invisibleBorders,
-    margins: { top: 40, bottom: 40, left: 40, right: 40 },
+    margins: { top: 40, bottom: 40, left: 40, right: 260 },
     children: col1Children,
   });
 
-  // Col 2 Disposals: LEAVE, BAKE & BITE, ESSN, CMH, SICK REPORT
+  // Col 2 Disposals: CANTEEN, LEAVE, BAKE & BITE, ESSN, CMH, SICK REPORT
   const col2Paragraphs: Paragraph[] = [];
   const secCanteen = buildDisposalSection('Canteen', toDisplay(params.canteen || []), col2Paragraphs.length === 0);
   if (secCanteen.length > 0) col2Paragraphs.push(...secCanteen);
@@ -982,14 +997,7 @@ export async function exportParadeStateSingleDocx(
   const secSick = buildDisposalSection('Sick Report', toDisplay(sickReport), col2Paragraphs.length === 0);
   if (secSick.length > 0) col2Paragraphs.push(...secSick);
 
-  const col2 = new TableCell({
-    width: { size: 3360, type: WidthType.DXA },
-    borders: invisibleBorders,
-    margins: { top: 40, bottom: 40, left: 40, right: 40 },
-    children: col2Paragraphs.length > 0 ? col2Paragraphs : [new Paragraph({ children: [] })],
-  });
-
-  // Col 3 Disposals: ATT/TDY/DETT, RECEPTION, AIR FD DUTY, ADMIN ORDER, CLASS/TRG, DRILL CAT-C, Other[0]
+  // Col 3 Disposals: ATT/TDY/DETT, RECEPTION, AIR FD DUTY, ADMIN ORDER, CLASS/TRG, DRILL CAT-C, GAMES, ABSENT, Other Disposals
   const col3Paragraphs: Paragraph[] = [];
   const secTdy = buildDisposalSection('Att/Tdy/Dett', toDisplay(tdy), col3Paragraphs.length === 0);
   if (secTdy.length > 0) col3Paragraphs.push(...secTdy);
@@ -1009,62 +1017,129 @@ export async function exportParadeStateSingleDocx(
   const secDrill = buildDisposalSection('Drill Cat-C', toDisplay(drillCatC), col3Paragraphs.length === 0);
   if (secDrill.length > 0) col3Paragraphs.push(...secDrill);
 
+  const secGames = buildDisposalSection('Games', toDisplay(games), col3Paragraphs.length === 0);
+  if (secGames.length > 0) col3Paragraphs.push(...secGames);
+
+  const secAbsent = buildDisposalSection('Absent', toDisplay(absent), col3Paragraphs.length === 0);
+  if (secAbsent.length > 0) col3Paragraphs.push(...secAbsent);
+
   if (otherDisposals && otherDisposals.length > 0) {
-    const secOther0 = buildDisposalSection(formatRunningLetter(otherDisposals[0].title), toDisplay(otherDisposals[0].airmen), col3Paragraphs.length === 0);
-    if (secOther0.length > 0) col3Paragraphs.push(...secOther0);
-  }
-
-  const col3 = new TableCell({
-    width: { size: 3360, type: WidthType.DXA },
-    borders: invisibleBorders,
-    margins: { top: 40, bottom: 40, left: 40, right: 40 },
-    children: col3Paragraphs.length > 0 ? col3Paragraphs : [new Paragraph({ children: [] })],
-  });
-
-  // Col 4 Disposals: DUTY ON, DUTY OFF, GAMES, ABSENT, Remaining Other Disposals
-  const col4Paragraphs: Paragraph[] = [];
-  const secDutyOn = buildDisposalSection('Duty On', dutyOnDisplay, col4Paragraphs.length === 0);
-  if (secDutyOn.length > 0) col4Paragraphs.push(...secDutyOn);
-
-  if (!isPt) {
-    const secDutyOff = buildDisposalSection('Duty Off', dutyOffDisplay, col4Paragraphs.length === 0);
-    if (secDutyOff.length > 0) col4Paragraphs.push(...secDutyOff);
-  }
-
-  const secGames = buildDisposalSection('Games', toDisplay(games), col4Paragraphs.length === 0);
-  if (secGames.length > 0) col4Paragraphs.push(...secGames);
-
-  const secAbsent = buildDisposalSection('Absent', toDisplay(absent), col4Paragraphs.length === 0);
-  if (secAbsent.length > 0) col4Paragraphs.push(...secAbsent);
-
-  if (otherDisposals && otherDisposals.length > 1) {
-    for (let odIdx = 1; odIdx < otherDisposals.length; odIdx++) {
-      const secRem = buildDisposalSection(formatRunningLetter(otherDisposals[odIdx].title), toDisplay(otherDisposals[odIdx].airmen), col4Paragraphs.length === 0);
-      if (secRem.length > 0) col4Paragraphs.push(...secRem);
+    for (let odIdx = 0; odIdx < otherDisposals.length; odIdx++) {
+      const secOther = buildDisposalSection(
+        formatRunningLetter(otherDisposals[odIdx].title),
+        toDisplay(otherDisposals[odIdx].airmen),
+        col3Paragraphs.length === 0
+      );
+      if (secOther.length > 0) col3Paragraphs.push(...secOther);
     }
   }
 
-  const col4 = new TableCell({
-    width: { size: 3360, type: WidthType.DXA },
-    borders: invisibleBorders,
-    margins: { top: 40, bottom: 40, left: 40, right: 40 },
-    children: col4Paragraphs.length > 0 ? col4Paragraphs : [new Paragraph({ children: [] })],
-  });
+  // Build active disposal cells dynamically so empty columns never create huge blank gaps
+  const activeCells: TableCell[] = [col1];
+  const activeColWidths: number[] = [col1Width];
 
-  // Spacer Row between 1st & 2nd rows: height 0.6 inch = 864 DXA
-  const spacerRow = new TableRow({ cantSplit: true,
-    height: { value: 864, rule: HeightRule.EXACT },
-    children: [
+  if (col2Paragraphs.length > 0) {
+    const col2Width = 2150;
+    activeCells.push(
       new TableCell({
-        columnSpan: 4,
-        width: { size: 15120, type: WidthType.DXA },
+        width: { size: col2Width, type: WidthType.DXA },
         borders: invisibleBorders,
-        children: [new Paragraph({ children: [] })],
+        margins: { top: 40, bottom: 40, left: 100, right: 160 },
+        children: col2Paragraphs,
+      })
+    );
+    activeColWidths.push(col2Width);
+  }
+
+  if (col3Paragraphs.length > 0) {
+    const col3Width = 2250;
+    activeCells.push(
+      new TableCell({
+        width: { size: col3Width, type: WidthType.DXA },
+        borders: invisibleBorders,
+        margins: { top: 40, bottom: 40, left: 80, right: 160 },
+        children: col3Paragraphs,
+      })
+    );
+    activeColWidths.push(col3Width);
+  }
+
+  const hasDutyOn = dutyOnDisplay.length > 0;
+  const hasDutyOff = !isPt && dutyOffDisplay.length > 0;
+  const usedWidthSoFar = activeColWidths.reduce((sum, w) => sum + w, 0);
+  const dutyOnColWidth = 3450;
+  const dutyOffColWidth = 3100;
+
+  // Place Duty Off beside Duty On if horizontal space allows (total width fits within ~15900 DXA landscape content width)
+  const canPlaceDutyOffBeside = hasDutyOn && hasDutyOff && (usedWidthSoFar + dutyOnColWidth + dutyOffColWidth <= 15900);
+
+  if (canPlaceDutyOffBeside) {
+    const secDutyOnSide = buildDisposalSection('Duty On', dutyOnDisplay, true);
+    const secDutyOffSide = buildDisposalSection('Duty Off', dutyOffDisplay, true);
+    activeCells.push(
+      new TableCell({
+        width: { size: dutyOnColWidth, type: WidthType.DXA },
+        borders: invisibleBorders,
+        margins: { top: 40, bottom: 40, left: 80, right: 160 },
+        children: secDutyOnSide,
+      })
+    );
+    activeColWidths.push(dutyOnColWidth);
+
+    activeCells.push(
+      new TableCell({
+        width: { size: dutyOffColWidth, type: WidthType.DXA },
+        borders: invisibleBorders,
+        margins: { top: 40, bottom: 40, left: 80, right: 40 },
+        children: secDutyOffSide,
+      })
+    );
+    activeColWidths.push(dutyOffColWidth);
+  } else if (hasDutyOn || hasDutyOff) {
+    // Fallback when horizontal space is full: stack Duty Off below Duty On in the same column
+    const dutyParagraphs: Paragraph[] = [];
+    if (hasDutyOn) {
+      dutyParagraphs.push(...buildDisposalSection('Duty On', dutyOnDisplay, dutyParagraphs.length === 0));
+    }
+    if (hasDutyOff) {
+      dutyParagraphs.push(...buildDisposalSection('Duty Off', dutyOffDisplay, dutyParagraphs.length === 0));
+    }
+    activeCells.push(
+      new TableCell({
+        width: { size: dutyOnColWidth, type: WidthType.DXA },
+        borders: invisibleBorders,
+        margins: { top: 40, bottom: 40, left: 80, right: 40 },
+        children: dutyParagraphs,
+      })
+    );
+    activeColWidths.push(dutyOnColWidth);
+  }
+
+  const totalDisposalWidth = activeColWidths.reduce((sum, w) => sum + w, 0);
+  const disposalTable = new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: totalDisposalWidth, type: WidthType.DXA },
+    columnWidths: activeColWidths,
+    borders: invisibleBorders,
+    rows: [
+      new TableRow({
+        cantSplit: true,
+        children: activeCells,
       }),
     ],
   });
 
-  // 2nd Row: 1st Column (Left Officer), Middle Column (Checked By), Last column (Right Officer)
+  docChildren.push(disposalTable);
+
+  // Spacer before Signature Table
+  docChildren.push(
+    new Paragraph({
+      spacing: { before: 360, after: 120 },
+      children: [],
+    })
+  );
+
+  // Signature Table: 3 fixed columns across 15120 DXA
   const leftSigName = params.leftSig?.name || 'MD NAHID HASAN KHAN';
   const leftSigRank = params.leftSig?.rank || 'Sgt';
   const leftSigDesig = params.leftSig?.desig || 'UWO';
@@ -1077,160 +1152,168 @@ export async function exportParadeStateSingleDocx(
   const rightSigRank = params.rightSig?.rank || 'FLT LT';
   const rightSigDesig = params.rightSig?.desig || 'Adjutant';
 
-  const signatureRow = new TableRow({ cantSplit: true,
-    children: [
-      new TableCell({
-        width: { size: 5040, type: WidthType.DXA },
-        borders: invisibleBorders,
-        margins: { top: 120, bottom: 40, left: 40, right: 40 },
+  const signatureTable = new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 15120, type: WidthType.DXA },
+    columnWidths: [5040, 5880, 4200],
+    borders: invisibleBorders,
+    rows: [
+      new TableRow({
+        cantSplit: true,
         children: [
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
+          new TableCell({
+            width: { size: 5040, type: WidthType.DXA },
+            borders: invisibleBorders,
+            margins: { top: 80, bottom: 40, left: 40, right: 40 },
             children: [
-              new TextRun({
-                text: leftSigName.toUpperCase(),
-                font: 'Arial',
-                bold: true,
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: leftSigName.toUpperCase(),
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: leftSigRank,
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: leftSigDesig,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                children: [
+                  new TextRun({
+                    text: activeOfficeName,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
               }),
             ],
           }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
+          new TableCell({
+            width: { size: 5880, type: WidthType.DXA },
+            borders: invisibleBorders,
+            margins: { top: 80, bottom: 40, left: 600, right: 40 },
             children: [
-              new TextRun({
-                text: leftSigRank,
-                font: 'Arial',
-                bold: true,
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: midSigName.toUpperCase(),
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: midSigRank,
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: midSigDesig,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
+              }),
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                children: [
+                  new TextRun({
+                    text: activeOfficeName,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
               }),
             ],
           }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
+          new TableCell({
+            width: { size: 4200, type: WidthType.DXA },
+            borders: invisibleBorders,
+            margins: { top: 80, bottom: 40, left: 40, right: 40 },
             children: [
-              new TextRun({
-                text: leftSigDesig,
-                font: 'Arial',
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: rightSigName.toUpperCase(),
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
               }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [
-              new TextRun({
-                text: activeOfficeName,
-                font: 'Arial',
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: rightSigRank,
+                    font: 'Arial',
+                    bold: true,
+                    size: 24,
+                  }),
+                ],
               }),
-            ],
-          }),
-        ],
-      }),
-      new TableCell({
-        columnSpan: 2,
-        width: { size: 6720, type: WidthType.DXA },
-        borders: invisibleBorders,
-        margins: { top: 120, bottom: 40, left: 1000, right: 40 },
-        children: [
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: midSigName.toUpperCase(),
-                font: 'Arial',
-                bold: true,
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: { after: 15, line: 240 },
+                children: [
+                  new TextRun({
+                    text: rightSigDesig,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
               }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: midSigRank,
-                font: 'Arial',
-                bold: true,
-                size: 24,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: midSigDesig,
-                font: 'Arial',
-                size: 24,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [
-              new TextRun({
-                text: activeOfficeName,
-                font: 'Arial',
-                size: 24,
-              }),
-            ],
-          }),
-        ],
-      }),
-      new TableCell({
-        width: { size: 3360, type: WidthType.DXA },
-        borders: invisibleBorders,
-        margins: { top: 120, bottom: 40, left: 40, right: 40 },
-        children: [
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: rightSigName.toUpperCase(),
-                font: 'Arial',
-                bold: true,
-                size: 24,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: rightSigRank,
-                font: 'Arial',
-                bold: true,
-                size: 24,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 15, line: 240 },
-            children: [
-              new TextRun({
-                text: rightSigDesig,
-                font: 'Arial',
-                size: 24,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [
-              new TextRun({
-                text: activeOfficeName,
-                font: 'Arial',
-                size: 24,
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                children: [
+                  new TextRun({
+                    text: activeOfficeName,
+                    font: 'Arial',
+                    size: 24,
+                  }),
+                ],
               }),
             ],
           }),
@@ -1239,23 +1322,7 @@ export async function exportParadeStateSingleDocx(
     ],
   });
 
-  const disposalTableRows = [
-    new TableRow({ cantSplit: true,
-      children: [col1, col2, col3, col4],
-    }),
-    spacerRow,
-    signatureRow,
-  ];
-
-  const disposalTable = new Table({
-    layout: TableLayoutType.AUTOFIT,
-    width: { size: 15120, type: WidthType.DXA },
-    columnWidths: [5040, 3360, 3360, 3360],
-    borders: invisibleBorders,
-    rows: disposalTableRows,
-  });
-
-  docChildren.push(disposalTable);
+  docChildren.push(signatureTable);
 
   const doc = new Document({
     styles: {
