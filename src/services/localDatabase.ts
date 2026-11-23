@@ -15,7 +15,7 @@ import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from '../data/officialJulyAugustData';
 import { calculateDutyStats, detectConflicts, getDaysInMonth } from '../data/rosterGenerator';
-import { DutyRatioTable, INITIAL_OFFICIAL_DUTY_MATRIX, getInitialDutyMatrixForActiveOffice, getStoredDutyMatrix, saveDutyMatrix, resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
+import { DutyRatioTable, INITIAL_OFFICIAL_DUTY_MATRIX, getInitialDutyMatrixForActiveOffice, getStoredDutyMatrix, getDefaultDutyShortName, saveDutyMatrix, resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
 import { findBestAirmanMatch as matchAirmanRankFirst, parseRosterTextHeuristically } from '../utils/airmanMatcher';
 import { sortAirmenBySeniority, normalizeAirmenSeniority, reorderAirmanSeniority } from '../utils/seniority';
 import {
@@ -4414,9 +4414,9 @@ export class LocalDatabaseEngine {
       }
 
       const rawShortName =
-        table?.shortName ||
+        (table ? getDefaultDutyShortName(table) : undefined) ||
         customDuty?.shortName ||
-        (table ? (table.title || '') : undefined);
+        (customDuty ? getDefaultDutyShortName({ id: customDuty.code, title: customDuty.name, dutyCode: customDuty.code, shortName: customDuty.shortName }) : undefined);
       const cleanedShortName = rawShortName
         ? rawShortName.replace(/\s+(duty\s+off|duty|off)$/i, '').trim()
         : undefined;
@@ -4743,8 +4743,19 @@ export class LocalDatabaseEngine {
       const ass = findInAssignmentMap(assignmentMap, airmanId);
       const isDep = ass && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode);
       const isBaseToday = isBaseOrEmptyDuty(ass);
+      const airmanAliases = new Set(getAirmanKeyAliases(airmanId));
+      const hasIdacNightInDateAssignments = dateAssignments.some((da) => {
+        if (!isScopeApplicable(da.disposalScope)) return false;
+        if (da.airmanId !== airmanId && !airmanAliases.has(da.airmanId)) return false;
+        const c = String(da.dutyCode || '').toUpperCase().trim();
+        if (!['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(c)) return false;
+        const sh = String(da.idaShift || '').toLowerCase().trim();
+        const nt = String(da.notes || '').toLowerCase();
+        return sh.includes('night') || sh.includes('nt') || sh === 'c' || nt.includes('night') || nt.includes('nt');
+      });
       const isTodayIdacNt = Boolean(
-        ass &&
+        hasIdacNightInDateAssignments ||
+        (ass &&
         ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(ass.dutyCode || '').toUpperCase().trim()) &&
         (
           String(ass.idaShift || '').toLowerCase().includes('night') ||
@@ -4752,7 +4763,7 @@ export class LocalDatabaseEngine {
           String(ass.idaShift || '').toLowerCase() === 'c' ||
           String(ass.notes || '').toLowerCase().includes('night') ||
           String(ass.notes || '').toLowerCase().includes('nt')
-        )
+        ))
       );
       const hasExplicitStateOverrideToday = Boolean(ass && isExplicitStateScope(ass.disposalScope));
       const isMorningParadeOnTodayDuty = Boolean(!isPT && !isNightCount && ass && (isTodayIdacNt || getDutyRule(ass).onParadeOnDutyDay));
@@ -4765,7 +4776,10 @@ export class LocalDatabaseEngine {
             let offShort = 'Sy Off';
             const yCodeUpper = String(yestAss.dutyCode || '').toUpperCase().trim();
             if (yestRule.shortName) {
-              offShort = `${yestRule.shortName} Off`;
+              const baseS = /^idac(\s+("a"|"b"|"c"|night|nt|morning|mor|afternoon|aft))?$/i.test(yestRule.shortName)
+                ? 'IDAC'
+                : yestRule.shortName;
+              offShort = `${baseS} Off`;
             } else if (
               yCodeUpper === 'ESCORT' ||
               yCodeUpper === 'ESC' ||
@@ -4780,13 +4794,18 @@ export class LocalDatabaseEngine {
             else if (yCodeUpper === 'NTF') offShort = 'NTF Off';
             else if (yCodeUpper === 'AIRPORT' || yCodeUpper === 'AIRFIELD') offShort = 'Airfield Off';
             else if (yCodeUpper === 'HALISHAHAR') offShort = 'Halishahar Off';
-            else if ((yCodeUpper === 'IDAC' || yCodeUpper === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC "C" Off';
-            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if ((yCodeUpper === 'IDAC' || yCodeUpper === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC Off';
+            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC Off';
             else if (yCodeUpper === 'DUTY_OFF') offShort = yestAss.previousDutyName || yestAss.notes || 'Sy Off';
             else if (yestRule.matchedTitle) offShort = `${yestRule.matchedTitle.replace(/\s+(duty|off)$/i, '').trim()} Off`;
             else offShort = `${String(yestAss.dutyCode).replace(/\s+(duty|off)$/i, '').trim()} Off`;
 
             offShort = (offShort || "")
+              .replace(/IDAC\s+("A"|"B"|"C"|NIGHT|Nt|MORNING|AFTERNOON)\s+Off/gi, 'IDAC Off')
+              .replace(/BASE\s+SECURITY\s+Off/gi, 'Sy Off')
+              .replace(/NAJIRPARA\s+TASKFORCE\s+Off/gi, 'NTF Off')
+              .replace(/NAZIRPARA\s+TASKFORCE\s+Off/gi, 'NTF Off')
+              .replace(/BASE\s+TASKFORCE\s+Off/gi, 'BTF Off')
               .replace(/Escort Duty Off/g, 'Esct Off')
               .replace(/Escort Off/g, 'Esct Off')
               .replace(/ESC Off/g, 'Esct Off')
@@ -4800,6 +4819,7 @@ export class LocalDatabaseEngine {
             if (!isPT) {
               return { 
                 dutyCode: 'DUTY_OFF', 
+                idaShift: isTodayIdacNt ? 'Night' : undefined,
                 dutyName: offShort, 
                 previousDutyName: offShort,
                 proxyForFlight: yestAss.proxyForFlight,
@@ -5009,7 +5029,10 @@ export class LocalDatabaseEngine {
           if (yestAss) {
             const yestCodeStr = String(yestAss.dutyCode || '').toUpperCase().trim();
             if (yestRule?.shortName) {
-              offShort = `${yestRule.shortName} Off`;
+              const baseS = /^idac(\s+("a"|"b"|"c"|night|nt|morning|mor|afternoon|aft))?$/i.test(yestRule.shortName)
+                ? 'IDAC'
+                : yestRule.shortName;
+              offShort = `${baseS} Off`;
             } else if (
               yestCodeStr === 'ESCORT' ||
               yestCodeStr === 'ESC' ||
@@ -5024,24 +5047,29 @@ export class LocalDatabaseEngine {
             else if (yestCodeStr === 'NTF') offShort = 'NTF Off';
             else if (yestCodeStr === 'AIRPORT' || yestCodeStr === 'AIRFIELD' || yestCodeStr === 'ATT' || yestCodeStr === 'DETT') offShort = 'Airfield Off';
             else if (yestCodeStr === 'HALISHAHAR') offShort = 'Halishahar Off';
-            else if ((yestCodeStr === 'IDAC' || yestCodeStr === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC "C" Off';
-            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if ((yestCodeStr === 'IDAC' || yestCodeStr === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC Off';
+            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC Off';
             else if (yestCodeStr === 'DUTY_OFF') offShort = yestAss.previousDutyName || 'Sy Off';
             else if (yestCodeStr === 'ON_PARADE' || yestCodeStr === 'PT' || yestCodeStr === 'PT_PARADE') offShort = 'Sy Off';
             else if (yestRule?.matchedTitle) offShort = `${yestRule.matchedTitle.replace(/\s+(duty|off)$/i, '').trim()} Off`;
             else offShort = `${String(yestAss.dutyCode).replace(/\s+(duty|off)$/i, '').trim()} Off`;
           } else if (ass.notes && !ass.notes.toLowerCase().includes('imported')) {
             if (ass.notes.toLowerCase().includes('escort') || ass.notes.toLowerCase().includes('esct')) offShort = 'Esct Off';
-            else if (ass.notes.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if (ass.notes.toLowerCase().includes('idac')) offShort = 'IDAC Off';
             else if (/\bgd\b/i.test(ass.notes) || /\bsy\b/i.test(ass.notes) || ass.notes.toLowerCase().includes('security')) offShort = 'Sy Off';
-            else if (ass.notes.toLowerCase().includes('btf')) offShort = 'BTF Off';
-            else if (ass.notes.toLowerCase().includes('ntf')) offShort = 'NTF Off';
-            else if (ass.notes.toLowerCase().includes('airport')) offShort = 'Airfield Off';
+            else if (ass.notes.toLowerCase().includes('btf') || ass.notes.toLowerCase().includes('base taskforce')) offShort = 'BTF Off';
+            else if (ass.notes.toLowerCase().includes('ntf') || ass.notes.toLowerCase().includes('najirpara') || ass.notes.toLowerCase().includes('nazirpara')) offShort = 'NTF Off';
+            else if (ass.notes.toLowerCase().includes('airport') || ass.notes.toLowerCase().includes('airfield')) offShort = 'Airfield Off';
             else if (ass.notes.toLowerCase().includes('halishahar')) offShort = 'Halishahar Off';
             else offShort = ass.notes;
           }
 
           offShort = (offShort || "")
+            .replace(/IDAC\s+("A"|"B"|"C"|NIGHT|Nt|MORNING|AFTERNOON)\s+Off/gi, 'IDAC Off')
+            .replace(/BASE\s+SECURITY\s+Off/gi, 'Sy Off')
+            .replace(/NAJIRPARA\s+TASKFORCE\s+Off/gi, 'NTF Off')
+            .replace(/NAZIRPARA\s+TASKFORCE\s+Off/gi, 'NTF Off')
+            .replace(/BASE\s+TASKFORCE\s+Off/gi, 'BTF Off')
             .replace(/Escort Duty Off/g, 'Esct Off')
             .replace(/Escort Off/g, 'Esct Off')
             .replace(/ESC Off/g, 'Esct Off')
@@ -5079,9 +5107,16 @@ export class LocalDatabaseEngine {
             }
           }
 
-          previousDutyName = offShort;
-          dutyName = offShort;
-          statusCategory = 'OFF';
+          return {
+            dutyCode: 'DUTY_OFF',
+            idaShift: isTodayIdacNt ? 'Night' : undefined,
+            dutyName: offShort,
+            previousDutyName: offShort,
+            proxyForFlight: ass.proxyForFlight,
+            disposalScope: scope,
+            notes: offShort,
+            statusCategory: 'OFF',
+          };
         }
         else if (codeStr === 'ON_PARADE') {
           dutyName = isPT ? 'On PT' : 'On Parade';

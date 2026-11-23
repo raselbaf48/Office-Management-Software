@@ -181,10 +181,61 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const [toastMessage, setToastMessage] = useState<string>('');
   
   const userManuallySelectedFlightRef = useRef<boolean>(false);
+  const userManuallySelectedShiftRef = useRef<boolean>(false);
+  const pendingAutoSelectDateRef = useRef<string | null>(null);
+
+  const getOrderedFlights = (): FlightName[] => {
+    return unitGroupOptions.length > 0
+      ? unitGroupOptions
+      : (['Avionics', 'Mechanics', 'GCS', 'Admin'] as FlightName[]);
+  };
+
+  const isIdacDutyCode = (code?: DutyCategoryCode | string): boolean => {
+    return ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(code || ''));
+  };
+
+  const doesAssignmentMatchDuty = (
+    a: DutyAssignment,
+    dutyCode: DutyCategoryCode,
+    shift?: IDAShift
+  ): boolean => {
+    const codeStr = String(dutyCode || '');
+    const asgnCodeStr = String(a.dutyCode || '');
+    if (isIdacDutyCode(codeStr)) {
+      if (asgnCodeStr !== 'IDAC' && asgnCodeStr !== 'IDA') return false;
+      if (shift) {
+        const aShift = resolveCanonicalIdacShift(a);
+        return aShift.toLowerCase() === shift.toLowerCase();
+      }
+      return true;
+    }
+    if (codeStr === 'AIRPORT' || codeStr === 'AIRFIELD_DUTY') {
+      return asgnCodeStr === 'AIRPORT' || asgnCodeStr === 'AIRFIELD_DUTY';
+    }
+    if (codeStr === 'RECEPTION' || codeStr === 'RECEIPTION') {
+      return (
+        asgnCodeStr === 'RECEPTION' ||
+        asgnCodeStr === 'RECEIPTION' ||
+        asgnCodeStr === 'RECEPTION_DUTY' ||
+        asgnCodeStr === 'KO' ||
+        asgnCodeStr === 'K/O'
+      );
+    }
+    if (codeStr === 'GD' || codeStr === 'BASE_SECURITY') {
+      return (
+        asgnCodeStr === 'GD' ||
+        asgnCodeStr === 'BASE_SECURITY' ||
+        Boolean((a as any).dutyName && String((a as any).dutyName).toUpperCase().includes('SECURITY'))
+      );
+    }
+    return asgnCodeStr === codeStr;
+  };
 
   // Update dates & duty code when isOpen changes
   useEffect(() => {
     if (isOpen) {
+      userManuallySelectedFlightRef.current = false;
+      userManuallySelectedShiftRef.current = false;
       if (selectedDate) {
         const dateToSet = (isAdmin && selectedDate < todayStr) ? todayStr : selectedDate;
         setFromDate(dateToSet);
@@ -208,8 +259,6 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
     return getIdacShiftsForDateAndFlight(fromDate, undefined);
   }, [fromDate, isFlightLocked, activeFlight]);
-
-  // Auto-select removed as requested by user.
 
   // Map of airman ID to Airman object for fast lookup
   const airmanMap = useMemo(() => {
@@ -240,6 +289,141 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     });
     return map;
   }, [airmen]);
+
+  const countAssignedForDutyFlightShift = (
+    list: DutyAssignment[],
+    dutyCode: DutyCategoryCode,
+    flt: FlightName,
+    shift?: IDAShift
+  ): number => {
+    const seen = new Set<string>();
+    list.forEach((a) => {
+      if (!doesAssignmentMatchDuty(a, dutyCode, shift)) return;
+      let air = airmanMap.get(a.airmanId);
+      if (!air) {
+        const d = String(a.airmanId).replace(/\D/g, '');
+        if (d) air = airmanMap.get(d);
+      }
+      const proxyFlt = (a as any).proxyForFlight as FlightName | undefined;
+      if (proxyFlt) {
+        if (proxyFlt !== flt) return;
+      } else {
+        if (!air || !matchesAirmanGroup(air, flt)) return;
+      }
+      const key = air ? air.id : String(a.airmanId);
+      seen.add(key);
+    });
+    return seen.size;
+  };
+
+  const getActiveCountedDuties = () => {
+    const _storedMatrix = getStoredDutyMatrix();
+    return DUTY_TYPES.filter((dt) => {
+      if (!dt.isCountedAsDuty) return false;
+      if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
+      const mEntries = _storedMatrix.filter((t) => t.dutyCode === dt.code);
+      if (mEntries.length > 0 && mEntries.every((t) => t.isDisabled)) return false;
+      return true;
+    });
+  };
+
+  const findFirstUnfulfilledIdacSlot = (
+    dateStr: string,
+    list: DutyAssignment[],
+    preferredShiftsOrder?: IDAShift[],
+    preferredStartAfterFlight?: FlightName | 'All'
+  ): { shift: IDAShift; flight: FlightName; isUnfulfilled: boolean } | null => {
+    const baseShifts: IDAShift[] =
+      availableIdaShifts.length > 0
+        ? availableIdaShifts
+        : (['Morning', 'Afternoon', 'Night'] as IDAShift[]);
+    const shiftsToCheck = preferredShiftsOrder && preferredShiftsOrder.length > 0 ? preferredShiftsOrder : baseShifts;
+    const flightsToCheck: FlightName[] =
+      isFlightLocked && activeFlight !== 'All'
+        ? [activeFlight as FlightName]
+        : getOrderedFlights();
+
+    let firstWithQuota: { shift: IDAShift; flight: FlightName } | null = null;
+
+    for (let sIdx = 0; sIdx < shiftsToCheck.length; sIdx++) {
+      const sh = shiftsToCheck[sIdx];
+      let orderedFlts = flightsToCheck;
+      if (
+        sIdx === 0 &&
+        preferredStartAfterFlight &&
+        preferredStartAfterFlight !== 'All' &&
+        flightsToCheck.length > 1
+      ) {
+        const fIdx = flightsToCheck.indexOf(preferredStartAfterFlight as FlightName);
+        if (fIdx >= 0) {
+          orderedFlts = flightsToCheck.slice(fIdx + 1);
+        }
+      }
+      for (const flt of orderedFlts) {
+        const req = getFlightDutyQuotaForDate(dateStr, flt, 'IDAC', sh);
+        if (req > 0) {
+          if (!firstWithQuota) {
+            firstWithQuota = { shift: sh, flight: flt };
+          }
+          const assigned = countAssignedForDutyFlightShift(list, 'IDAC', flt, sh);
+          if (assigned < req) {
+            return { shift: sh, flight: flt, isUnfulfilled: true };
+          }
+        }
+      }
+    }
+
+    if (firstWithQuota) {
+      return { ...firstWithQuota, isUnfulfilled: false };
+    }
+    if (baseShifts.length > 0 && flightsToCheck.length > 0) {
+      return { shift: baseShifts[0], flight: flightsToCheck[0], isUnfulfilled: false };
+    }
+    return null;
+  };
+
+  const findFirstUnfulfilledFlightForDuty = (
+    dateStr: string,
+    dutyCode: DutyCategoryCode,
+    list: DutyAssignment[],
+    startAfterFlight?: FlightName | 'All'
+  ): { flight: FlightName | 'All'; isUnfulfilled: boolean } => {
+    if (isFlightLocked && activeFlight !== 'All') {
+      const flt = activeFlight as FlightName;
+      const req = getFlightDutyQuotaForDate(dateStr, flt, dutyCode);
+      const assigned = countAssignedForDutyFlightShift(list, dutyCode, flt);
+      return { flight: flt, isUnfulfilled: req > 0 && assigned < req };
+    }
+
+    const baseFlights = getOrderedFlights();
+    let orderedFlights = baseFlights;
+    if (startAfterFlight && startAfterFlight !== 'All') {
+      const idx = baseFlights.indexOf(startAfterFlight as FlightName);
+      if (idx >= 0) {
+        orderedFlights = [...baseFlights.slice(idx + 1), ...baseFlights.slice(0, idx + 1)];
+      }
+    }
+
+    let firstQuotaFlight: FlightName | null = null;
+    for (const flt of orderedFlights) {
+      const req = getFlightDutyQuotaForDate(dateStr, flt, dutyCode);
+      if (req > 0) {
+        if (!firstQuotaFlight) firstQuotaFlight = flt;
+        const assigned = countAssignedForDutyFlightShift(list, dutyCode, flt);
+        if (assigned < req) {
+          return { flight: flt, isUnfulfilled: true };
+        }
+      }
+    }
+
+    for (const flt of baseFlights) {
+      if (getFlightDutyQuotaForDate(dateStr, flt, dutyCode) > 0) {
+        return { flight: flt, isUnfulfilled: false };
+      }
+    }
+
+    return { flight: 'All', isUnfulfilled: false };
+  };
 
   // Fetch current server roster data for fromDate and previous day (for Night-Off tracking)
   const fetchCurrentRoster = async () => {
@@ -294,6 +478,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      userManuallySelectedShiftRef.current = false;
+      userManuallySelectedFlightRef.current = false;
       fetchCurrentRoster();
     }
   }, [isOpen, fromDate]);
@@ -313,103 +499,163 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
   }, [activeDutyCode, activeFlight, isFlightLocked, isDutyLocked]);
 
-  // Reset or auto-select shift when duty config changes
+  // Auto-select unfulfilled IDAC shift & flight, or auto-select first unfulfilled duty on new date advancement
   useEffect(() => {
-    if (activeDutyCode !== 'IDAC' && activeDutyCode !== 'IDA') {
-        setActiveIdaShift(undefined);
-    } else {
-        const shifts = availableIdaShifts;
-        setActiveIdaShift(prev => {
-          if (prev && shifts.includes(prev)) {
-            return prev;
+    if (loadingInitial) return;
+    const currentDayAssignments = assignmentsList.filter((a) => !a.date || a.date === fromDate);
+
+    // If we just auto-advanced to a new date after completing all duties on the previous date
+    if (pendingAutoSelectDateRef.current === fromDate) {
+      pendingAutoSelectDateRef.current = null;
+      userManuallySelectedShiftRef.current = false;
+      userManuallySelectedFlightRef.current = false;
+
+      const flightsToCheck: FlightName[] =
+        isFlightLocked && activeFlight !== 'All'
+          ? [activeFlight as FlightName]
+          : getOrderedFlights();
+      const dutiesToCheck =
+        isDutyLocked && activeDutyCode
+          ? getActiveCountedDuties().filter((d) => d.code === activeDutyCode)
+          : onlyIdac
+          ? getActiveCountedDuties().filter((d) => isIdacDutyCode(d.code))
+          : getActiveCountedDuties();
+
+      for (const dt of dutiesToCheck) {
+        if (isIdacDutyCode(dt.code)) {
+          const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
+          for (const sh of shifts) {
+            for (const flt of flightsToCheck) {
+              const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
+              if (req > 0) {
+                const assigned = countAssignedForDutyFlightShift(currentDayAssignments, 'IDAC', flt, sh);
+                if (assigned < req) {
+                  if (!isDutyLocked && !onlyIdac) setActiveDutyCode('IDAC');
+                  setActiveIdaShift(sh);
+                  if (!isFlightLocked) setActiveFlight(flt);
+                  return;
+                }
+              }
+            }
           }
-          return shifts.length > 0 ? shifts[0] : undefined;
-        });
-    }
-  }, [activeDutyCode, fromDate, activeFlight, availableIdaShifts]);
-
-  // Auto-select flight for matrix-tracked duties based on quota and unfulfilled assignments
-  useEffect(() => {
-    if (isFlightLocked || isDutyLocked) return;
-    if (userManuallySelectedFlightRef.current) return;
-    const isMatrixTracked = getStoredDutyMatrix().some(t => t.dutyCode === activeDutyCode);
-    if (isMatrixTracked) {
-      const orderedFlights: FlightName[] = ["Avionics", "Mechanics", "GCS", "Admin"];
-      let targetFlight: FlightName | "All" = "All";
-      
-      // Do not auto-select flight for IDAC until a shift is explicitly chosen
-      if ((['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) && !activeIdaShift) {
-         setActiveFlight("All");
-         return;
-      }
-
-      for (const flt of orderedFlights) {
-        const required = getFlightDutyQuotaForDate(
-          fromDate, 
-          flt, 
-          activeDutyCode,
-          (activeDutyCode === "IDAC" || activeDutyCode === "IDA") ? activeIdaShift : undefined
-        );
-        
-        if (required > 0) {
-          const assignedCount = assignmentsList.filter((a) => {
-            const airman = airmanMap.get(a.airmanId);
-            return airman && 
-                   airman.flightName === flt && 
-                   a.dutyCode === activeDutyCode &&
-                   (a.dutyCode !== "IDAC" && a.dutyCode !== "IDA" || a.idaShift === activeIdaShift);
-          }).length;
-            
-          if (assignedCount < required) {
-            targetFlight = flt;
-            break;
+        } else {
+          for (const flt of flightsToCheck) {
+            const req = getFlightDutyQuotaForDate(fromDate, flt, dt.code);
+            if (req > 0) {
+              const assigned = countAssignedForDutyFlightShift(currentDayAssignments, dt.code, flt);
+              if (assigned < req) {
+                if (!isDutyLocked && !onlyIdac) setActiveDutyCode(dt.code);
+                setActiveIdaShift(undefined);
+                if (!isFlightLocked) setActiveFlight(flt);
+                return;
+              }
+            }
           }
         }
       }
-        
-      // If all quotas are fulfilled, targetFlight remains "All" 
-      
-      setActiveFlight(targetFlight);
     }
-  }, [activeDutyCode, fromDate, activeIdaShift, assignmentsList, airmanMap, isFlightLocked]);
+
+    if (!isIdacDutyCode(activeDutyCode)) {
+      if (activeIdaShift !== undefined) {
+        setActiveIdaShift(undefined);
+      }
+      if (!isFlightLocked && !userManuallySelectedFlightRef.current && activeDutyCode) {
+        const isMatrixTracked = getStoredDutyMatrix().some((t) => t.dutyCode === activeDutyCode);
+        if (isMatrixTracked) {
+          const res = findFirstUnfulfilledFlightForDuty(fromDate, activeDutyCode as DutyCategoryCode, currentDayAssignments);
+          if (activeFlight !== res.flight) {
+            setActiveFlight(res.flight);
+          }
+        }
+      }
+      return;
+    }
+
+    // Active duty is IDAC: ensure unfulfilled shift (and its unfulfilled flight) is selected
+    const shifts = availableIdaShifts.length > 0 ? availableIdaShifts : (['Morning', 'Afternoon', 'Night'] as IDAShift[]);
+    const flightsToCheck: FlightName[] =
+      isFlightLocked && activeFlight !== 'All'
+        ? [activeFlight as FlightName]
+        : getOrderedFlights();
+
+    // Check if current shift still has an unfulfilled flight slot
+    if (activeIdaShift && shifts.includes(activeIdaShift)) {
+      if (userManuallySelectedShiftRef.current) {
+        // User explicitly clicked this shift card; keep shift, auto-select its unfulfilled flight if flight wasn't manually chosen
+        if (!isFlightLocked && !userManuallySelectedFlightRef.current) {
+          let targetFlt: FlightName | null = null;
+          let firstQuotaFlt: FlightName | null = null;
+          for (const flt of flightsToCheck) {
+            const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', activeIdaShift);
+            if (req > 0) {
+              if (!firstQuotaFlt) firstQuotaFlt = flt;
+              const assigned = countAssignedForDutyFlightShift(currentDayAssignments, 'IDAC', flt, activeIdaShift);
+              if (assigned < req) {
+                targetFlt = flt;
+                break;
+              }
+            }
+          }
+          const chosenFlt = targetFlt || firstQuotaFlt;
+          if (chosenFlt && activeFlight !== chosenFlt) {
+            setActiveFlight(chosenFlt);
+          }
+        }
+        return;
+      }
+
+      // Check if current activeIdaShift has any unfulfilled flight slot
+      for (const flt of flightsToCheck) {
+        const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', activeIdaShift);
+        if (req > 0) {
+          const assigned = countAssignedForDutyFlightShift(currentDayAssignments, 'IDAC', flt, activeIdaShift);
+          if (assigned < req) {
+            if (!isFlightLocked && !userManuallySelectedFlightRef.current && activeFlight !== flt) {
+              setActiveFlight(flt);
+            }
+            return;
+          }
+        }
+      }
+    }
+
+    // Current shift is either unset or already completely fulfilled -> find first unfulfilled IDAC shift & flight
+    const slot = findFirstUnfulfilledIdacSlot(fromDate, currentDayAssignments);
+    if (slot) {
+      if (activeIdaShift !== slot.shift) {
+        setActiveIdaShift(slot.shift);
+      }
+      if (!isFlightLocked && !userManuallySelectedFlightRef.current && activeFlight !== slot.flight) {
+        setActiveFlight(slot.flight);
+      }
+    } else if (shifts.length > 0 && activeIdaShift !== shifts[0]) {
+      setActiveIdaShift(shifts[0]);
+    }
+  }, [activeDutyCode, fromDate, activeIdaShift, assignmentsList, airmanMap, isFlightLocked, isDutyLocked, availableIdaShifts, loadingInitial]);
 
   // Auto-select duty for locked flight on date/flight/roster change (only when duty is NOT locked)
   useEffect(() => {
+    if (loadingInitial) return;
     if (isFlightLocked && activeFlight !== 'All' && !isDutyLocked) {
       const targetFlight = activeFlight as FlightName;
-      const _storedMatrix = getStoredDutyMatrix();
-      const allDuties = DUTY_TYPES.filter((dt) => {
-        if (!dt.isCountedAsDuty) return false;
-        const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code);
-        if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false;
-        return true;
-      });
+      const currentDayAssignments = assignmentsList.filter((a) => !a.date || a.date === fromDate);
+      const allDuties = getActiveCountedDuties();
 
       const slots: Array<{ dutyCode: DutyCategoryCode; shift?: IDAShift; required: number; assigned: number }> = [];
       allDuties.forEach((dt) => {
-        if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dt.code)) {
+        if (isIdacDutyCode(dt.code)) {
           const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
           shifts.forEach((sh) => {
             const req = getFlightDutyQuotaForDate(fromDate, targetFlight, 'IDAC', sh);
             if (req > 0) {
-              const assigned = assignmentsList.filter((a) => {
-                const air = airmanMap.get(a.airmanId);
-                return air && air.flightName === targetFlight &&
-                  (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
-                  a.idaShift === sh;
-              }).length;
+              const assigned = countAssignedForDutyFlightShift(currentDayAssignments, 'IDAC', targetFlight, sh);
               slots.push({ dutyCode: 'IDAC', shift: sh, required: req, assigned });
             }
           });
         } else {
           const req = getFlightDutyQuotaForDate(fromDate, targetFlight, dt.code);
           if (req > 0) {
-            const assigned = assignmentsList.filter((a) => {
-              const air = airmanMap.get(a.airmanId);
-              if (!air || air.flightName !== targetFlight) return false;
-              if (dt.code === 'AIRPORT') return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
-              return a.dutyCode === dt.code;
-            }).length;
+            const assigned = countAssignedForDutyFlightShift(currentDayAssignments, dt.code, targetFlight);
             slots.push({ dutyCode: dt.code, required: req, assigned });
           }
         }
@@ -424,7 +670,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         }
       }
     }
-  }, [isFlightLocked, isDutyLocked, activeFlight, fromDate, assignmentsList]);
+  }, [isFlightLocked, isDutyLocked, activeFlight, fromDate, assignmentsList, loadingInitial]);
 
   // Helper to check if a given date has duty ratio quota > 0 for the specified flight and/or duty
   const hasDutyQuotaOnDate = (
@@ -432,20 +678,14 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     flight: FlightName | 'All',
     dutyCode: DutyCategoryCode | ''
   ): boolean => {
-    const flights: FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
+    const flights: FlightName[] = getOrderedFlights();
     const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
     const checkFlights: FlightName[] = flight !== 'All' ? [flight as FlightName] : flights;
 
     if (!dutyCode) {
-      const _storedMatrix = getStoredDutyMatrix();
-      const allDuties = DUTY_TYPES.filter((dt) => {
-        if (!dt.isCountedAsDuty) return false;
-        const mEntries = _storedMatrix.filter((t) => t.dutyCode === dt.code);
-        if (mEntries.length > 0 && mEntries.every((t) => t.isDisabled)) return false;
-        return true;
-      });
+      const allDuties = getActiveCountedDuties();
       return allDuties.some((dt) => {
-        if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dt.code)) {
+        if (isIdacDutyCode(dt.code)) {
           return shifts.some((sh) =>
             checkFlights.some((f) => getFlightDutyQuotaForDate(targetDateStr, f, 'IDAC', sh) > 0)
           );
@@ -454,7 +694,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       });
     }
 
-    if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode as string)) {
+    if (isIdacDutyCode(dutyCode)) {
       return shifts.some((sh) =>
         checkFlights.some((f) => getFlightDutyQuotaForDate(targetDateStr, f, 'IDAC', sh) > 0)
       );
@@ -485,6 +725,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
   // Auto-select Flight and Shift when Duty is Locked
   useEffect(() => {
+    if (loadingInitial) return;
     if (!isDutyLocked || !activeDutyCode) return;
 
     // If BOTH Flight and Duty are locked, and the current date has 0 quota for this flight & duty,
@@ -505,25 +746,18 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       }
     }
 
+    const currentDayAssignments = assignmentsList.filter((a) => !a.date || a.date === fromDate);
     const orderedFlights: FlightName[] = (isFlightLocked && activeFlight !== 'All')
       ? [activeFlight as FlightName]
-      : ['Avionics', 'Mechanics', 'GCS', 'Admin'];
+      : getOrderedFlights();
 
-    if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) {
+    if (isIdacDutyCode(activeDutyCode)) {
       const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
       for (const sh of shifts) {
         for (const flt of orderedFlights) {
           const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
           if (req > 0) {
-            const assignedCount = assignmentsList.filter((a) => {
-              const air = airmanMap.get(a.airmanId);
-              return (
-                air &&
-                air.flightName === flt &&
-                (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
-                (a.idaShift || a.shift || 'Morning').toLowerCase() === sh.toLowerCase()
-              );
-            }).length;
+            const assignedCount = countAssignedForDutyFlightShift(currentDayAssignments, 'IDAC', flt, sh);
             if (assignedCount < req) {
               if (activeIdaShift !== sh) setActiveIdaShift(sh);
               if (!isFlightLocked && activeFlight !== flt) setActiveFlight(flt);
@@ -549,24 +783,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       for (const flt of orderedFlights) {
         const req = getFlightDutyQuotaForDate(fromDate, flt, activeDutyCode);
         if (req > 0) {
-          const assignedCount = assignmentsList.filter((a) => {
-            const air = airmanMap.get(a.airmanId);
-            if (!air || air.flightName !== flt) return false;
-            if (activeDutyCode === 'AIRPORT' || activeDutyCode === 'AIRFIELD_DUTY') {
-              return a.dutyCode === 'AIRPORT' || a.dutyCode === 'AIRFIELD_DUTY';
-            }
-            if (activeDutyCode === 'GD' || activeDutyCode === 'BASE_SECURITY') {
-              return (
-                a.dutyCode === 'GD' ||
-                a.dutyCode === 'BASE_SECURITY' ||
-                (a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'))
-              );
-            }
-            if (activeDutyCode === 'RECEPTION' || activeDutyCode === 'RECEIPTION') {
-              return a.dutyCode === 'RECEPTION' || a.dutyCode === 'RECEIPTION' || a.dutyCode === 'RECEPTION_DUTY' || a.dutyCode === 'KO' || a.dutyCode === 'K/O';
-            }
-            return a.dutyCode === activeDutyCode;
-          }).length;
+          const assignedCount = countAssignedForDutyFlightShift(currentDayAssignments, activeDutyCode, flt);
           if (assignedCount < req) {
             if (activeFlight !== flt) setActiveFlight(flt);
             return;
@@ -578,15 +795,15 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         setActiveFlight(firstWithQuota);
       }
     }
-  }, [isDutyLocked, isFlightLocked, activeFlight, activeDutyCode, fromDate, assignmentsList, airmanMap]);
+  }, [isDutyLocked, isFlightLocked, activeFlight, activeDutyCode, fromDate, assignmentsList, airmanMap, loadingInitial]);
 
 
   // Helper to get required ratio count for duty
   const getRequiredCountForDuty = (dutyCode: DutyCategoryCode, shift?: IDAShift, specificFlight?: FlightName | 'All'): number => {
-    const flights: FlightName[] = unitGroupOptions.length > 0 ? unitGroupOptions : (['Mechanics', 'Avionics', 'GCS', 'Admin'] as FlightName[]);
+    const flights: FlightName[] = getOrderedFlights();
     const targetFlight = specificFlight !== undefined ? specificFlight : activeFlight;
     if (targetFlight === 'All') {
-      if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
+      if (isIdacDutyCode(dutyCode)) {
         if (shift) {
           return flights.reduce((sum, f) => sum + getFlightDutyQuotaForDate(fromDate, f, 'IDAC', shift), 0);
         }
@@ -599,7 +816,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       return flights.reduce((sum, f) => sum + getFlightDutyQuotaForDate(fromDate, f, dutyCode), 0);
     }
 
-    if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
+    if (isIdacDutyCode(dutyCode)) {
       if (shift) {
         return getFlightDutyQuotaForDate(fromDate, targetFlight as FlightName, 'IDAC', shift);
       }
@@ -613,22 +830,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const isAirmanAssignedToSpecificDuty = (airmanId: string, dutyCode?: DutyCategoryCode, shift?: IDAShift) => {
     const targetCode = dutyCode || activeDutyCode;
     const targetShift = shift || activeIdaShift;
+    if (!targetCode) return false;
     return assignmentsList.some((a) => {
       if (!isSameAirman(a.airmanId, airmanId)) return false;
-      if (targetCode === 'AIRPORT' || (targetCode as string) === 'AIRFIELD_DUTY') {
-        return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
-      }
-      if (targetCode === 'RECEPTION' || (targetCode as string) === 'RECEIPTION') {
-        return a.dutyCode === 'RECEPTION' || (a.dutyCode as string) === 'RECEIPTION' || (a.dutyCode as string) === 'RECEPTION_DUTY' || a.dutyCode === 'KO' || a.dutyCode === 'K/O';
-      }
-      if (targetCode === 'GD' || (targetCode as string) === 'BASE_SECURITY') {
-        return a.dutyCode === 'GD' || (a.dutyCode as string) === 'BASE_SECURITY' || (a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'));
-      }
-      if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(targetCode as string)) {
-        const aShift = resolveCanonicalIdacShift(a);
-        return (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (!targetShift || aShift.toLowerCase() === targetShift.toLowerCase());
-      }
-      return a.dutyCode === targetCode;
+      return doesAssignmentMatchDuty(a, targetCode as DutyCategoryCode, isIdacDutyCode(targetCode) ? targetShift : undefined);
     });
   };
 
@@ -638,9 +843,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   };
 
   // Helper to get detailed list of assigned airmen for any duty code (and optional shift)
-  const getAssignedAirmenForDuty = (dutyCode: DutyCategoryCode, shift?: IDAShift) => {
+  const getAssignedAirmenForDuty = (dutyCode: DutyCategoryCode, shift?: IDAShift, specificFlight?: FlightName | 'All') => {
     const list: { airman: Airman; assignment: DutyAssignment }[] = [];
     const seenAirmen = new Set<string>();
+    const targetFlight = specificFlight !== undefined ? specificFlight : activeFlight;
 
     assignmentsList.forEach((assignment) => {
       let airman = airmanMap.get(assignment.airmanId);
@@ -649,9 +855,16 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (d) airman = airmanMap.get(d);
       }
       if (!airman) return;
-      if (activeFlight !== 'All' && !matchesAirmanGroup(airman, activeFlight)) return;
+      if (targetFlight !== 'All') {
+        const proxyFlt = (assignment as any).proxyForFlight as FlightName | undefined;
+        if (proxyFlt) {
+          if (proxyFlt !== targetFlight) return;
+        } else if (!matchesAirmanGroup(airman, targetFlight)) {
+          return;
+        }
+      }
 
-      if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode)) {
+      if (isIdacDutyCode(dutyCode)) {
         if (assignment.dutyCode !== 'IDAC' && assignment.dutyCode !== 'IDA') return;
         const aShift = resolveCanonicalIdacShift(assignment);
         if (shift) {
@@ -662,17 +875,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         seenAirmen.add(dedupKey);
         list.push({ airman, assignment: { ...assignment, idaShift: aShift } });
       } else {
-        const codeStr = dutyCode as string;
-        const asgnCodeStr = assignment.dutyCode as string;
-        const isMatch =
-          (codeStr === 'AIRPORT' || codeStr === 'AIRFIELD_DUTY')
-            ? (asgnCodeStr === 'AIRPORT' || asgnCodeStr === 'AIRFIELD_DUTY')
-            : (codeStr === 'RECEPTION' || codeStr === 'RECEIPTION')
-            ? (asgnCodeStr === 'RECEPTION' || asgnCodeStr === 'RECEIPTION' || asgnCodeStr === 'RECEPTION_DUTY' || asgnCodeStr === 'KO' || asgnCodeStr === 'K/O')
-            : (codeStr === 'GD' || codeStr === 'BASE_SECURITY')
-            ? (asgnCodeStr === 'GD' || asgnCodeStr === 'BASE_SECURITY' || (assignment.dutyName && assignment.dutyName.toUpperCase().includes('SECURITY')))
-            : asgnCodeStr === codeStr;
-        if (isMatch) {
+        if (doesAssignmentMatchDuty(assignment, dutyCode)) {
           if (seenAirmen.has(airman.id)) return;
           seenAirmen.add(airman.id);
           list.push({ airman, assignment });
@@ -1117,34 +1320,31 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
             proxyForFlight: isProxyEnabled && proxyForFlight ? proxyForFlight : undefined,
           };
           const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
-          setAssignmentsList((prev) => {
-            const updated = prev || [];
-            let filtered = updated;
-            // 1. If an airman was replaced, remove them from assignmentsList (preserving any underlying deployment)
+          const computeUpdatedAssignments = (baseList: DutyAssignment[]): DutyAssignment[] => {
+            let filtered = baseList || [];
             if (replacedAirman) {
               filtered = filtered.filter((a) => {
                 if (!isSameAirman(a.airmanId, replacedAirman!.id)) return true;
                 if (isDepCode(a.dutyCode)) return true;
-                if (activeDutyCode === 'AIRPORT' || (activeDutyCode as string) === 'AIRFIELD_DUTY') {
-                  return a.dutyCode !== 'AIRPORT' && (a.dutyCode as string) !== 'AIRFIELD_DUTY';
-                }
-                if (activeDutyCode === 'GD' || (activeDutyCode as string) === 'BASE_SECURITY') {
-                  return a.dutyCode !== 'GD' && (a.dutyCode as string) !== 'BASE_SECURITY' && !((a as any).dutyName && (a as any).dutyName.toUpperCase().includes('SECURITY'));
-                }
-                if (isIdac) {
-                  return !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === shiftToUse);
-                }
-                return a.dutyCode !== activeDutyCode;
+                return !doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
               });
             }
-            // 2. Remove other non-deployment duties for the newly assigned airman on this date
             if (isIdac) {
-              filtered = filtered.filter((a) => !(isSameAirman(a.airmanId, airman.id) && (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA' || a.dutyCode === 'DUTY' || a.dutyCode === 'DUTY_ON' || a.dutyCode === 'ON_PARADE')));
+              filtered = filtered.filter(
+                (a) =>
+                  !(
+                    isSameAirman(a.airmanId, airman.id) &&
+                    ['IDAC', 'IDA', 'DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))
+                  )
+              );
             } else {
               filtered = filtered.filter((a) => !isSameAirman(a.airmanId, airman.id) || isDepCode(a.dutyCode));
             }
             return [...filtered, newAssignment];
-          });
+          };
+
+          const nextAssignments = computeUpdatedAssignments(assignmentsList);
+          setAssignmentsList((prev) => computeUpdatedAssignments(prev));
 
           // Sync directly with localDb
           try {
@@ -1157,16 +1357,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                 list = list.filter((a) => {
                   if (!isSameAirman(a.airmanId, replacedAirman!.id) || a.date !== dStr) return true;
                   if (isDepCode(a.dutyCode)) return true;
-                  if (activeDutyCode === 'AIRPORT' || (activeDutyCode as string) === 'AIRFIELD_DUTY') {
-                    return a.dutyCode !== 'AIRPORT' && (a.dutyCode as string) !== 'AIRFIELD_DUTY';
-                  }
-                  if (activeDutyCode === 'GD' || (activeDutyCode as string) === 'BASE_SECURITY') {
-                    return a.dutyCode !== 'GD' && (a.dutyCode as string) !== 'BASE_SECURITY' && !((a as any).dutyName && (a as any).dutyName.toUpperCase().includes('SECURITY'));
-                  }
-                  if (isIdac) {
-                    return !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && a.idaShift === shiftToUse);
-                  }
-                  return a.dutyCode !== activeDutyCode;
+                  return !doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
                 });
               }
               if (isIdac) {
@@ -1182,8 +1373,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
             console.warn('localDb assign sync warning:', syncErr);
           }
 
-          const dtName = DUTY_TYPE_MAP.get(activeDutyCode as any)?.name || activeDutyCode;
-          const shiftSuffix = isIdac ? ` (${activeIdaShift})` : '';
+          const dtName = DUTY_TYPE_MAP.get(dutyCodeToUse as any)?.name || dutyCodeToUse;
+          const shiftSuffix = isIdac ? ` (${shiftToUse})` : '';
           if (replacedAirman) {
             setToastMessage(`🔄 Replaced ${formatAirmanName(replacedAirman.rank)} ${replacedAirman.name} ➔ Assigned ${formatAirmanName(airman.rank)} ${airman.name} to ${dtName}${shiftSuffix}`);
           } else {
@@ -1195,312 +1386,203 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
           if (onSuccess) onSuccess();
           fetchCurrentRoster();
 
-          // Auto-advance logic when BOTH Flight AND Duty are Locked:
-          // Keep Flight and Duty fixed; once the locked flight's quota for that locked duty on fromDate is fulfilled, advance to next date
-          if (isFlightLocked && activeFlight !== 'All' && isDutyLocked && activeDutyCode) {
-            const targetFlight = activeFlight as FlightName;
-            let nextAssignments = assignmentsList;
-            if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) {
-              nextAssignments = [
-                ...nextAssignments.filter(
-                  (a) =>
-                    !(
-                      isSameAirman(a.airmanId, airman.id) &&
-                      (a.dutyCode === 'IDAC' ||
-                        a.dutyCode === 'IDA' ||
-                        a.dutyCode === 'DUTY' ||
-                        a.dutyCode === 'DUTY_ON' ||
-                        a.dutyCode === 'ON_PARADE')
-                    )
-                ),
-                newAssignment,
-              ];
-              const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
-              const idacSlots: Array<{ shift: IDAShift; required: number; assigned: number }> = [];
-              shifts.forEach((sh) => {
-                const req = getFlightDutyQuotaForDate(fromDate, targetFlight, 'IDAC', sh);
-                if (req > 0) {
-                  const assigned = nextAssignments.filter((a) => {
-                    const air = airmanMap.get(a.airmanId);
-                    return (
-                      air &&
-                      air.flightName === targetFlight &&
-                      (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
-                      (a.idaShift || a.shift || 'Morning').toLowerCase() === sh.toLowerCase()
-                    );
-                  }).length;
-                  idacSlots.push({ shift: sh, required: req, assigned });
-                }
-              });
+          // Unified Auto-Advance Workflow:
+          // 1. Stay in current duty if it has another unfulfilled shift (IDAC) or flight slot.
+          // 2. When current duty is completely filled, move to any other duty & flight on fromDate that has unfulfilled quota (unless Duty is locked).
+          // 3. When all duties' quotas for the day are completely filled, advance to the next day.
+          if (dutyCodeToUse) {
+            userManuallySelectedShiftRef.current = false;
+            userManuallySelectedFlightRef.current = false;
 
-              const allFulfilled = idacSlots.length === 0 || idacSlots.every((s) => s.assigned >= s.required);
-              if (allFulfilled) {
-                const nextDateStr = findNextDateWithDutyQuota(fromDate, targetFlight, 'IDAC', 1);
-                setToastMessage(`🎉 ${targetFlight} IDAC duty completed for ${fromDate}! Advancing to ${nextDateStr}...`);
-                setTimeout(() => {
-                  setFromDate(nextDateStr);
-                  setToDate(nextDateStr);
-                  setSelectedPresetDays(1);
-                }, 500);
-              } else {
-                const currentIdx = idacSlots.findIndex((s) => s.shift === activeIdaShift);
-                const nextSlot = idacSlots.slice(currentIdx + 1).find((s) => s.assigned < s.required) || idacSlots.find((s) => s.assigned < s.required);
-                if (nextSlot) {
-                  setActiveIdaShift(nextSlot.shift);
-                }
-              }
-            } else {
-              nextAssignments = [...nextAssignments.filter((a) => !isSameAirman(a.airmanId, airman.id) || isDepCode(a.dutyCode)), newAssignment];
-              const req = getFlightDutyQuotaForDate(fromDate, targetFlight, activeDutyCode);
-              const assigned = nextAssignments.filter((a) => {
-                const air = airmanMap.get(a.airmanId);
-                if (!air || air.flightName !== targetFlight) return false;
-                if (activeDutyCode === 'AIRPORT' || activeDutyCode === 'AIRFIELD_DUTY') {
-                  return a.dutyCode === 'AIRPORT' || a.dutyCode === 'AIRFIELD_DUTY';
-                }
-                if (activeDutyCode === 'GD' || activeDutyCode === 'BASE_SECURITY') {
-                  return (
-                    a.dutyCode === 'GD' ||
-                    a.dutyCode === 'BASE_SECURITY' ||
-                    (a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'))
-                  );
-                }
-                if (activeDutyCode === 'RECEPTION' || activeDutyCode === 'RECEIPTION') {
-                  return a.dutyCode === 'RECEPTION' || a.dutyCode === 'RECEIPTION' || a.dutyCode === 'RECEPTION_DUTY' || a.dutyCode === 'KO' || a.dutyCode === 'K/O';
-                }
-                return a.dutyCode === activeDutyCode;
-              }).length;
+            const allowedFlights: FlightName[] =
+              isFlightLocked && activeFlight !== 'All'
+                ? [activeFlight as FlightName]
+                : getOrderedFlights();
 
-              const targetQuota = Math.max(1, req);
-              if (assigned >= targetQuota) {
-                const nextDateStr = findNextDateWithDutyQuota(fromDate, targetFlight, activeDutyCode, 1);
-                const dutyName = DUTY_TYPE_MAP.get(activeDutyCode as any)?.name || activeDutyCode;
-                setToastMessage(`🎉 ${targetFlight} ${dutyName} completed for ${fromDate}! Advancing to ${nextDateStr}...`);
-                setTimeout(() => {
-                  setFromDate(nextDateStr);
-                  setToDate(nextDateStr);
-                  setSelectedPresetDays(1);
-                }, 500);
-              }
-            }
-          }
-          // Auto-advance logic: Advance to next unfulfilled duty or next date when ONLY Flight is locked (or FlightFirst mode)
-          else if ((isFlightLocked || (selectionMode === 'FlightFirst' && !isDutyLocked)) && !isDutyLocked && activeFlight !== 'All' && activeDutyCode) {
-            const targetFlight = activeFlight as FlightName;
-            const _storedMatrix = getStoredDutyMatrix();
-            const allDuties = DUTY_TYPES.filter((dt) => {
-              if (!dt.isCountedAsDuty) return false;
-              const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code);
-              if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false;
-              return true;
-            });
+            let advancedWithinCurrentDuty = false;
 
-            // Construct next assignments state
-            let nextAssignments = assignmentsList;
-            if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) {
-              nextAssignments = [...nextAssignments.filter((a) => !(isSameAirman(a.airmanId, airman.id) && (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA' || a.dutyCode === 'DUTY' || a.dutyCode === 'DUTY_ON' || a.dutyCode === 'ON_PARADE'))), newAssignment];
-            } else {
-              nextAssignments = [...nextAssignments.filter((a) => !isSameAirman(a.airmanId, airman.id) || isDepCode(a.dutyCode)), newAssignment];
-            }
+            if (isIdac) {
+              const allShifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
+              const currentShift: IDAShift = shiftToUse || activeIdaShift || 'Morning';
 
-            interface DutySlot {
-              dutyCode: DutyCategoryCode;
-              shift?: IDAShift;
-              required: number;
-              assigned: number;
-            }
-            const slots: DutySlot[] = [];
-
-            allDuties.forEach((dt) => {
-              if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dt.code)) {
-                const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
-                shifts.forEach((sh) => {
-                  const req = getFlightDutyQuotaForDate(fromDate, targetFlight, 'IDAC', sh);
-                  if (req > 0) {
-                    const assigned = nextAssignments.filter((a) => {
-                      const air = airmanMap.get(a.airmanId);
-                      return air && air.flightName === targetFlight &&
-                        (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
-                        a.idaShift === sh;
-                    }).length;
-                    slots.push({ dutyCode: 'IDAC', shift: sh, required: req, assigned });
-                  }
-                });
-              } else {
-                const req = getFlightDutyQuotaForDate(fromDate, targetFlight, dt.code);
-                if (req > 0) {
-                  const assigned = nextAssignments.filter((a) => {
-                    const air = airmanMap.get(a.airmanId);
-                    if (!air || air.flightName !== targetFlight) return false;
-                    if (dt.code === 'AIRPORT') return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
-                    return a.dutyCode === dt.code;
-                  }).length;
-                  slots.push({ dutyCode: dt.code, required: req, assigned });
-                }
-              }
-            });
-
-            // Check if all duty slots for this locked flight on fromDate are now fulfilled
-            const allFulfilled = slots.length > 0 && slots.every((s) => s.assigned >= s.required);
-
-            if (allFulfilled && isFlightLocked) {
-              const nextDateStr = findNextDateWithDutyQuota(fromDate, targetFlight, '', 1);
-              
-              setToastMessage(`🎉 All ${targetFlight} duties completed for ${fromDate}! Advancing to ${nextDateStr}...`);
-              setTimeout(() => {
-                setFromDate(nextDateStr);
-                setToDate(nextDateStr);
-                setSelectedPresetDays(1);
-              }, 700);
-            } else {
-              // Auto-advance to next unfulfilled duty
-              const currentSlotIdx = slots.findIndex(s => s.dutyCode === activeDutyCode && (!s.shift || s.shift === activeIdaShift));
-              let nextSlot = slots.slice(currentSlotIdx + 1).find(s => s.assigned < s.required);
-              if (!nextSlot) {
-                nextSlot = slots.find(s => s.assigned < s.required);
-              }
-              if (nextSlot) {
-                setActiveDutyCode(nextSlot.dutyCode);
-                setActiveIdaShift(nextSlot.shift);
-              }
-            }
-          }
-
-          // Auto-advance logic when ONLY Duty is Locked (Flight is not locked)
-          else if (isDutyLocked && !isFlightLocked && activeDutyCode) {
-            // Construct next assignments state
-            let nextAssignments = assignmentsList;
-            if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) {
-              nextAssignments = [
-                ...nextAssignments.filter(
-                  (a) =>
-                    !(
-                      isSameAirman(a.airmanId, airman.id) &&
-                      (a.dutyCode === 'IDAC' ||
-                        a.dutyCode === 'IDA' ||
-                        a.dutyCode === 'DUTY' ||
-                        a.dutyCode === 'DUTY_ON' ||
-                        a.dutyCode === 'ON_PARADE')
-                    )
-                ),
-                newAssignment,
-              ];
-            } else {
-              nextAssignments = [...nextAssignments.filter((a) => !isSameAirman(a.airmanId, airman.id)), newAssignment];
-            }
-
-            const orderedFlights: FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
-
-            if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) {
-              // IDAC shift-wise auto-advance: Morning -> Afternoon -> Night
-              interface IdacSlot {
+              interface IdacQuotaSlot {
                 shift: IDAShift;
                 flight: FlightName;
                 required: number;
                 assigned: number;
               }
-              const idacSlots: IdacSlot[] = [];
-              const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
-
-              shifts.forEach((sh) => {
-                orderedFlights.forEach((flt) => {
+              const idacSlots: IdacQuotaSlot[] = [];
+              allShifts.forEach((sh) => {
+                allowedFlights.forEach((flt) => {
                   const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
                   if (req > 0) {
-                    const assigned = nextAssignments.filter((a) => {
-                      const air = airmanMap.get(a.airmanId);
-                      return (
-                        air &&
-                        air.flightName === flt &&
-                        (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') &&
-                        (a.idaShift || a.shift || 'Morning').toLowerCase() === sh.toLowerCase()
-                      );
-                    }).length;
+                    const assigned = countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh);
                     idacSlots.push({ shift: sh, flight: flt, required: req, assigned });
                   }
                 });
               });
 
-              const allIdacFulfilled = idacSlots.length > 0 && idacSlots.every((s) => s.assigned >= s.required);
+              // First check if current shift still has another unfulfilled flight slot
+              const sameShiftSlots = idacSlots.filter((s) => s.shift === currentShift);
+              const curFltIdx = sameShiftSlots.findIndex((s) => s.flight === targetFlight);
+              const nextInSameShift =
+                (curFltIdx >= 0 ? sameShiftSlots.slice(curFltIdx + 1).find((s) => s.assigned < s.required) : undefined) ||
+                sameShiftSlots.find((s) => s.assigned < s.required);
 
-              if (allIdacFulfilled) {
-                const nextDateStr = findNextDateWithDutyQuota(fromDate, 'All', 'IDAC', 1);
-
-                setToastMessage(`🎉 All IDAC shifts completed for ${fromDate}! Advancing to ${nextDateStr}...`);
-                setTimeout(() => {
-                  setFromDate(nextDateStr);
-                  setToDate(nextDateStr);
-                  setSelectedPresetDays(1);
-                }, 700);
-              } else {
-                // Find next unfulfilled slot in sequence
-                const currentSlotIdx = idacSlots.findIndex(
-                  (s) => s.shift === activeIdaShift && s.flight === activeFlight
-                );
-                let nextSlot = idacSlots.slice(currentSlotIdx + 1).find((s) => s.assigned < s.required);
-                if (!nextSlot) {
-                  nextSlot = idacSlots.find((s) => s.assigned < s.required);
+              if (nextInSameShift) {
+                setActiveIdaShift(nextInSameShift.shift);
+                if (!isFlightLocked) {
+                  setActiveFlight(nextInSameShift.flight);
                 }
-                if (nextSlot) {
-                  setActiveIdaShift(nextSlot.shift);
-                  setActiveFlight(nextSlot.flight);
+                advancedWithinCurrentDuty = true;
+              } else {
+                // Move to the next shift after currentShift (wrapping around Morning -> Afternoon -> Night)
+                const curShiftIdx = allShifts.indexOf(currentShift);
+                const orderedNextShifts: IDAShift[] =
+                  curShiftIdx >= 0
+                    ? [...allShifts.slice(curShiftIdx + 1), ...allShifts.slice(0, curShiftIdx + 1)]
+                    : allShifts;
+
+                let nextShiftSlot: IdacQuotaSlot | undefined;
+                for (const sh of orderedNextShifts) {
+                  const found = idacSlots.find((s) => s.shift === sh && s.assigned < s.required);
+                  if (found) {
+                    nextShiftSlot = found;
+                    break;
+                  }
+                }
+
+                if (nextShiftSlot) {
+                  setActiveIdaShift(nextShiftSlot.shift);
+                  if (!isFlightLocked) {
+                    setActiveFlight(nextShiftSlot.flight);
+                  }
+                  advancedWithinCurrentDuty = true;
                 }
               }
             } else {
-              // Non-IDAC standard duty auto-advance across flights
-              interface DutyFlightSlot {
+              // Non-IDAC duty: check if another flight for this duty still has unfulfilled quota
+              interface FlightQuotaSlot {
                 flight: FlightName;
                 required: number;
                 assigned: number;
               }
-              const flightSlots: DutyFlightSlot[] = [];
-
-              orderedFlights.forEach((flt) => {
-                const req = getFlightDutyQuotaForDate(fromDate, flt, activeDutyCode);
+              const flightSlots: FlightQuotaSlot[] = [];
+              allowedFlights.forEach((flt) => {
+                const req = getFlightDutyQuotaForDate(fromDate, flt, dutyCodeToUse);
                 if (req > 0) {
-                  const assigned = nextAssignments.filter((a) => {
-                    const air = airmanMap.get(a.airmanId);
-                    if (!air || air.flightName !== flt) return false;
-                    if (activeDutyCode === 'AIRPORT' || activeDutyCode === 'AIRFIELD_DUTY') {
-                      return a.dutyCode === 'AIRPORT' || a.dutyCode === 'AIRFIELD_DUTY';
-                    }
-                    if (activeDutyCode === 'GD' || activeDutyCode === 'BASE_SECURITY') {
-                      return (
-                        a.dutyCode === 'GD' ||
-                        a.dutyCode === 'BASE_SECURITY' ||
-                        (a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'))
-                      );
-                    }
-                    if (activeDutyCode === 'RECEPTION' || activeDutyCode === 'RECEIPTION') {
-                      return a.dutyCode === 'RECEPTION' || a.dutyCode === 'RECEIPTION' || a.dutyCode === 'RECEPTION_DUTY' || a.dutyCode === 'KO' || a.dutyCode === 'K/O';
-                    }
-                    return a.dutyCode === activeDutyCode;
-                  }).length;
+                  const assigned = countAssignedForDutyFlightShift(nextAssignments, dutyCodeToUse, flt);
                   flightSlots.push({ flight: flt, required: req, assigned });
                 }
               });
 
-              const allDutyFulfilled = flightSlots.length > 0 && flightSlots.every((s) => s.assigned >= s.required);
-              const dutyName = DUTY_TYPE_MAP.get(activeDutyCode as any)?.name || activeDutyCode;
+              const curIdx = flightSlots.findIndex((s) => s.flight === targetFlight);
+              const nextFlightSlot =
+                (curIdx >= 0 ? flightSlots.slice(curIdx + 1).find((s) => s.assigned < s.required) : undefined) ||
+                flightSlots.find((s) => s.assigned < s.required);
 
-              if (allDutyFulfilled) {
-                const nextDateStr = findNextDateWithDutyQuota(fromDate, 'All', activeDutyCode, 1);
+              if (nextFlightSlot) {
+                if (!isFlightLocked) {
+                  setActiveFlight(nextFlightSlot.flight);
+                }
+                advancedWithinCurrentDuty = true;
+              }
+            }
 
-                setToastMessage(`🎉 All ${dutyName} duties completed for ${fromDate}! Advancing to ${nextDateStr}...`);
+            if (!advancedWithinCurrentDuty) {
+              // Current duty is completely fulfilled across all allowed shifts & flights!
+              const allActiveDuties = getActiveCountedDuties();
+              const candidateDuties =
+                isDutyLocked || onlyIdac
+                  ? allActiveDuties.filter((d) =>
+                      onlyIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
+                    )
+                  : (() => {
+                      const curDutyIdx = allActiveDuties.findIndex((d) =>
+                        isIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
+                      );
+                      if (curDutyIdx >= 0) {
+                        return [
+                          ...allActiveDuties.slice(curDutyIdx + 1),
+                          ...allActiveDuties.slice(0, curDutyIdx + 1),
+                        ];
+                      }
+                      return allActiveDuties;
+                    })();
+
+              interface DayQuotaSlot {
+                dutyCode: DutyCategoryCode;
+                shift?: IDAShift;
+                flight: FlightName;
+                required: number;
+                assigned: number;
+              }
+              const allDaySlots: DayQuotaSlot[] = [];
+
+              candidateDuties.forEach((dt) => {
+                if (isIdacDutyCode(dt.code)) {
+                  const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
+                  shifts.forEach((sh) => {
+                    allowedFlights.forEach((flt) => {
+                      const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
+                      if (req > 0) {
+                        const assigned = countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh);
+                        allDaySlots.push({
+                          dutyCode: 'IDAC',
+                          shift: sh,
+                          flight: flt,
+                          required: req,
+                          assigned,
+                        });
+                      }
+                    });
+                  });
+                } else {
+                  allowedFlights.forEach((flt) => {
+                    const req = getFlightDutyQuotaForDate(fromDate, flt, dt.code);
+                    if (req > 0) {
+                      const assigned = countAssignedForDutyFlightShift(nextAssignments, dt.code, flt);
+                      allDaySlots.push({
+                        dutyCode: dt.code,
+                        shift: undefined,
+                        flight: flt,
+                        required: req,
+                        assigned,
+                      });
+                    }
+                  });
+                }
+              });
+
+              const nextUnfulfilledOtherDuty = allDaySlots.find((s) => s.assigned < s.required);
+
+              if (nextUnfulfilledOtherDuty) {
+                setActiveDutyCode(nextUnfulfilledOtherDuty.dutyCode);
+                setActiveIdaShift(nextUnfulfilledOtherDuty.shift);
+                if (!isFlightLocked) {
+                  setActiveFlight(nextUnfulfilledOtherDuty.flight);
+                }
+              } else if (allDaySlots.length > 0) {
+                // Every duty quota on fromDate (within lock constraints) is completely filled -> advance to next day!
+                const lockDutyFilter =
+                  isDutyLocked || onlyIdac ? (isIdac ? 'IDAC' : dutyCodeToUse) : '';
+                const lockFlightFilter = isFlightLocked ? activeFlight : 'All';
+                const nextDateStr = findNextDateWithDutyQuota(
+                  fromDate,
+                  lockFlightFilter,
+                  lockDutyFilter,
+                  1
+                );
+
+                pendingAutoSelectDateRef.current = nextDateStr;
+                setToastMessage(
+                  `🎉 All duty quotas completed for ${fromDate}! Advancing to ${nextDateStr}...`
+                );
                 setTimeout(() => {
                   setFromDate(nextDateStr);
                   setToDate(nextDateStr);
                   setSelectedPresetDays(1);
-                }, 700);
-              } else {
-                // Advance to next unfulfilled flight
-                const currentSlotIdx = flightSlots.findIndex((s) => s.flight === activeFlight);
-                let nextSlot = flightSlots.slice(currentSlotIdx + 1).find((s) => s.assigned < s.required);
-                if (!nextSlot) {
-                  nextSlot = flightSlots.find((s) => s.assigned < s.required);
-                }
-                if (nextSlot) {
-                  setActiveFlight(nextSlot.flight);
-                }
+                }, 550);
               }
             }
           }
@@ -2166,28 +2248,13 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                 {(() => {
                   const _storedMatrix = getStoredDutyMatrix();
-                  const allDuties = DUTY_TYPES.filter((dt) => {
-                    if (!dt.isCountedAsDuty) return false;
-                    if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
-                    const mEntries = _storedMatrix.filter(t => t.dutyCode === dt.code);
-                    if (mEntries.length > 0 && mEntries.every(t => t.isDisabled)) return false;
-                    return true;
-                  });
+                  const allDuties = getActiveCountedDuties();
+                  const cardFlightScope: FlightName | 'All' =
+                    isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : 'All';
+
                   const ratioFiltered = allDuties.filter((dt) => {
-                    const req = getRequiredCountForDuty(dt.code);
-                    const assignedCount = assignmentsList.filter(a => {
-                      if (activeFlight !== 'All') {
-                        const airman = airmanMap.get(a.airmanId);
-                        if (airman && !matchesAirmanGroup(airman, activeFlight)) return false;
-                      }
-                      if (dt.code === 'AIRPORT') {
-                        return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
-                      }
-                      if (dt.code === 'IDAC' || dt.code === 'IDA') {
-                        return a.dutyCode === 'IDAC' || a.dutyCode === 'IDA';
-                      }
-                      return a.dutyCode === dt.code;
-                    }).length;
+                    const req = getRequiredCountForDuty(dt.code, undefined, cardFlightScope);
+                    const assignedCount = getAssignedAirmenForDuty(dt.code, undefined, cardFlightScope).length;
                     return req > 0 || assignedCount > 0;
                   });
 
@@ -2200,13 +2267,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                     if (isFlightLocked && activeFlight !== 'All') {
                       return allDuties.filter((dt) => {
                         const fltQuota = getRequiredCountForDuty(dt.code, undefined, activeFlight as FlightName);
-                        const fltAssigned = assignmentsList.filter(a => {
-                          const airman = airmanMap.get(a.airmanId);
-                          if (!airman || !matchesAirmanGroup(airman, activeFlight)) return false;
-                          if (dt.code === 'AIRPORT') return a.dutyCode === 'AIRPORT' || (a.dutyCode as string) === 'AIRFIELD_DUTY';
-                          if (dt.code === 'IDAC' || dt.code === 'IDA') return a.dutyCode === 'IDAC' || a.dutyCode === 'IDA';
-                          return a.dutyCode === dt.code;
-                        }).length;
+                        const fltAssigned = getAssignedAirmenForDuty(dt.code, undefined, activeFlight as FlightName).length;
                         return fltQuota > 0 || fltAssigned > 0;
                       });
                     }
@@ -2225,8 +2286,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
                   return dutiesToRender.map((dt) => {
                     const isSelected = activeDutyCode === dt.code;
-                    const reqQuota = getRequiredCountForDuty(dt.code);
-                    const assignedList = getAssignedAirmenForDuty(dt.code);
+                    const reqQuota = getRequiredCountForDuty(dt.code, undefined, cardFlightScope);
+                    const assignedList = getAssignedAirmenForDuty(dt.code, undefined, cardFlightScope);
                     
                     let displayName = dt.name;
                     if (dt.code !== 'IDAC' && dt.code !== 'IDA') {
@@ -2241,8 +2302,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       ? (reqQuota > 0 && assignedList.length > reqQuota) ||
                         (reqQuota === 0 && assignedList.length > 0) ||
                         (['Morning', 'Afternoon', 'Night'] as IDAShift[]).some((sh) => {
-                          const q = getRequiredCountForDuty('IDAC', sh);
-                          const a = getAssignedAirmenForDuty('IDAC', sh).length;
+                          const q = getRequiredCountForDuty('IDAC', sh, cardFlightScope);
+                          const a = getAssignedAirmenForDuty('IDAC', sh, cardFlightScope).length;
                           return (q > 0 && a > q) || (q === 0 && a > 0);
                         })
                       : (reqQuota > 0 && assignedList.length > reqQuota) || (reqQuota === 0 && assignedList.length > 0);
@@ -2252,8 +2313,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       (isIdacCard
                         ? (reqQuota > 0 && assignedList.length < reqQuota) ||
                           (['Morning', 'Afternoon', 'Night'] as IDAShift[]).some((sh) => {
-                            const q = getRequiredCountForDuty('IDAC', sh);
-                            const a = getAssignedAirmenForDuty('IDAC', sh).length;
+                            const q = getRequiredCountForDuty('IDAC', sh, cardFlightScope);
+                            const a = getAssignedAirmenForDuty('IDAC', sh, cardFlightScope).length;
                             return q > 0 && a < q;
                           })
                         : reqQuota > 0 && assignedList.length < reqQuota);
@@ -2268,10 +2329,25 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       <div
                         key={dt.code}
                         onClick={() => {
-                          setActiveDutyCode(dt.code);
                           userManuallySelectedFlightRef.current = false;
-                          if (activeFlight === 'All') {
-                            setSelectionMode('DutyFirst');
+                          userManuallySelectedShiftRef.current = false;
+                          setActiveDutyCode(dt.code);
+                          setSelectionMode('DutyFirst');
+
+                          if (isIdacDutyCode(dt.code)) {
+                            const slot = findFirstUnfulfilledIdacSlot(fromDate, assignmentsList);
+                            if (slot) {
+                              setActiveIdaShift(slot.shift);
+                              if (!isFlightLocked) {
+                                setActiveFlight(slot.flight);
+                              }
+                            }
+                          } else {
+                            setActiveIdaShift(undefined);
+                            if (!isFlightLocked) {
+                              const fltRes = findFirstUnfulfilledFlightForDuty(fromDate, dt.code, assignmentsList);
+                              setActiveFlight(fltRes.flight);
+                            }
                           }
                         }}
                         className={`p-2 rounded-xl border text-left transition-all relative flex flex-col justify-start cursor-pointer ${
@@ -2411,14 +2487,19 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               ) : (
                 <div className={`grid gap-2 ${availableIdaShifts.length === 1 ? 'grid-cols-1' : availableIdaShifts.length === 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-3'}`}>
                   {availableIdaShifts.map((s) => {
-                    const shiftQuota = getRequiredCountForDuty('IDAC', s);
-                    const shiftAssigned = getAssignedAirmenForDuty('IDAC', s);
-                    const allFlights: import('../types').FlightName[] = ['Avionics', 'Mechanics', 'GCS', 'Admin'];
+                    const shiftCardScope: FlightName | 'All' =
+                      isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : 'All';
+                    const shiftQuota = getRequiredCountForDuty('IDAC', s, shiftCardScope);
+                    const shiftAssigned = getAssignedAirmenForDuty('IDAC', s, shiftCardScope);
+                    const allFlights: import('../types').FlightName[] =
+                      isFlightLocked && activeFlight !== 'All'
+                        ? [activeFlight as FlightName]
+                        : getOrderedFlights();
                     const unfulfilledFlights: import('../types').FlightName[] = [];
                     allFlights.forEach(flt => {
                       const fltQuota = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', s);
                       if (fltQuota > 0) {
-                        const fltAssigned = shiftAssigned.filter(item => item.airman.flightName === flt).length;
+                        const fltAssigned = countAssignedForDutyFlightShift(assignmentsList, 'IDAC', flt, s);
                         const remaining = fltQuota - fltAssigned;
                         for (let i = 0; i < remaining; i++) {
                            unfulfilledFlights.push(flt);
@@ -2440,8 +2521,21 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       <div
                         key={s}
                         onClick={() => {
-                          setActiveIdaShift(s);
+                          userManuallySelectedShiftRef.current = true;
                           userManuallySelectedFlightRef.current = false;
+                          setActiveIdaShift(s);
+                          if (!isFlightLocked) {
+                            const flts = getOrderedFlights();
+                            const unfulfilledFlt = flts.find((f) => {
+                              const q = getFlightDutyQuotaForDate(fromDate, f, 'IDAC', s);
+                              return q > 0 && countAssignedForDutyFlightShift(assignmentsList, 'IDAC', f, s) < q;
+                            });
+                            const firstQuotaFlt = flts.find((f) => getFlightDutyQuotaForDate(fromDate, f, 'IDAC', s) > 0);
+                            const chosen = unfulfilledFlt || firstQuotaFlt;
+                            if (chosen) {
+                              setActiveFlight(chosen);
+                            }
+                          }
                         }}
                         className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-start ${
                           isShiftSelected

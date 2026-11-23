@@ -1533,17 +1533,21 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                   <th className="py-3 px-1.5 text-center bg-blue-950 text-blue-300 w-9 border-l border-slate-800 font-bold" title="Airfield Duty (AFLD)">
                     AFLD
                   </th>
-                  <th className="py-3 px-1.5 text-center bg-sky-950 text-sky-300 w-11 border-l border-slate-800 font-bold" title="IDAC Shift A (Morning)">
-                    IDAC "A"
+                  <th className="py-2 px-1.5 text-center bg-sky-950 text-sky-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift A (Morning)">
+                    <span className="block">IDAC</span>
+                    <span className="block">"A"</span>
                   </th>
-                  <th className="py-3 px-1.5 text-center bg-blue-950 text-blue-300 w-11 border-l border-slate-800 font-bold" title="IDAC Shift B (Afternoon)">
-                    IDAC "B"
+                  <th className="py-2 px-1.5 text-center bg-blue-950 text-blue-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift B (Afternoon)">
+                    <span className="block">IDAC</span>
+                    <span className="block">"B"</span>
                   </th>
-                  <th className="py-3 px-1.5 text-center bg-indigo-950 text-indigo-300 w-11 border-l border-slate-800 font-bold" title="IDAC Shift C (Night)">
-                    IDAC "C"
+                  <th className="py-2 px-1.5 text-center bg-indigo-950 text-indigo-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift C (Night)">
+                    <span className="block">IDAC</span>
+                    <span className="block">"C"</span>
                   </th>
-                  <th className="py-3 px-2 text-center bg-emerald-950 text-emerald-300 w-12 border-l border-slate-800 font-bold" title="Total Duties Performed">
-                    Total Duty
+                  <th className="py-2 px-2 text-center bg-emerald-950 text-emerald-300 w-11 border-l border-slate-800 font-bold leading-tight" title="Total Duties Performed">
+                    <span className="block">Total</span>
+                    <span className="block">Duty</span>
                   </th>
                 </tr>
               </thead>
@@ -1557,6 +1561,25 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                     const dateStr = `${monthKey}-${dayStr}`;
                     return isHolidayDate(dateStr, dObj);
                   });
+
+                  // Precompute contiguous leave streak length per day for this airman (span > 7 days => AL)
+                  const leaveStreakLenByDay = new Map<number, number>();
+                  let currentLeaveStreak: number[] = [];
+                  for (let d = 1; d <= daysCount; d++) {
+                    const dStr = `${monthKey}-${d < 10 ? `0${d}` : `${d}`}`;
+                    const dAss = resolveAirmanDutyForDate(airman.id, dStr, assignmentMap);
+                    if (dAss?.dutyCode === 'LEAVE') {
+                      currentLeaveStreak.push(d);
+                    } else if (currentLeaveStreak.length > 0) {
+                      const len = currentLeaveStreak.length;
+                      currentLeaveStreak.forEach((ld) => leaveStreakLenByDay.set(ld, len));
+                      currentLeaveStreak = [];
+                    }
+                  }
+                  if (currentLeaveStreak.length > 0) {
+                    const len = currentLeaveStreak.length;
+                    currentLeaveStreak.forEach((ld) => leaveStreakLenByDay.set(ld, len));
+                  }
 
                   return (
                     <tr
@@ -1652,8 +1675,20 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                           if (offDuty === 'GD' || offDuty === 'SECURITY') offDuty = 'SY';
                           if (offDuty === 'AIRPORT' || offDuty === 'AIRFIELD' || offDuty === 'APT') offDuty = 'AFLD';
                           if (offDuty === 'ESC' || offDuty === 'ESCORT' || offDuty?.includes('1794394') || (ass?.notes || '').toLowerCase().includes('escort')) offDuty = 'ESCT';
-                          displayLabel = offDuty ? `${offDuty} OFF` : 'OFF';
+                          displayLabel = offDuty ? `${offDuty} Off` : 'Off';
                           displayBadgeBg = 'bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700';
+                        } else if (dutyCode === 'LEAVE') {
+                          const combined = `${ass?.notes || ''} ${(ass as any)?.dutyName || ''}`.toLowerCase();
+                          const streakLen = leaveStreakLenByDay.get(day) || 1;
+                          if (combined.includes('recreation') || combined.includes('(rl)') || /\brl\b/.test(combined) || combined.includes('rec leave') || combined.includes('rec.')) {
+                            displayLabel = 'RL';
+                          } else if (combined.includes('sick') || combined.includes('(sl)') || /\bsl\b/.test(combined) || combined.includes('medical')) {
+                            displayLabel = 'SL';
+                          } else if (combined.includes('annual') || combined.includes('(al)') || /\bal\b/.test(combined) || streakLen > 7) {
+                            displayLabel = 'AL';
+                          } else {
+                            displayLabel = 'CL';
+                          }
                         } else if (
                           (dutyCode as any) === 'ESCORT' ||
                           (dutyCode as any) === 'ESC' ||
@@ -1697,6 +1732,26 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                           displayLabel = dutyCode;
                         }
 
+                        // Split 2-word labels (e.g. 'IDAC "B"', 'IDAC Off', 'SY Off', 'NTF Off') or long single-word labels into 2 stacked lines
+                        let topLine = displayLabel;
+                        let bottomLine: string | null = null;
+                        const trimmedLabel = String(displayLabel || '').trim();
+                        if (trimmedLabel && trimmedLabel !== '-') {
+                          const words = trimmedLabel.split(/\s+/);
+                          if (words.length === 2) {
+                            topLine = words[0];
+                            bottomLine = words[1];
+                          } else if (words.length > 2) {
+                            const mid = Math.ceil(words.length / 2);
+                            topLine = words.slice(0, mid).join(' ');
+                            bottomLine = words.slice(mid).join(' ');
+                          } else if (trimmedLabel.length > 4) {
+                            const mid = Math.ceil(trimmedLabel.length / 2);
+                            topLine = trimmedLabel.slice(0, mid);
+                            bottomLine = trimmedLabel.slice(mid);
+                          }
+                        }
+
                         const tooltipText = isOtherDisposal
                           ? `${displayLabel}${ass?.notes && ass.notes !== displayLabel ? ` ("${ass.notes}")` : ''}`
                           : `${dutyType?.name || dutyCode}${ass?.idaShift && ass.idaShift !== 'None' ? ` (${ass.idaShift})` : ''} ${ass?.notes ? `("${ass.notes}")` : ''}`;
@@ -1704,13 +1759,20 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                         return (
                           <td
                             key={day}
-                            className="p-1 text-center border-r border-slate-200 dark:border-slate-800 transition-colors"
+                            className="p-1 text-center border-r border-slate-200 dark:border-slate-800 transition-colors align-middle"
                           >
                             <span
-                              className={`inline-block min-w-7 px-1 py-1 rounded text-[10px] font-extrabold font-mono text-center shadow-2xs whitespace-nowrap overflow-hidden text-ellipsis ${displayBadgeBg}`}
+                              className={`inline-flex flex-col items-center justify-center min-w-7 px-1 py-0.5 rounded text-[9.5px] leading-[1.1] font-extrabold font-mono text-center shadow-2xs ${displayBadgeBg}`}
                               title={tooltipText}
                             >
-                              {displayLabel}
+                              {bottomLine ? (
+                                <>
+                                  <span className="block whitespace-nowrap">{topLine}</span>
+                                  <span className="block whitespace-nowrap">{bottomLine}</span>
+                                </>
+                              ) : (
+                                <span className="block whitespace-nowrap py-0.5">{topLine}</span>
+                              )}
                             </span>
                           </td>
                         );

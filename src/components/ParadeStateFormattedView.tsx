@@ -835,16 +835,18 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const dayName = days[dateObj.getDay()];
 
  const baseSec = pList.filter(
- (s) => s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec')
+ (s) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec'))
  );
  const btf = pList.filter((s) => s.dutyCode === 'BTF');
  const ntf = pList.filter((s) => s.dutyCode === 'NTF');
  const airfield = pList.filter(
  (s) =>
- s.dutyCode === 'AIRPORT' ||
+ s.dutyCode !== 'DUTY_OFF' &&
+ s.statusCategory !== 'OFF' &&
+ (s.dutyCode === 'AIRPORT' ||
  s.dutyCode === 'AIR_FD' ||
  s.notes?.toLowerCase().includes('airfield') ||
- s.notes?.toLowerCase().includes('air fd')
+ s.notes?.toLowerCase().includes('air fd'))
  );
  const halishahar = pList.filter((s) => s.dutyCode === 'HALISHAHAR');
  const bakeBite = pList.filter(
@@ -862,7 +864,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  (s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Afternoon'
  );
  const idaNight = pList.filter(
- (s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Night'
+ (s) =>
+ (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Night') ||
+ ((s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF') && s.idaShift?.trim() === 'Night')
  );
  const dutyOff = pList.filter(
  (s) => s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF'
@@ -1242,18 +1246,23 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  }
 
  // Helper to render airman list inside multi-day table cells (without flight tags)
- const renderAirmanColumnList = (list: { airman: Airman, notes?: string }[], showNotes: boolean = false) => {
+ const renderAirmanColumnList = (list: { airman: Airman, notes?: string, previousDutyCode?: string, previousDutyName?: string, dutyName?: string }[], showNotes: boolean = false) => {
     if (!list || list.length === 0) {
       return <div className="text-center text-slate-400 font-normal py-1">-</div>;
     }
     return (
       <ol className="space-y-0.5 text-[11px] leading-snug font-normal text-left">
-        {list.map((item, idx) => (
-          <li key={idx} className="whitespace-nowrap">
-            {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
-            {showNotes && item.notes && item.notes !== 'None' ? ' - ' + item.notes : ''}
-          </li>
-        ))}
+        {list.map((item, idx) => {
+          const shortOffNote = showNotes
+            ? formatDutyOffShortName(item.previousDutyCode, item.previousDutyName, item.dutyName || item.notes)
+            : '';
+          return (
+            <li key={idx} className="whitespace-nowrap">
+              {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
+              {shortOffNote ? ' - ' + shortOffNote : ''}
+            </li>
+          );
+        })}
       </ol>
     );
   };
@@ -1566,16 +1575,16 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const notes = item.notes || '';
  const notesLower = notes.toLowerCase();
 
- const isBaseSec = codeUpper === 'GD' || notesLower.includes('base sec');
- const isBtf = codeUpper === 'BTF';
- const isNtf = codeUpper === 'NTF';
- const isAirfield = codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd');
- const isHalishahar = codeUpper === 'HALISHAHAR';
+ const isDutyOff = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
+ const isBaseSec = !isDutyOff && (codeUpper === 'GD' || notesLower.includes('base sec'));
+ const isBtf = !isDutyOff && codeUpper === 'BTF';
+ const isNtf = !isDutyOff && codeUpper === 'NTF';
+ const isAirfield = !isDutyOff && (codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd'));
+ const isHalishahar = !isDutyOff && codeUpper === 'HALISHAHAR';
  const isBakeBite = codeUpper === 'BAKE_BITE' || codeUpper === 'BAKE_N_BITE' || statusCategory === 'BAKE_N_BITE';
  const isTdy = ['TDY', 'ATT', 'DETT'].includes(codeUpper);
  const isLeave = codeUpper === 'LEAVE';
  const isIda = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(codeUpper);
- const isDutyOff = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
  const isOnParadeFlag = codeUpper === 'ON_PARADE' || statusCategory === 'PARADE';
 
  if (!isBaseSec && !isBtf && !isNtf && !isAirfield && !isHalishahar && !isBakeBite && !isTdy && !isLeave && !isIda && !isDutyOff && !isOnParadeFlag) {
@@ -1600,10 +1609,10 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const pList = selectedFlight === 'Overall' ? (resData?.personnelStatusList || []) : (resData?.personnelStatusList || []).filter(s => s.airman.flightName === selectedFlight);
  if (dutyName === 'Halishahar Duty') return pList.some(s => s.dutyCode === 'HALISHAHAR');
  if (dutyName === 'Bake & Bite') return pList.some(s => s.dutyCode === 'BAKE_BITE' || s.dutyCode === 'BAKE_N_BITE' || s.statusCategory === 'BAKE_N_BITE');
- if (dutyName === 'Base Security Duty') return pList.some(s => s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec'));
+ if (dutyName === 'Base Security Duty') return pList.some(s => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec')));
  if (dutyName === 'Base Taskforce Duty') return pList.some(s => s.dutyCode === 'BTF');
  if (dutyName === 'Najirpara Taskforce Duty') return pList.some(s => s.dutyCode === 'NTF');
- if (dutyName === 'Airfield') return pList.some(s => s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd'));
+ if (dutyName === 'Airfield') return pList.some(s => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd')));
  if (dutyName === 'Tdy') return pList.some(s => ['TDY', 'ATT', 'DETT'].includes(s.dutyCode));
  if (dutyName === 'Leave') return pList.some(s => s.dutyCode === 'LEAVE');
  
@@ -1654,18 +1663,22 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const isWeekend = dateObj.getDay() === 5 || dateObj.getDay() === 6; // Friday or Saturday
 
  // Filter lists for table columns
- const baseSec = pList.filter((s) => s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec'));
+ const baseSec = pList.filter((s) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec')));
  const btf = pList.filter((s) => s.dutyCode === 'BTF');
  const ntf = pList.filter((s) => s.dutyCode === 'NTF');
- const airfield = pList.filter((s) => s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd'));
+ const airfield = pList.filter((s) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd')));
  const halishahar = pList.filter((s) => s.dutyCode === 'HALISHAHAR');
  const bakeBite = pList.filter((s) => s.dutyCode === 'BAKE_BITE' || s.dutyCode === 'BAKE_N_BITE' || s.statusCategory === 'BAKE_N_BITE');
  const tdy = pList.filter((s) => ['TDY', 'ATT', 'DETT'].includes(s.dutyCode));
  const leave = pList.filter((s) => s.dutyCode === 'LEAVE');
  const idaMorn = pList.filter((s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && (!s.idaShift || s.idaShift.trim() === 'Morning'));
  const idaAft = pList.filter((s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Afternoon');
- const idaNight = pList.filter((s) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Night');
- const dutyOff = pList.filter((s) => s.dutyCode === 'DUTY_OFF');
+ const idaNight = pList.filter(
+   (s) =>
+     (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Night') ||
+     ((s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF') && s.idaShift?.trim() === 'Night')
+ );
+ const dutyOff = pList.filter((s) => s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF');
  
  const onParade = pList.filter((s) => s.dutyCode === 'ON_PARADE' || s.statusCategory === 'PARADE');
 
@@ -1677,16 +1690,16 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const notes = item.notes || '';
  const notesLower = notes.toLowerCase();
 
- const isBaseSec = codeUpper === 'GD' || notesLower.includes('base sec');
- const isBtf = codeUpper === 'BTF';
- const isNtf = codeUpper === 'NTF';
- const isAirfield = codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd');
- const isHalishahar = codeUpper === 'HALISHAHAR';
+ const isDutyOff = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
+ const isBaseSec = !isDutyOff && (codeUpper === 'GD' || notesLower.includes('base sec'));
+ const isBtf = !isDutyOff && codeUpper === 'BTF';
+ const isNtf = !isDutyOff && codeUpper === 'NTF';
+ const isAirfield = !isDutyOff && (codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd'));
+ const isHalishahar = !isDutyOff && codeUpper === 'HALISHAHAR';
  const isBakeBite = codeUpper === 'BAKE_BITE' || codeUpper === 'BAKE_N_BITE' || statusCategory === 'BAKE_N_BITE';
  const isTdy = ['TDY', 'ATT', 'DETT'].includes(codeUpper);
  const isLeave = codeUpper === 'LEAVE';
  const isIda = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(codeUpper);
- const isDutyOff = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
  const isOnParadeFlag = codeUpper === 'ON_PARADE' || statusCategory === 'PARADE';
 
  if (!isBaseSec && !isBtf && !isNtf && !isAirfield && !isHalishahar && !isBakeBite && !isTdy && !isLeave && !isIda && !isDutyOff && !isOnParadeFlag) {

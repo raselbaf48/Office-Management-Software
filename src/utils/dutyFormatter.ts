@@ -77,7 +77,7 @@ export function resolveConfiguredDutyBaseShortName(
       return (t.dutyCode === 'IDAC' || tId.includes('idac')) && (tId.includes(targetShift) || tShift.includes(targetShift));
     });
     if (matchedIdac) {
-      return stripDutyOrOffSuffix(matchedIdac.shortName || getDefaultDutyShortName(matchedIdac));
+      return stripDutyOrOffSuffix(getDefaultDutyShortName(matchedIdac));
     }
     return targetShift === 'night' ? 'IDAC "C"' : targetShift === 'afternoon' ? 'IDAC "B"' : 'IDAC "A"';
   }
@@ -109,7 +109,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.id || '').toLowerCase().includes('security') ||
         (t.title || '').toLowerCase().includes('security')
     );
-    return stripDutyOrOffSuffix(matchedSy?.shortName || 'Sy');
+    return stripDutyOrOffSuffix(matchedSy ? getDefaultDutyShortName(matchedSy) : 'Sy');
   }
 
   // 3. BTF (Base Taskforce)
@@ -126,7 +126,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.id || '').toLowerCase().includes('base_tf') ||
         (t.title || '').toLowerCase().includes('base taskforce')
     );
-    return stripDutyOrOffSuffix(matchedBtf?.shortName || 'BTF');
+    return stripDutyOrOffSuffix(matchedBtf ? getDefaultDutyShortName(matchedBtf) : 'BTF');
   }
 
   // 4. NTF (Najirpara Taskforce)
@@ -146,7 +146,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.title || '').toLowerCase().includes('najirpara') ||
         (t.title || '').toLowerCase().includes('nazirpara')
     );
-    return stripDutyOrOffSuffix(matchedNtf?.shortName || 'NTF');
+    return stripDutyOrOffSuffix(matchedNtf ? getDefaultDutyShortName(matchedNtf) : 'NTF');
   }
 
   // 5. Airfield / Airport
@@ -169,7 +169,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.title || '').toLowerCase().includes('airfield') ||
         (t.title || '').toLowerCase().includes('airport')
     );
-    return stripDutyOrOffSuffix(matchedAf?.shortName || 'Airfield');
+    return stripDutyOrOffSuffix(matchedAf ? getDefaultDutyShortName(matchedAf) : 'Airfield');
   }
 
   // 6. Halishahar
@@ -185,7 +185,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.id || '').toLowerCase().includes('halishahar') ||
         (t.title || '').toLowerCase().includes('halishahar')
     );
-    return stripDutyOrOffSuffix(matchedHali?.shortName || 'Halishahar');
+    return stripDutyOrOffSuffix(matchedHali ? getDefaultDutyShortName(matchedHali) : 'Halishahar');
   }
 
   // 7. Escort Duty
@@ -203,7 +203,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.id || '').toLowerCase().includes('1794394') ||
         (t.title || '').toLowerCase().includes('escort')
     );
-    return stripDutyOrOffSuffix(matchedEsc?.shortName || 'Esct');
+    return stripDutyOrOffSuffix(matchedEsc ? getDefaultDutyShortName(matchedEsc) : 'Esct');
   }
 
   // 8. Reception
@@ -214,7 +214,7 @@ export function resolveConfiguredDutyBaseShortName(
         (t.id || '').toLowerCase().includes('reception') ||
         (t.title || '').toLowerCase().includes('reception')
     );
-    return stripDutyOrOffSuffix(matchedRec?.shortName || 'Reception');
+    return stripDutyOrOffSuffix(matchedRec ? getDefaultDutyShortName(matchedRec) : 'Reception');
   }
 
   // 9. Exact match against any custom / configured table in Duty Matrix
@@ -230,7 +230,7 @@ export function resolveConfiguredDutyBaseShortName(
     );
   });
   if (directMatch) {
-    return stripDutyOrOffSuffix(directMatch.shortName || getDefaultDutyShortName(directMatch));
+    return stripDutyOrOffSuffix(getDefaultDutyShortName(directMatch));
   }
 
   // 10. Check customDuties store
@@ -379,7 +379,10 @@ export function formatDutyOffShortName(
     cleanName || previousDutyName
   );
   if (configuredBaseShort) {
-    const base = configuredBaseShort.replace(/\s+(duty\s+off|duty|off)$/i, '').trim() || configuredBaseShort;
+    let base = configuredBaseShort.replace(/\s+(duty\s+off|duty|off)$/i, '').trim() || configuredBaseShort;
+    if (/^idac(\s+("a"|"b"|"c"|night|nt|morning|mor|afternoon|aft))?$/i.test(base)) {
+      base = 'IDAC';
+    }
     return `${base} Off`;
   }
 
@@ -400,8 +403,11 @@ export function formatDutyOffShortName(
   }
 
   const shortOn = formatDutyOnShortName(previousDutyCode, undefined, cleanNotes || notes, cleanName || previousDutyName);
-  const baseShort = shortOn.replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
+  let baseShort = shortOn.replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
 
+  if (/^idac(\s+("a"|"b"|"c"|night|nt|morning|mor|afternoon|aft))?$/i.test(baseShort)) {
+    return 'IDAC Off';
+  }
   if (
     baseShort === 'ESC' ||
     baseShort === 'ESCT' ||

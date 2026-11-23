@@ -44,14 +44,38 @@ export function getDefaultDutyShortName(tableOrInfo?: {
   shiftLabel?: string;
 }): string {
   if (!tableOrInfo) return 'Sy';
-  if (tableOrInfo.shortName && tableOrInfo.shortName.trim()) {
-    return tableOrInfo.shortName.trim().replace(/\s+(duty|off)$/i, '').trim() || tableOrInfo.shortName.trim();
-  }
   const id = String(tableOrInfo.id || '').toLowerCase().trim();
   const code = String(tableOrInfo.dutyCode || '').toUpperCase().trim();
   const title = String(tableOrInfo.title || '').trim();
   const titleLower = title.toLowerCase();
   const shiftLower = String(tableOrInfo.shiftLabel || '').toLowerCase().trim();
+
+  if (tableOrInfo.shortName && tableOrInfo.shortName.trim()) {
+    const candidate = tableOrInfo.shortName.trim().replace(/\s+(duty\s+off|duty|off)$/i, '').trim() || tableOrInfo.shortName.trim();
+    const candUpper = candidate.toUpperCase();
+    const isFullBuiltInTitle = [
+      'BASE SECURITY',
+      'BASE SECURITY DUTY',
+      'SECURITY',
+      'SECURITY DUTY',
+      'BASE TASKFORCE',
+      'BASE TASKFORCE DUTY',
+      'BASE T/F',
+      'NAJIRPARA TASKFORCE',
+      'NAJIRPARA TASKFORCE DUTY',
+      'NAZIRPARA TASKFORCE',
+      'NAZIRPARA TASKFORCE DUTY',
+      'NAZIRPARA T/F',
+      'IDAC MORNING',
+      'IDAC  MORNING',
+      'IDAC AFTERNOON',
+      'IDAC NIGHT',
+      'IDA CENTER',
+    ].includes(candUpper);
+    if (!isFullBuiltInTitle) {
+      return candidate;
+    }
+  }
 
   if (id === 'security_duty' || ['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(code) || titleLower.includes('security')) {
     return 'Sy';
@@ -800,13 +824,27 @@ export function getDutyRatioVersionForDate(dateStr?: string): DutyRatioVersion {
 }
 
 export function getStoredDutyMatrix(dateStr?: string): DutyRatioTable[] {
+  const currentMatrix = getStoredDutyMatrixInternal();
   if (dateStr) {
     const version = getDutyRatioVersionForDate(dateStr);
     if (version && version.matrix && version.matrix.length > 0) {
-      return version.matrix;
+      const currentMap = new Map(currentMatrix.map((t) => [t.id, t]));
+      return version.matrix.map((t) => {
+        const curr = currentMap.get(t.id);
+        return {
+          ...t,
+          shortName: getDefaultDutyShortName({
+            ...t,
+            shortName: curr?.shortName || t.shortName,
+          }),
+          onParadeOnDutyDay: t.onParadeOnDutyDay !== undefined ? t.onParadeOnDutyDay : curr?.onParadeOnDutyDay,
+          dutyOffNextDay: t.dutyOffNextDay !== undefined ? t.dutyOffNextDay : curr?.dutyOffNextDay,
+          onPtNextDay: t.onPtNextDay !== undefined ? t.onPtNextDay : curr?.onPtNextDay,
+        };
+      });
     }
   }
-  return getStoredDutyMatrixInternal();
+  return currentMatrix;
 }
 
 export function saveDutyMatrix(matrix: DutyRatioTable[]) {

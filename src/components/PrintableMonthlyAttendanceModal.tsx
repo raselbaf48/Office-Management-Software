@@ -249,16 +249,40 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       if (offDuty === 'GD' || offDuty === 'SECURITY') offDuty = 'SY';
       if (offDuty === 'AIRPORT' || offDuty === 'AIRFIELD' || offDuty === 'APT') offDuty = 'AFLD';
       if (offDuty === 'ESCORT' || offDuty === 'ESC' || offDuty?.includes('1794394') || (ass?.notes || '').toLowerCase().includes('escort')) offDuty = 'ESCT';
-      return { label: offDuty ? `${offDuty}\nOFF` : 'OFF', type: 'OFF' };
+      return { label: offDuty ? `${offDuty}\nOff` : 'Off', type: 'OFF' };
     }
 
     if (dutyCode === 'IDAC' || dutyCode === 'IDA') {
       const s = (ass?.idaShift || '').toLowerCase();
-      const shiftCode = s.startsWith('m') ? 'IDAC "A"' : s.startsWith('a') ? 'IDAC "B"' : 'IDAC "C"';
+      const shiftCode = s.startsWith('m') ? 'IDAC\n"A"' : s.startsWith('a') ? 'IDAC\n"B"' : 'IDAC\n"C"';
       return { label: shiftCode, type: 'DUTY' };
     }
 
-    if (dutyCode === 'LEAVE') return { label: 'LV', type: 'LEAVE' };
+    if (dutyCode === 'LEAVE') {
+      const combined = `${ass?.notes || ''} ${(ass as any)?.dutyName || ''}`.toLowerCase();
+      if (combined.includes('recreation') || combined.includes('(rl)') || /\brl\b/.test(combined) || combined.includes('rec leave') || combined.includes('rec.')) {
+        return { label: 'RL', type: 'LEAVE' };
+      }
+      if (combined.includes('sick') || combined.includes('(sl)') || /\bsl\b/.test(combined) || combined.includes('medical')) {
+        return { label: 'SL', type: 'LEAVE' };
+      }
+      if (combined.includes('annual') || combined.includes('(al)') || /\bal\b/.test(combined)) {
+        return { label: 'AL', type: 'LEAVE' };
+      }
+      // Check contiguous leave streak length around this day (span > 7 days => AL)
+      let streakLen = 1;
+      for (let d = day - 1; d >= 1; d--) {
+        const dStr = `${monthKey}-${d < 10 ? `0${d}` : `${d}`}`;
+        if (resolveAirmanDutyForDate(airman.id, dStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
+        else break;
+      }
+      for (let d = day + 1; d <= daysInMonth; d++) {
+        const dStr = `${monthKey}-${d < 10 ? `0${d}` : `${d}`}`;
+        if (resolveAirmanDutyForDate(airman.id, dStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
+        else break;
+      }
+      return { label: streakLen > 7 ? 'AL' : 'CL', type: 'LEAVE' };
+    }
     if (dutyCode === 'TDY') return { label: 'TDY', type: 'TDY' };
     if (
       (dutyCode as any) === 'ESCORT' ||
@@ -290,19 +314,28 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       if (name.includes(' - ')) {
         name = name.split(' - ')[0].trim();
       }
-      return { label: name.toUpperCase(), type: 'DUTY' };
+      const upperName = name.toUpperCase().trim();
+      const words = upperName.split(/\s+/);
+      if (words.length === 2) {
+        return { label: `${words[0]}\n${words[1]}`, type: 'DUTY' };
+      }
+      return { label: upperName, type: 'DUTY' };
     }
 
     let label = dutyType?.shortName || dutyCode || '-';
     if (label === 'APT' || label === 'AIRPORT' || label === 'AIRFIELD') label = 'AFLD';
     if (label === 'GD') label = 'SY';
-    if (label === 'IDAC Nt' || label === 'IDAC NT' || label.includes('IDAC Nt')) label = 'IDAC "C"';
-    if (label.includes(' OFF')) {
-      label = label.replace(/ OFF/g, '\nOFF');
+    if (label === 'IDAC Nt' || label === 'IDAC NT' || label.includes('IDAC Nt')) label = 'IDAC\n"C"';
+    if (label.includes(' OFF') || label.includes(' Off')) {
+      label = label.replace(/\s+off/gi, '\nOff');
     }
     if (label.startsWith('APT')) label = label.replace(/^APT/, 'AFLD');
     if (label.startsWith('GD')) label = label.replace(/^GD/, 'SY');
-    if (label.includes('IDAC Nt')) label = label.replace(/IDAC Nt/g, 'IDAC "C"');
+    if (label.includes('IDAC Nt')) label = label.replace(/IDAC Nt/g, 'IDAC\n"C"');
+    if (label.includes(' ') && !label.includes('\n')) {
+      const parts = label.trim().split(/\s+/);
+      if (parts.length === 2) label = `${parts[0]}\n${parts[1]}`;
+    }
     return { label, type: 'DUTY' };
   };
 
@@ -327,7 +360,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       let offCount = 0;
       daysArray.forEach((day) => {
         const info = resolveDutyLabel(airman, day);
-        if (info.type === 'OFF' || info.label.includes('OFF')) {
+        if (info.type === 'OFF' || info.label.toUpperCase().includes('OFF')) {
           offCount++;
         }
       });
