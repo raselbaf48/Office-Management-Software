@@ -14,7 +14,6 @@ const UASU_MASKABLE_512 = '/pwa-512x512-full.png?v=25';
 
 let lastSyncedSignature = '';
 const iconResizeCache = new Map<string, { icon192: string; icon512: string; maskable512: string; hash: string }>();
-const uploadedHashes = new Set<string>();
 
 function computeSimpleHash(str: string): string {
   let h = 2166136261;
@@ -43,22 +42,52 @@ function isGenericAppLogoUrl(logoStr: string): boolean {
   );
 }
 
-function is155LogoUrl(logoStr: string): boolean {
-  const s = String(logoStr || '').toLowerCase();
-  return (
-    s.includes('155-uasu-baf-logo') ||
-    s.includes('pwa-192x192-trans') ||
-    s.includes('pwa-512x512-trans') ||
-    s.includes('pwa-192x192-full') ||
-    s.includes('pwa-512x512-full')
-  );
+/**
+ * Updates all <link rel="icon">, <link rel="shortcut icon">, and <link rel="apple-touch-icon">
+ * tags in document.head so the browser tab always displays the requested logo immediately.
+ */
+export function applyBrowserFaviconToHead(icon192Src: string, icon512Src?: string): void {
+  if (typeof document === 'undefined' || !document.head) return;
+  const target192 = icon192Src || '/office-management-logo.png?v=25';
+  const target512 = icon512Src || target192;
+
+  const appleTouchIcons = document.head.querySelectorAll<HTMLLinkElement>('link[rel="apple-touch-icon"]');
+  if (appleTouchIcons.length > 0) {
+    appleTouchIcons.forEach((linkEl) => {
+      linkEl.href = target192;
+    });
+  } else {
+    const appleIcon = document.createElement('link');
+    appleIcon.rel = 'apple-touch-icon';
+    appleIcon.sizes = '192x192';
+    appleIcon.href = target192;
+    document.head.appendChild(appleIcon);
+  }
+
+  const favicons = document.head.querySelectorAll<HTMLLinkElement>('link[rel="icon"], link[rel="shortcut icon"]');
+  if (favicons.length > 0) {
+    favicons.forEach((linkEl) => {
+      if (linkEl.sizes?.value === '512x512') {
+        linkEl.href = target512;
+      } else {
+        linkEl.href = target192;
+      }
+    });
+  } else {
+    const iconLink = document.createElement('link');
+    iconLink.id = 'pwa-icon-192';
+    iconLink.rel = 'icon';
+    iconLink.type = 'image/png';
+    iconLink.href = target192;
+    document.head.appendChild(iconLink);
+  }
 }
 
 /**
- * Renders any custom office logo (URL or Base64) onto exact 192x192 and 512x512
- * square canvases so Chromium/Windows/Android never rejects the icon for non-matching dimensions.
+ * Renders any office logo (URL or Base64) onto exact 192x192 and 512x512
+ * square canvases so Chromium/Windows/Android renders a crisp square tab favicon & app icon.
  */
-async function generateSizedPwaIcons(
+export async function generateSizedPwaIcons(
   logoSrc: string
 ): Promise<{ icon192: string; icon512: string; maskable512: string; hash: string }> {
   const absSrc = resolveAbsoluteUrl(logoSrc);
@@ -137,6 +166,20 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
     return { officeName: DEFAULT_OFFICE_NAME, officeLogo: '/155-uasu-baf-logo.png', officeCode: '155-UASU' };
   }
   try {
+    const customOfficeRaw =
+      window.localStorage.getItem('custom_office_config') ||
+      window.localStorage.getItem('baf_custom_office_config');
+    if (customOfficeRaw) {
+      const cfg = JSON.parse(customOfficeRaw);
+      if (cfg && cfg.officeName) {
+        return {
+          officeName: cfg.officeName,
+          officeLogo: cfg.officeLogo || '/office-management-logo.png?v=25',
+          officeCode: cfg.officeCode || cfg.firebaseConfig?.officeCode || '',
+          officeSlogan: cfg.officeSlogan || cfg.firebaseConfig?.officeSlogan || '',
+        };
+      }
+    }
     const savedMetaRaw = window.localStorage.getItem('baf_pwa_active_office_meta');
     if (savedMetaRaw) {
       const parsed = JSON.parse(savedMetaRaw);
@@ -146,18 +189,6 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
           officeLogo: parsed.rawLogo || '/155-uasu-baf-logo.png',
           officeCode: parsed.officeCode || '',
           officeSlogan: parsed.officeSlogan || '',
-        };
-      }
-    }
-    const customOfficeRaw = window.localStorage.getItem('baf_custom_office_config');
-    if (customOfficeRaw) {
-      const cfg = JSON.parse(customOfficeRaw);
-      if (cfg && cfg.officeName) {
-        return {
-          officeName: cfg.officeName,
-          officeLogo: cfg.officeLogo || '/155-uasu-baf-logo.png',
-          officeCode: cfg.officeCode || '',
-          officeSlogan: cfg.officeSlogan || '',
         };
       }
     }
@@ -195,9 +226,9 @@ function postOfficeIdentityToServiceWorker(payload: {
 }
 
 /**
- * Dynamically updates `<link rel="manifest">`, `<link rel="apple-touch-icon">`,
- * `<meta name="apple-mobile-web-app-title">`, Service Worker (`sw.js`), and `server.ts`
- * so Windows/Android/iOS ALWAYS installs the PWA with the user's Office Logo & Office Name.
+ * Dynamically updates `<link rel="icon">`, `<link rel="apple-touch-icon">`,
+ * `<link rel="manifest">`, `<meta name="apple-mobile-web-app-title">`, Service Worker (`sw.js`), and `server.ts`
+ * so the browser tab and PWA always display the logged-in office's Logo & Name.
  */
 export async function syncDynamicOfficePwaManifest(
   identity: DynamicPWAOfficeIdentity
@@ -212,8 +243,6 @@ export async function syncDynamicOfficePwaManifest(
       rawName === 'Office Management Application' ||
       rawName === 'Office Management System';
 
-    // If a generic placeholder was passed (e.g. before login or when input is empty),
-    // preserve the last matched/active office identity so PWA installation ALWAYS uses the Office Logo & Name!
     const effectiveIdentity: DynamicPWAOfficeIdentity = isGeneric
       ? resolveFallbackOfficeFromStorage()
       : identity;
@@ -224,22 +253,31 @@ export async function syncDynamicOfficePwaManifest(
     const slogan = String(effectiveIdentity.officeSlogan || '').trim();
 
     const is155Office =
-      appName.toUpperCase().includes('155') ||
-      officeCode.toUpperCase().includes('155');
+      officeCode.toUpperCase() === '155-UASU' ||
+      officeCode.toUpperCase() === '155UASU' ||
+      (!officeCode && appName.toUpperCase().includes('155'));
 
     let rawLogo = String(effectiveIdentity.officeLogo || '').trim();
-    if (!rawLogo || isGenericAppLogoUrl(rawLogo)) {
-      rawLogo = '/office-management-logo.png?v=25';
+    if (!rawLogo) {
+      rawLogo = is155Office ? '/155-uasu-baf-logo.png' : '/office-management-logo.png?v=25';
+    } else if (isGenericAppLogoUrl(rawLogo) && is155Office) {
+      rawLogo = '/155-uasu-baf-logo.png';
     }
 
-    // Always use the BAF Default Logo for PWA App icons (/pwa-192x192-trans.png?v=25 & /pwa-512x512-trans.png?v=25)
-    const uses155Logo = true;
+    // 1. Immediately apply the active office's logo to the browser tab favicon
+    applyBrowserFaviconToHead(rawLogo, rawLogo);
+
+    // Also generate crisp 192x192 and 512x512 square icons for the browser tab & PWA
+    const sizedCustomIcons = await generateSizedPwaIcons(rawLogo);
+    const tabIcon192 = sizedCustomIcons?.icon192 || rawLogo;
+    const tabIcon512 = sizedCustomIcons?.icon512 || rawLogo;
+    applyBrowserFaviconToHead(tabIcon192, tabIcon512);
 
     const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}`;
     if (sig === lastSyncedSignature) return;
     lastSyncedSignature = sig;
 
-    // 1. Update iOS & mobile web app title meta tags
+    // 2. Update iOS & mobile web app title meta tags
     let appleTitleMeta = document.head.querySelector<HTMLMetaElement>(
       'meta[name="apple-mobile-web-app-title"]'
     );
@@ -260,21 +298,24 @@ export async function syncDynamicOfficePwaManifest(
     }
     appNameMeta.content = appName;
 
-    const serverIcon192Url = UASU_192_ICON;
-    const serverIcon512Url = UASU_512_ICON;
-    const serverMaskable192Url = UASU_MASKABLE_192;
-    const serverMaskable512Url = UASU_MASKABLE_512;
-    const customIconHash = '';
-    const sizedCustomIcons: { icon192: string; icon512: string; maskable512: string; hash: string } | null = null;
+    const serverIcon192Url = tabIcon192;
+    const serverIcon512Url = tabIcon512;
+    const serverMaskable192Url = sizedCustomIcons?.maskable512 || UASU_MASKABLE_192;
+    const serverMaskable512Url = sizedCustomIcons?.maskable512 || UASU_MASKABLE_512;
+    const customIconHash = sizedCustomIcons?.hash || '';
 
     fetch('/api/pwa-icon-upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         officeName: appName,
-        officeCode: officeCode || '155-UASU',
-        officeSlogan: slogan || 'Intel • Surveillance • Strike',
-        is155Office: true,
+        officeCode: officeCode || (is155Office ? '155-UASU' : ''),
+        officeSlogan: slogan || (is155Office ? 'Intel • Surveillance • Strike' : ''),
+        is155Office,
+        iconHash: customIconHash,
+        icon192DataUrl: sizedCustomIcons?.icon192,
+        icon512DataUrl: sizedCustomIcons?.icon512,
+        maskable512DataUrl: sizedCustomIcons?.maskable512,
       }),
     }).catch(() => {});
 
@@ -287,45 +328,17 @@ export async function syncDynamicOfficePwaManifest(
           shortName,
           officeCode,
           officeSlogan: slogan,
-          rawLogo: rawLogo.startsWith('data:') ? '' : rawLogo,
-          is155Office: uses155Logo,
+          rawLogo,
+          is155Office,
           iconHash: customIconHash,
-          icon192Url: serverIcon192Url,
-          icon512Url: serverIcon512Url,
+          icon192Url: rawLogo,
+          icon512Url: rawLogo,
         })
       );
     } catch {}
 
-    // 3. Update apple-touch-icon and link[rel="icon"] elements to exact 192x192 & 512x512 square office PNGs
-    const appleTouchIcons = document.head.querySelectorAll<HTMLLinkElement>(
-      'link[rel="apple-touch-icon"]'
-    );
-    if (appleTouchIcons.length > 0) {
-      appleTouchIcons.forEach((linkEl) => {
-        linkEl.href = serverIcon192Url;
-      });
-    } else {
-      const appleIcon = document.createElement('link');
-      appleIcon.rel = 'apple-touch-icon';
-      appleIcon.sizes = '192x192';
-      appleIcon.href = serverIcon192Url;
-      document.head.appendChild(appleIcon);
-    }
-
-    const favicons = document.head.querySelectorAll<HTMLLinkElement>(
-      'link[rel="icon"], link[rel="shortcut icon"]'
-    );
-    favicons.forEach((linkEl) => {
-      if (linkEl.sizes?.value === '512x512') {
-        linkEl.href = serverIcon512Url;
-      } else {
-        linkEl.href = serverIcon192Url;
-      }
-    });
-
-    // 4. Build manifest payload and push to Service Worker (sw.js) so any fetch to /manifest.json or /api/pwa-manifest
-    // immediately returns the active office's Name & Logo
-    const officeQuery = officeCode && !uses155Logo ? `?office=${encodeURIComponent(officeCode)}` : '';
+    // 4. Build manifest payload and push to Service Worker (sw.js)
+    const officeQuery = officeCode && !is155Office ? `?office=${encodeURIComponent(officeCode)}` : '';
     const description = slogan
       ? `${appName} — ${slogan}`
       : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
@@ -374,7 +387,7 @@ export async function syncDynamicOfficePwaManifest(
       icon192DataUrl: sizedCustomIcons?.icon192,
       icon512DataUrl: sizedCustomIcons?.icon512,
       maskable512DataUrl: sizedCustomIcons?.maskable512,
-      is155Office: uses155Logo,
+      is155Office,
     });
 
     // 5. Update <link rel="manifest"> in document.head

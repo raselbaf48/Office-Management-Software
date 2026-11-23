@@ -9,6 +9,7 @@ export interface DutyRatioTable {
   id: string;
   serNo?: number;
   title: string; // e.g., 'SECURITY DUTY (88)'
+  shortName?: string; // e.g., 'Sy', 'BTF', 'NTF', 'Airfield', 'Halishahar'
   dutyCode: DutyCategoryCode;
   shiftLabel?: string; // e.g. 'Morning', 'Afternoon', 'Night'
   totalRequiredMonth: number;
@@ -35,12 +36,67 @@ export interface DutyRatioTable {
   };
 }
 
+export function getDefaultDutyShortName(tableOrInfo?: {
+  id?: string;
+  title?: string;
+  shortName?: string;
+  dutyCode?: string;
+  shiftLabel?: string;
+}): string {
+  if (!tableOrInfo) return 'Sy';
+  if (tableOrInfo.shortName && tableOrInfo.shortName.trim()) {
+    return tableOrInfo.shortName.trim().replace(/\s+(duty|off)$/i, '').trim() || tableOrInfo.shortName.trim();
+  }
+  const id = String(tableOrInfo.id || '').toLowerCase().trim();
+  const code = String(tableOrInfo.dutyCode || '').toUpperCase().trim();
+  const title = String(tableOrInfo.title || '').trim();
+  const titleLower = title.toLowerCase();
+  const shiftLower = String(tableOrInfo.shiftLabel || '').toLowerCase().trim();
+
+  if (id === 'security_duty' || ['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(code) || titleLower.includes('security')) {
+    return 'Sy';
+  }
+  if (id === 'base_tf' || code === 'BTF' || titleLower.includes('base taskforce') || titleLower.includes('base t/f')) {
+    return 'BTF';
+  }
+  if (id === 'nazirpara_tf' || code === 'NTF' || titleLower.includes('najirpara') || titleLower.includes('nazirpara')) {
+    return 'NTF';
+  }
+  if (id === 'airport_duty' || code === 'AIRPORT' || code === 'AIRFIELD' || titleLower.includes('airfield') || titleLower.includes('airport')) {
+    return 'Airfield';
+  }
+  if (id === 'halishahar_tf_duty' || id === 'halishahar_duty' || code === 'HALISHAHAR' || titleLower.includes('halishahar')) {
+    return 'Halishahar';
+  }
+  if (id === 'idac_mor' || ((code === 'IDAC' || code === 'IDA') && shiftLower === 'morning') || titleLower.includes('idac  morning') || titleLower.includes('idac morning')) {
+    return 'IDAC "A"';
+  }
+  if (id === 'idac_an' || ((code === 'IDAC' || code === 'IDA') && shiftLower === 'afternoon') || titleLower.includes('idac afternoon')) {
+    return 'IDAC "B"';
+  }
+  if (id === 'idac_nt' || ((code === 'IDAC' || code === 'IDA') && shiftLower === 'night') || titleLower.includes('idac night')) {
+    return 'IDAC "C"';
+  }
+  if (id === 'reception_duty' || code === 'RECEPTION' || titleLower.includes('receiption') || titleLower.includes('reception')) {
+    return 'Reception';
+  }
+  if (code === 'ESCORT' || code === 'ESC' || code === 'ESCT' || code.includes('1794394') || titleLower.includes('escort')) {
+    return 'Esct';
+  }
+  if (title) {
+    const stripped = title.replace(/\s+(duty|off)$/i, '').trim();
+    return stripped || title;
+  }
+  return code || 'Duty';
+}
+
 export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
   // 1. BASE SECURITY DUTY
   {
     id: 'security_duty',
     serNo: 1,
     title: 'BASE SECURITY DUTY',
+    shortName: 'Sy',
     dutyCode: 'GD',
     allotmentType: 'ratio',
     onParadeOnDutyDay: false,
@@ -62,6 +118,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'base_tf',
     serNo: 2,
     title: 'BASE TASKFORCE DUTY',
+    shortName: 'BTF',
     dutyCode: 'BTF',
     allotmentType: 'ratio',
     onParadeOnDutyDay: false,
@@ -83,6 +140,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'nazirpara_tf',
     serNo: 3,
     title: 'NAJIRPARA TASKFORCE DUTY',
+    shortName: 'NTF',
     dutyCode: 'NTF',
     allotmentType: 'ratio',
     onParadeOnDutyDay: false,
@@ -104,6 +162,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'idac_mor',
     serNo: 4,
     title: 'IDAC  MORNING',
+    shortName: 'IDAC "A"',
     dutyCode: 'IDAC',
     shiftLabel: 'Morning',
     allotmentType: 'ratio',
@@ -125,6 +184,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'idac_an',
     serNo: 5,
     title: 'IDAC AFTERNOON ',
+    shortName: 'IDAC "B"',
     dutyCode: 'IDAC',
     shiftLabel: 'Afternoon',
     allotmentType: 'ratio',
@@ -146,6 +206,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'idac_nt',
     serNo: 6,
     title: 'IDAC NIGHT',
+    shortName: 'IDAC "C"',
     dutyCode: 'IDAC',
     shiftLabel: 'Night',
     allotmentType: 'ratio',
@@ -168,6 +229,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'airport_duty',
     serNo: 7,
     title: 'AIRFIELD DUTY',
+    shortName: 'Airfield',
     dutyCode: 'AIRPORT',
     allotmentType: 'equal',
     onParadeOnDutyDay: false,
@@ -189,6 +251,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'reception_duty',
     serNo: 8,
     title: 'RECEIPTION DUTY',
+    shortName: 'Reception',
     dutyCode: 'RECEPTION',
     allotmentType: 'ratio',
     onParadeOnDutyDay: false,
@@ -209,6 +272,7 @@ export const INITIAL_OFFICIAL_DUTY_MATRIX: DutyRatioTable[] = [
     id: 'halishahar_tf_duty',
     serNo: 9,
     title: 'HALISHAHAR TASKFORCE DUTY',
+    shortName: 'Halishahar',
     dutyCode: 'HALISHAHAR' as DutyCategoryCode,
     allotmentType: 'equal',
     onParadeOnDutyDay: false,
@@ -445,6 +509,7 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
           return {
             ...t,
             title,
+            shortName: t.shortName || defT?.shortName || getDefaultDutyShortName({ ...t, title }),
             dutyCode: defT?.dutyCode || t.dutyCode,
             eligibleFlights: eligFlights,
             eligibleRanks: t.eligibleRanks || defT?.eligibleRanks,
@@ -545,6 +610,9 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
              String(t.dutyCode || '').toLowerCase() === cLower
            );
            if (existingTable) {
+             if (!existingTable.shortName && cd.shortName) {
+               existingTable.shortName = cd.shortName;
+             }
              if (existingTable.onParadeOnDutyDay === undefined && cd.onParadeOnDutyDay !== undefined) {
                existingTable.onParadeOnDutyDay = cd.onParadeOnDutyDay;
              }
@@ -559,6 +627,7 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
                finalMatrix.push({
                   id,
                   title: cd.name,
+                  shortName: cd.shortName || getDefaultDutyShortName({ id, title: cd.name, dutyCode: cd.code }),
                   dutyCode: cd.code as any,
                   allotmentType: cd.allotmentType || 'ratio',
                   eligibleFlights: cd.eligibleFlights || ["Mechanics", "Avionics", "GCS", "Admin"],
@@ -750,6 +819,7 @@ export function saveDutyMatrix(matrix: DutyRatioTable[]) {
         id: m.id,
         serNo: m.serNo,
         title: m.title,
+        shortName: m.shortName,
         dutyCode: m.dutyCode,
         shiftLabel: m.shiftLabel,
         eligibleFlights: m.eligibleFlights,

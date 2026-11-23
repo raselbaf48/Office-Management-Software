@@ -23,7 +23,7 @@ import {
 } from 'firebase/firestore/lite';
 import firebaseConfigData from '../firebase-applet-config.json';
 import { getRawLocalStorageItem, setRawLocalStorageItem } from './utils/safeStorage';
-import { syncDynamicOfficePwaManifest } from './utils/dynamicPwaManifest';
+import { syncDynamicOfficePwaManifest, applyBrowserFaviconToHead, generateSizedPwaIcons } from './utils/dynamicPwaManifest';
 
 // ============================================================================
 // 1. MASTER OWNER CONFIGURATION & CONSTANTS
@@ -229,6 +229,13 @@ export function syncBrowserTabIdentity(
 
     if (!hasActiveSession) {
       document.title = DEFAULT_APP_TITLE;
+      const loginLogo = String(officeLogo || '').trim() || DEFAULT_APP_LOGO;
+      applyBrowserFaviconToHead(loginLogo, loginLogo);
+      void generateSizedPwaIcons(loginLogo).then((sized) => {
+        if (!window.sessionStorage?.getItem('baf_user_session')) {
+          applyBrowserFaviconToHead(sized.icon192, sized.icon512);
+        }
+      });
       return;
     }
 
@@ -247,9 +254,13 @@ export function syncBrowserTabIdentity(
       passedLogo.includes('pwa-pc-192x192') ||
       passedLogo.includes('pwa-pc-512x512');
 
+    const fallbackOfficeLogo = identity.isCustom
+      ? String(identity.officeLogo || DEFAULT_APP_LOGO).trim()
+      : String(identity.officeLogo || '/155-uasu-baf-logo.png').trim();
+
     const cleanLogo =
-      (!isPassedGenericLogo ? passedLogo : String(identity.officeLogo || '/155-uasu-baf-logo.png').trim()) ||
-      '/155-uasu-baf-logo.png';
+      (!isPassedGenericLogo ? passedLogo : fallbackOfficeLogo) ||
+      (identity.isCustom ? DEFAULT_APP_LOGO : '/155-uasu-baf-logo.png');
 
     document.title =
       cleanName &&
@@ -257,6 +268,8 @@ export function syncBrowserTabIdentity(
       cleanName !== 'Office Management Application'
         ? `${cleanName} | ${DEFAULT_APP_TITLE}`
         : DEFAULT_APP_TITLE;
+
+    applyBrowserFaviconToHead(cleanLogo, cleanLogo);
 
     void syncDynamicOfficePwaManifest({
       officeName: cleanName,
@@ -871,11 +884,45 @@ export function getActiveOfficeIdentity(): {
       (profileOverride?.officeName && String(profileOverride.officeName).trim()) ||
       custom.officeName ||
       'Office Management Portal';
-    const resolvedLogo = normalizeOfficeLogoUrl(
+
+    let candidateLogo =
       (profileOverride?.officeLogo && String(profileOverride.officeLogo).trim()) ||
-        custom.officeLogo,
-      is155
-    );
+      custom.officeLogo ||
+      '';
+
+    // If candidateLogo is empty or generic, check Master Offices Cache & Pending Requests for this office's registered logo
+    if (
+      !is155 &&
+      (!candidateLogo ||
+        candidateLogo.includes('office-management-logo') ||
+        candidateLogo.includes('/baf-logo'))
+    ) {
+      try {
+        const upperCode = code.toUpperCase().trim();
+        const upperName = resolvedName.toUpperCase().trim();
+        const officesCache = getLocalMasterOfficesCache();
+        const matchedReg = Object.values(officesCache).find(
+          (r) =>
+            String(r.officeCode || r.firebaseConfig?.officeCode || '').toUpperCase().trim() === upperCode ||
+            String(r.officeName || '').toUpperCase().trim() === upperName
+        );
+        if (matchedReg?.officeLogo && !matchedReg.officeLogo.includes('office-management-logo')) {
+          candidateLogo = matchedReg.officeLogo;
+        } else {
+          const reqs = getPendingOfficeRequestsLocal();
+          const matchedReq = reqs.find(
+            (r) =>
+              String(r.officeCode || '').toUpperCase().trim() === upperCode ||
+              String(r.officeName || '').toUpperCase().trim() === upperName
+          );
+          if (matchedReq?.officeLogo && !matchedReq.officeLogo.includes('office-management-logo')) {
+            candidateLogo = matchedReq.officeLogo;
+          }
+        }
+      } catch {}
+    }
+
+    const resolvedLogo = normalizeOfficeLogoUrl(candidateLogo, is155);
     const rawCustomSlogan =
       profileOverride?.officeSlogan !== undefined
         ? profileOverride.officeSlogan

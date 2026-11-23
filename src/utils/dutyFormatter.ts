@@ -1,35 +1,42 @@
 import { getCustomDutyName, getCustomDuties } from './customDuties';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
+import { getStoredDutyMatrix, getDefaultDutyShortName, DutyRatioTable } from '../data/officialDutyRatioMatrix';
 
 /**
- * Standard Duty & Disposal short name formatting utility for 155 UASU BAF
- * 
- * Rules:
- * - NTF -> NTF
- * - Airfield / Airport -> Airfield
- * - IDAC Morning -> IDAC "A"
- * - IDAC Afternoon -> IDAC "B"
- * - IDAC Night -> IDAC "Nt" (Note: "Nt" instead of "C")
- * - GD / Security -> GD
- * - BTF -> BTF
- * - Halishahar -> Halishahar
- * - Bake & Bite -> Bake & Bite
- * - TDY -> TDY
+ * Resolves the configured Short Name (from Duty Settings) for a duty if it exists in the Duty Matrix or Custom Duties.
+ * Strips any trailing " Duty" or " Off" so callers can uniformly append " Duty" (when Duty On) or " Off" (when Duty Off).
  */
-
-export function formatDutyOnShortName(
+export function resolveConfiguredDutyBaseShortName(
   dutyCode?: string | null,
   idaShift?: string | null,
   notes?: string | null,
   dutyName?: string | null
-): string {
-  const code = (dutyCode || '').toUpperCase().trim();
-  const notesStr = (notes || '').trim();
+): string | null {
+  const code = String(dutyCode || '').toUpperCase().trim();
+  const notesStr = String(notes || '').trim();
   const notesLower = notesStr.toLowerCase();
-  const nameStr = (dutyName || '').trim();
+  const nameStr = String(dutyName || '').trim();
   const nameLower = nameStr.toLowerCase();
+  const shiftLower = String(idaShift || '').toLowerCase().trim();
 
-  // 1. IDAC Duty with shifts: A (Morning), B (Afternoon), Nt (Night)
+  let matrix: DutyRatioTable[] = [];
+  try {
+    matrix = getStoredDutyMatrix() || [];
+  } catch {
+    matrix = [];
+  }
+
+  const stripDutyOrOffSuffix = (raw: string): string => {
+    const cleaned = raw.replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
+    return cleaned || raw.trim();
+  };
+
+  // Helper to check if a query matches a table
+  const findTable = (predicate: (t: DutyRatioTable) => boolean): DutyRatioTable | undefined => {
+    return matrix.find(predicate);
+  };
+
+  // 1. IDAC Duty with shifts
   if (
     code === 'IDAC' ||
     code === 'IDA' ||
@@ -38,15 +45,11 @@ export function formatDutyOnShortName(
     nameLower.includes('idac') ||
     nameLower.includes('ida center')
   ) {
-    const shift = (idaShift || '').toLowerCase();
-    
-    // Explicit exact shift match first
-    if (shift === 'night' || shift === 'nt' || shift === 'c') return 'IDAC "C"';
-    if (shift === 'afternoon' || shift === 'aft' || shift === 'b') return 'IDAC "B"';
-    if (shift === 'morning' || shift === 'morn' || shift === 'a') return 'IDAC "A"';
-    
-    // Check for Night shift ("Nt" / "C")
+    let targetShift: 'morning' | 'afternoon' | 'night' = 'morning';
     if (
+      shiftLower === 'night' ||
+      shiftLower === 'nt' ||
+      shiftLower === 'c' ||
       notesLower.includes('night') ||
       notesLower.includes('"nt"') ||
       notesLower.includes(' nt') ||
@@ -54,143 +57,32 @@ export function formatDutyOnShortName(
       notesLower.includes('"c"') ||
       nameLower.includes('night')
     ) {
-      return 'IDAC "C"';
-    }
-
-    // Check for Afternoon ("B")
-    if (
+      targetShift = 'night';
+    } else if (
+      shiftLower === 'afternoon' ||
+      shiftLower === 'aft' ||
+      shiftLower === 'b' ||
       notesLower.includes('afternoon') ||
       notesLower.includes('aft') ||
       notesLower.includes('"b"') ||
       notesLower.includes('shift b') ||
       nameLower.includes('afternoon')
     ) {
-      return 'IDAC "B"';
+      targetShift = 'afternoon';
     }
 
-    // Check for Morning ("A")
-    if (
-      notesLower.includes('morning') ||
-      notesLower.includes('morn') ||
-      notesLower.includes('"a"') ||
-      notesLower.includes('shift a') ||
-      nameLower.includes('morning')
-    ) {
-      return 'IDAC "A"';
+    const matchedIdac = findTable((t) => {
+      const tId = (t.id || '').toLowerCase();
+      const tShift = (t.shiftLabel || '').toLowerCase();
+      return (t.dutyCode === 'IDAC' || tId.includes('idac')) && (tId.includes(targetShift) || tShift.includes(targetShift));
+    });
+    if (matchedIdac) {
+      return stripDutyOrOffSuffix(matchedIdac.shortName || getDefaultDutyShortName(matchedIdac));
     }
-
-    return 'IDAC "A"'; // Fallback for IDAC
+    return targetShift === 'night' ? 'IDAC "C"' : targetShift === 'afternoon' ? 'IDAC "B"' : 'IDAC "A"';
   }
 
-  // 2. NTF (Najirpara Taskforce)
-  if (
-    code === 'NTF' ||
-    notesLower.includes('ntf') ||
-    notesLower.includes('najirpara') ||
-    nameLower.includes('ntf') ||
-    nameLower.includes('najirpara')
-  ) {
-    return 'NTF';
-  }
-
-  // 3. BTF (Base Taskforce)
-  if (
-    code === 'BTF' ||
-    notesLower.includes('btf') ||
-    notesLower.includes('base taskforce') ||
-    notesLower.includes('task force') ||
-    notesLower.includes('taskforce') ||
-    nameLower.includes('btf') ||
-    nameLower.includes('taskforce')
-  ) {
-    return 'BTF';
-  }
-
-  // 4. Airfield / Airport / Air Fd
-  if (
-    code === 'AIRPORT' ||
-    code === 'AIRFIELD' ||
-    code === 'ATT' ||
-    code === 'AIR_FD' ||
-    notesLower.includes('airfield') ||
-    notesLower.includes('air fd') ||
-    notesLower.includes('airport') ||
-    nameLower.includes('airfield') ||
-    nameLower.includes('air fd') ||
-    nameLower.includes('airport')
-  ) {
-    return 'Airfield';
-  }
-
-  // 5. Halishahar
-  if (
-    code === 'HALISHAHAR' ||
-    notesLower.includes('halishahar') ||
-    notesLower.includes('hali duty') ||
-    nameLower.includes('halishahar')
-  ) {
-    return 'Halishahar';
-  }
-
-  // 6. Canteen
-  if (code === 'CANTEEN' || notesLower.includes('canteen') || nameLower.includes('canteen')) {
-    return 'Canteen';
-  }
-
-  // 6.1 Escort Duty
-  if (
-    code === 'ESCORT' ||
-    code === 'ESC' ||
-    code === 'ESCT' ||
-    code.includes('1794394') ||
-    notesLower.includes('escort') ||
-    nameLower.includes('escort')
-  ) {
-    return 'Esct Duty';
-  }
-
-  // 7. Orderly Room & UWO
-  if (code.includes('ORDERLY') || notesLower.includes('orderly') || nameLower.includes('orderly')) {
-    return 'Orderly Room';
-  }
-  if (code === 'UWO' || notesLower.includes('uwo') || nameLower.includes('uwo')) {
-    return 'UWO';
-  }
-
-  // 8. Bake & Bite
-  if (
-    code === 'BAKE_BITE' ||
-    code === 'BAKE_N_BITE' ||
-    notesLower.includes('bake') ||
-    nameLower.includes('bake')
-  ) {
-    return 'Bake & Bite';
-  }
-
-  // 9. TDY
-  if (
-    code === 'TDY' ||
-    code === 'ATT' ||
-    code === 'DETT' ||
-    notesLower.includes('tdy') ||
-    notesLower.includes('attachment')
-  ) {
-    return 'TDY';
-  }
-
-  // 10. Leave
-  if (
-    code === 'LEAVE' ||
-    notesLower.includes('leave') ||
-    notesLower.includes('cl') ||
-    notesLower.includes('al')
-  ) {
-    if (notesLower.includes('casual') || notesLower.includes('cl')) return 'CL';
-    if (notesLower.includes('annual') || notesLower.includes('al')) return 'AL';
-    return 'Leave';
-  }
-
-  // 11. Base Security / GD / SY Duty
+  // 2. Base Security / GD / Sy Duty
   if (
     code === 'GD' ||
     code === 'GUARD_DUTY' ||
@@ -211,10 +103,218 @@ export function formatDutyOnShortName(
     nameLower.includes('sy duty') ||
     nameLower.includes('sy on')
   ) {
-    return 'SY';
+    const matchedSy = findTable(
+      (t) =>
+        t.dutyCode === 'GD' ||
+        (t.id || '').toLowerCase().includes('security') ||
+        (t.title || '').toLowerCase().includes('security')
+    );
+    return stripDutyOrOffSuffix(matchedSy?.shortName || 'Sy');
   }
 
-  // 12. Custom duty code resolution (handles CUST_..., timestamp codes, custom duties)
+  // 3. BTF (Base Taskforce)
+  if (
+    code === 'BTF' ||
+    notesLower.includes('btf') ||
+    notesLower.includes('base taskforce') ||
+    nameLower.includes('btf') ||
+    nameLower.includes('base taskforce')
+  ) {
+    const matchedBtf = findTable(
+      (t) =>
+        t.dutyCode === 'BTF' ||
+        (t.id || '').toLowerCase().includes('base_tf') ||
+        (t.title || '').toLowerCase().includes('base taskforce')
+    );
+    return stripDutyOrOffSuffix(matchedBtf?.shortName || 'BTF');
+  }
+
+  // 4. NTF (Najirpara Taskforce)
+  if (
+    code === 'NTF' ||
+    notesLower.includes('ntf') ||
+    notesLower.includes('najirpara') ||
+    notesLower.includes('nazirpara') ||
+    nameLower.includes('ntf') ||
+    nameLower.includes('najirpara') ||
+    nameLower.includes('nazirpara')
+  ) {
+    const matchedNtf = findTable(
+      (t) =>
+        t.dutyCode === 'NTF' ||
+        (t.id || '').toLowerCase().includes('nazirpara') ||
+        (t.title || '').toLowerCase().includes('najirpara') ||
+        (t.title || '').toLowerCase().includes('nazirpara')
+    );
+    return stripDutyOrOffSuffix(matchedNtf?.shortName || 'NTF');
+  }
+
+  // 5. Airfield / Airport
+  if (
+    code === 'AIRPORT' ||
+    code === 'AIRFIELD' ||
+    code === 'AIR_FD' ||
+    notesLower.includes('airfield') ||
+    notesLower.includes('air fd') ||
+    notesLower.includes('airport') ||
+    nameLower.includes('airfield') ||
+    nameLower.includes('air fd') ||
+    nameLower.includes('airport')
+  ) {
+    const matchedAf = findTable(
+      (t) =>
+        t.dutyCode === 'AIRPORT' ||
+        (t.id || '').toLowerCase().includes('airport') ||
+        (t.id || '').toLowerCase().includes('airfield') ||
+        (t.title || '').toLowerCase().includes('airfield') ||
+        (t.title || '').toLowerCase().includes('airport')
+    );
+    return stripDutyOrOffSuffix(matchedAf?.shortName || 'Airfield');
+  }
+
+  // 6. Halishahar
+  if (
+    code === 'HALISHAHAR' ||
+    notesLower.includes('halishahar') ||
+    notesLower.includes('hali duty') ||
+    nameLower.includes('halishahar')
+  ) {
+    const matchedHali = findTable(
+      (t) =>
+        t.dutyCode === 'HALISHAHAR' ||
+        (t.id || '').toLowerCase().includes('halishahar') ||
+        (t.title || '').toLowerCase().includes('halishahar')
+    );
+    return stripDutyOrOffSuffix(matchedHali?.shortName || 'Halishahar');
+  }
+
+  // 7. Escort Duty
+  if (
+    code === 'ESCORT' ||
+    code === 'ESC' ||
+    code === 'ESCT' ||
+    code.includes('1794394') ||
+    notesLower.includes('escort') ||
+    nameLower.includes('escort')
+  ) {
+    const matchedEsc = findTable(
+      (t) =>
+        (t.dutyCode || '').toUpperCase().includes('1794394') ||
+        (t.id || '').toLowerCase().includes('1794394') ||
+        (t.title || '').toLowerCase().includes('escort')
+    );
+    return stripDutyOrOffSuffix(matchedEsc?.shortName || 'Esct');
+  }
+
+  // 8. Reception
+  if (code === 'RECEPTION' || notesLower.includes('reception') || nameLower.includes('reception')) {
+    const matchedRec = findTable(
+      (t) =>
+        t.dutyCode === 'RECEPTION' ||
+        (t.id || '').toLowerCase().includes('reception') ||
+        (t.title || '').toLowerCase().includes('reception')
+    );
+    return stripDutyOrOffSuffix(matchedRec?.shortName || 'Reception');
+  }
+
+  // 9. Exact match against any custom / configured table in Duty Matrix
+  const directMatch = findTable((t) => {
+    const tCode = String(t.dutyCode || '').toUpperCase().trim();
+    const tId = String(t.id || '').toUpperCase().trim();
+    const tTitleLower = String(t.title || '').toLowerCase().trim();
+    const tShortLower = String(t.shortName || '').toLowerCase().trim();
+    return (
+      (code && (tCode === code || tId === code)) ||
+      (nameLower && (tTitleLower === nameLower || (tShortLower && tShortLower === nameLower))) ||
+      (notesLower && (tTitleLower === notesLower || (tShortLower && tShortLower === notesLower)))
+    );
+  });
+  if (directMatch) {
+    return stripDutyOrOffSuffix(directMatch.shortName || getDefaultDutyShortName(directMatch));
+  }
+
+  // 10. Check customDuties store
+  try {
+    const customs = getCustomDuties();
+    const cMatch = customs.find((cd) => {
+      const cdCode = String(cd.code || '').toUpperCase().trim();
+      const cdNameLower = String(cd.name || '').toLowerCase().trim();
+      const cdShortLower = String(cd.shortName || '').toLowerCase().trim();
+      return (
+        (code && cdCode === code) ||
+        (nameLower && (cdNameLower === nameLower || cdShortLower === nameLower)) ||
+        (notesLower && (cdNameLower === notesLower || cdShortLower === notesLower))
+      );
+    });
+    if (cMatch) {
+      return stripDutyOrOffSuffix(cMatch.shortName || cMatch.name);
+    }
+  } catch {}
+
+  return null;
+}
+
+export function formatDutyOnShortName(
+  dutyCode?: string | null,
+  idaShift?: string | null,
+  notes?: string | null,
+  dutyName?: string | null
+): string {
+  const code = (dutyCode || '').toUpperCase().trim();
+  const notesStr = (notes || '').trim();
+  const notesLower = notesStr.toLowerCase();
+  const nameStr = (dutyName || '').trim();
+  const nameLower = nameStr.toLowerCase();
+
+  // Check if this is a configured duty from Duty Settings (e.g. Sy, BTF, NTF, Airfield, Halishahar, Esct, custom duty)
+  const configuredBaseShort = resolveConfiguredDutyBaseShortName(dutyCode, idaShift, notes, dutyName);
+  if (configuredBaseShort) {
+    // User rule: "State e Duty on thakle pase Duty lekha thakbe Sy Duty bt duty off thakle duty lekha thakbe na Sy Off"
+    if (/duty$/i.test(configuredBaseShort)) {
+      return configuredBaseShort;
+    }
+    return `${configuredBaseShort} Duty`;
+  }
+
+  // Non-duty disposals (Canteen, Orderly Room, UWO, Bake & Bite, TDY, Leave)
+  if (code === 'CANTEEN' || notesLower.includes('canteen') || nameLower.includes('canteen')) {
+    return 'Canteen';
+  }
+  if (code.includes('ORDERLY') || notesLower.includes('orderly') || nameLower.includes('orderly')) {
+    return 'Orderly Room';
+  }
+  if (code === 'UWO' || notesLower.includes('uwo') || nameLower.includes('uwo')) {
+    return 'UWO';
+  }
+  if (
+    code === 'BAKE_BITE' ||
+    code === 'BAKE_N_BITE' ||
+    notesLower.includes('bake') ||
+    nameLower.includes('bake')
+  ) {
+    return 'Bake & Bite';
+  }
+  if (
+    code === 'TDY' ||
+    code === 'ATT' ||
+    code === 'DETT' ||
+    notesLower.includes('tdy') ||
+    notesLower.includes('attachment')
+  ) {
+    return 'TDY';
+  }
+  if (
+    code === 'LEAVE' ||
+    notesLower.includes('leave') ||
+    notesLower.includes('cl') ||
+    notesLower.includes('al')
+  ) {
+    if (notesLower.includes('casual') || notesLower.includes('cl')) return 'CL';
+    if (notesLower.includes('annual') || notesLower.includes('al')) return 'AL';
+    return 'Leave';
+  }
+
+  // Custom duty code resolution (handles CUST_..., timestamp codes, custom duties)
   const isRawCode = (str?: string | null) => Boolean(
     str && (
       str.toUpperCase().startsWith('CUST_') ||
@@ -227,33 +327,40 @@ export function formatDutyOnShortName(
   if (isRawCode(code) || isRawCode(dutyName)) {
     const rawTarget = isRawCode(code) ? code : (dutyName || '');
     if (rawTarget.includes('1794394')) return 'Esct Duty';
-    const resolvedName = getCustomDutyName(rawTarget) ||
+    const customMatch = getCustomDuties().find(d => d.code === rawTarget);
+    const resolvedName = customMatch?.shortName ||
+      getCustomDutyName(rawTarget) ||
       DUTY_TYPE_MAP.get(rawTarget as any)?.name ||
-      getCustomDuties().find(d => d.code === rawTarget)?.name;
+      customMatch?.name;
     if (resolvedName && !isRawCode(resolvedName)) {
       if (resolvedName.toLowerCase().includes('escort')) return 'Esct Duty';
-      return resolvedName;
+      const base = resolvedName.replace(/\s+(duty|off)$/i, '').trim() || resolvedName;
+      return `${base} Duty`;
     }
   }
 
-  // 13. Custom fallback: clean any internal "imported" tag and avoid returning generic "DUTY" or raw codes
+  // Custom fallback: clean any internal "imported" tag and avoid returning generic "DUTY" or raw codes
   if (dutyName && !isRawCode(dutyName) && !dutyName.toLowerCase().includes('imported') && !isGenericDuty(dutyName)) {
     if (dutyName.toLowerCase().includes('escort')) return 'Esct Duty';
-    return dutyName;
+    const base = dutyName.replace(/\s+(duty|off)$/i, '').trim() || dutyName;
+    return `${base} Duty`;
   }
   if (notesStr && !isRawCode(notesStr) && !notesLower.includes('imported') && !isGenericDuty(notesStr)) {
     if (notesLower.includes('escort')) return 'Esct Duty';
-    return notesStr;
+    const base = notesStr.replace(/\s+(duty|off)$/i, '').trim() || notesStr;
+    return `${base} Duty`;
   }
 
-  // 14. If the code was a raw custom code and wasn't resolved yet
   if (isRawCode(code)) {
     return code.includes('1794394') ? 'Esct Duty' : 'Special Duty';
   }
 
-  // 15. Never silently fall back baseline or generic codes to Security Duty
   const isBaseline = ['ON_PARADE', 'PT', 'PT_PARADE', 'P', 'PRESENT'].includes(code);
-  return (code && !isGenericDuty(code) && !isBaseline) ? code : 'Duty';
+  if (code && !isGenericDuty(code) && !isBaseline) {
+    const base = code.replace(/\s+(duty|off)$/i, '').trim() || code;
+    return `${base} Duty`;
+  }
+  return 'Sy Duty';
 }
 
 export function formatDutyOffShortName(
@@ -261,6 +368,21 @@ export function formatDutyOffShortName(
   previousDutyName?: string | null,
   notes?: string | null
 ): string {
+  // Strip any existing " Duty" or " Off" from the inputs before resolving the base short name
+  const cleanName = (previousDutyName || '').replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
+  const cleanNotes = (notes || '').replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
+
+  const configuredBaseShort = resolveConfiguredDutyBaseShortName(
+    previousDutyCode,
+    undefined,
+    cleanNotes || notes,
+    cleanName || previousDutyName
+  );
+  if (configuredBaseShort) {
+    const base = configuredBaseShort.replace(/\s+(duty\s+off|duty|off)$/i, '').trim() || configuredBaseShort;
+    return `${base} Off`;
+  }
+
   const code = String(previousDutyCode || '').toUpperCase();
   const name = String(previousDutyName || '').toLowerCase();
   const n = String(notes || '').toLowerCase();
@@ -276,18 +398,22 @@ export function formatDutyOffShortName(
   ) {
     return 'Esct Off';
   }
-  const shortOn = formatDutyOnShortName(previousDutyCode, undefined, notes, previousDutyName);
-  if (shortOn.toLowerCase().endsWith('off')) return shortOn;
+
+  const shortOn = formatDutyOnShortName(previousDutyCode, undefined, cleanNotes || notes, cleanName || previousDutyName);
+  const baseShort = shortOn.replace(/\s+(duty\s+off|duty|off)$/i, '').trim();
+
   if (
-    shortOn === 'ESC' ||
-    shortOn === 'ESCT' ||
-    shortOn === 'Esct Duty' ||
-    shortOn === 'Escort Duty' ||
-    shortOn.toLowerCase() === 'escort'
+    baseShort === 'ESC' ||
+    baseShort === 'ESCT' ||
+    baseShort.toLowerCase() === 'escort'
   ) {
     return 'Esct Off';
   }
-  if (shortOn === 'SY' || shortOn === 'Sy Duty' || shortOn === 'GD') return 'SY Off';
-  if (!shortOn || shortOn === 'Duty') return 'Duty Off';
-  return `${shortOn} Off`;
+  if (baseShort.toUpperCase() === 'SY' || baseShort.toUpperCase() === 'GD') {
+    return 'Sy Off';
+  }
+  if (!baseShort || baseShort.toLowerCase() === 'duty') {
+    return 'Sy Off';
+  }
+  return `${baseShort} Off`;
 }

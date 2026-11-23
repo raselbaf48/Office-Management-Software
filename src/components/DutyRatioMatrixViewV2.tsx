@@ -128,8 +128,14 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     } catch {}
   }, [ratioPeriodMode]);
 
-  const getDutyWeekRange = (refDateStr: string, offsetWeeks: number = 0) => {
-    const [y, m, d] = (refDateStr || '2026-01-01').split('-').map(Number);
+  const getRunningTodayISO = () => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  };
+
+  const getDutyWeekRange = (refDateStr?: string, offsetWeeks: number = 0) => {
+    const effectiveRefStr = refDateStr || getRunningTodayISO();
+    const [y, m, d] = effectiveRefStr.split('-').map(Number);
     const ref = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1));
     const day = ref.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 5 = Fri, 6 = Sat
     const daysSinceFriday = (day + 2) % 7;
@@ -153,17 +159,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     };
   };
 
-  const initialThisWeek = getDutyWeekRange(targetDate, 0);
+  const initialThisWeek = getDutyWeekRange(getRunningTodayISO(), 0);
   const [weeklyStartDate, setWeeklyStartDate] = useState<string>(() => initialThisWeek.from);
   const [weeklyEndDate, setWeeklyEndDate] = useState<string>(() => initialThisWeek.to);
   const [weeklyPreset, setWeeklyPreset] = useState<'THIS_WEEK' | 'NEXT_WEEK' | 'CUSTOM'>('THIS_WEEK');
-
-  useEffect(() => {
-    const range = getDutyWeekRange(targetDate, 0);
-    setWeeklyStartDate(range.from);
-    setWeeklyEndDate(range.to);
-    setWeeklyPreset('THIS_WEEK');
-  }, [targetDate]);
 
   const [viewMode, setViewMode] = useState<'DUTY_DISTRIBUTION' | 'DUTY_RATIO' | 'MANPOWER' | 'DUTY_LIST'>(() => {
     try {
@@ -853,7 +852,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const range = getDutyWeekRange(targetDate, 0);
+                  const range = getDutyWeekRange(getRunningTodayISO(), 0);
                   setWeeklyStartDate(range.from);
                   setWeeklyEndDate(range.to);
                   setWeeklyPreset('THIS_WEEK');
@@ -869,7 +868,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const range = getDutyWeekRange(targetDate, 1);
+                  const range = getDutyWeekRange(getRunningTodayISO(), 1);
                   setWeeklyStartDate(range.from);
                   setWeeklyEndDate(range.to);
                   setWeeklyPreset('NEXT_WEEK');
@@ -955,6 +954,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             disposalsProp={draftDisposals}
             onDisposalsChange={setDraftDisposals}
             onManpowerChange={setDraftManpower}
+            ratioPeriodMode={ratioPeriodMode}
+            activeColumns={activeColumns}
           />
         )}
 
@@ -1981,11 +1982,14 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                 </div>
 
                 <div className="grid grid-cols-7 gap-2 sm:gap-3">
-                  {daysArray.map((dayNum, idx) => {
-                    const req = matrix[settingsTableIdx]?.dailyRequirements?.[idx] ?? (matrix[settingsTableIdx]?.totalRequiredDaily || 0);
+                  {(ratioPeriodMode === 'WEEKLY' ? activeColumns.slice(0, 7) : activeColumns).map((col, idx) => {
+                    const dayIndex = col.dayIdx;
+                    const req = matrix[settingsTableIdx]?.dailyRequirements?.[dayIndex] ?? (matrix[settingsTableIdx]?.totalRequiredDaily || 0);
                     return (
-                      <div key={dayNum} className="flex flex-col">
-                        <label className="text-[10px] font-bold text-slate-500 mb-1 text-center">Day {dayNum}</label>
+                      <div key={col.key} className="flex flex-col">
+                        <label className="text-[10px] font-bold text-slate-500 mb-1 text-center">
+                          {ratioPeriodMode === 'WEEKLY' ? `Day ${idx + 1} (${col.dateLabel})` : `Day ${col.dayNum}`}
+                        </label>
                         <input
                           type="number"
                           min="0"
@@ -1994,7 +1998,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                             const val = parseInt(e.target.value, 10) || 0;
                             const updated = [...matrix];
                             const currentReqs = [...(updated[settingsTableIdx].dailyRequirements || new Array(31).fill(updated[settingsTableIdx].totalRequiredDaily || 0))];
-                            currentReqs[idx] = val;
+                            currentReqs[dayIndex] = val;
                             updated[settingsTableIdx] = {
                               ...updated[settingsTableIdx],
                               dailyRequirements: currentReqs,
@@ -2035,7 +2039,9 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
           table={matrix[editingCalendar.tableIdx]}
           matrix={matrix}
           flight={editingCalendar.flight}
-          target={getFlightTarget(matrix[editingCalendar.tableIdx], editingCalendar.flight)}
+          target={getPeriodFlightTarget(matrix[editingCalendar.tableIdx], editingCalendar.flight)}
+          ratioPeriodMode={ratioPeriodMode}
+          activeColumns={activeColumns}
           onClose={() => setEditingCalendar(null)}
           onSave={(newData) => {
             const updated = [...matrix];

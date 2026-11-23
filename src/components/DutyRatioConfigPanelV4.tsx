@@ -35,7 +35,7 @@ const DEFAULT_TOTAL_DUTY = {
   airfieldDuty: 93,
 };
 
-import { DutyRatioTable, AllotmentType } from '../data/officialDutyRatioMatrix';
+import { DutyRatioTable, AllotmentType, getDefaultDutyShortName, saveDutyMatrix } from '../data/officialDutyRatioMatrix';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
 // Helper function to auto-distribute duty data based on manpower
 const autoDistributeTableData = (table: DutyRatioTable, currentManpower: any) => {
@@ -151,9 +151,20 @@ export interface DutyRatioConfigPanelProps {
   disposalsProp?: Record<string, string>;
   onDisposalsChange?: (newDisposals: Record<string, string>) => void;
   onManpowerChange?: (mp: any) => void;
+  ratioPeriodMode?: 'MONTHLY' | 'WEEKLY';
+  activeColumns?: Array<{
+    key: string;
+    dayNum: number;
+    dayIdx: number;
+    dateStr?: string;
+    dateLabel?: string;
+    dayShort?: string;
+    dayName?: string;
+    isOffDay?: boolean;
+  }>;
 }
 
-export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport, disposalsProp, onDisposalsChange, onManpowerChange }) => {
+export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport, disposalsProp, onDisposalsChange, onManpowerChange, ratioPeriodMode = 'MONTHLY', activeColumns }) => {
   const [totalDuty, setTotalDuty] = useState(() => {
     const savedDuty = localStorage.getItem('baf_duty_distribution_total_duty');
     return savedDuty ? JSON.parse(savedDuty) : DEFAULT_TOTAL_DUTY;
@@ -316,6 +327,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const [editingDutyIdx, setEditingDutyIdx] = useState<number | null>(null);
   const [editDutySerNo, setEditDutySerNo] = useState<number | ''>('');
   const [editDutyName, setEditDutyName] = useState('');
+  const [editDutyShortName, setEditDutyShortName] = useState('');
   const [editDutyFlights, setEditDutyFlights] = useState<FlightName[]>([]);
   const [editDutyRanks, setEditDutyRanks] = useState<Rank[]>([]);
   const [editDutyAllotmentType, setEditDutyAllotmentType] = useState<AllotmentType>('ratio');
@@ -327,6 +339,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const [isAddingNewDuty, setIsAddingNewDuty] = useState(false);
   const [newDutySerNo, setNewDutySerNo] = useState<number | ''>('');
   const [newDutyName, setNewDutyName] = useState('');
+  const [newDutyShortName, setNewDutyShortName] = useState('');
   const [newDutyFlights, setNewDutyFlights] = useState<FlightName[]>(['Mechanics', 'Avionics', 'GCS', 'Admin']);
   const [newDutyRanks, setNewDutyRanks] = useState<Rank[]>(['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2']);
   const [newDutyAllotmentType, setNewDutyAllotmentType] = useState<AllotmentType>('ratio');
@@ -757,6 +770,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       : 0;
                     setNewDutySerNo(currentMaxSer + 1);
                     setNewDutyName('');
+                    setNewDutyShortName('');
                     setNewDutyFlights(activeUnitGroups as FlightName[]);
                     setNewDutyRanks(['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2']);
                     setIsAddingNewDuty(true);
@@ -814,6 +828,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           const elig = (rawElig.length > 0 ? rawElig : activeUnitGroups) as FlightName[];
                           setEditingDutyIdx(idx);
                           setEditDutyName(table.title);
+                          setEditDutyShortName(table.shortName || getDefaultDutyShortName(table));
                           setEditDutySerNo(table.serNo ?? '');
                           setEditDutyFlights(elig);
                           setEditDutyRanks(table.eligibleRanks || (table.title.toLowerCase().includes('security') ? ['Cpl', 'LAC', 'AC-1', 'AC-2'] : ['Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2']));
@@ -829,10 +844,15 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       </button>
                     </div>
 
-                    {/* Duty Name */}
-                    <div className="pr-16 mb-4">
+                    {/* Duty Name & Short Name Badge */}
+                    <div className="pr-16 mb-3">
                       <div className={`w-full bg-transparent font-bold text-base truncate ${table.isDisabled ? 'text-slate-500 line-through' : 'text-slate-800 dark:text-slate-200'}`}>
                         {table.serNo !== undefined ? `${table.serNo}. ` : ''}{table.title}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/70">
+                          Short Name: {table.shortName || getDefaultDutyShortName(table)}
+                        </span>
                       </div>
                     </div>
 
@@ -856,11 +876,31 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     </div>
 
                     <div className="mt-3 flex items-center justify-between px-1">
-                      <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Monthly Total:</span>
+                      <span className="text-xs font-bold text-slate-500 dark:text-slate-400">
+                        {ratioPeriodMode === 'WEEKLY' ? 'Weekly Total (7 Days):' : 'Monthly Total:'}
+                      </span>
                       {(() => {
-                        const calculatedTotal = (table.dailyRequirements && Array.isArray(table.dailyRequirements) && table.dailyRequirements.length > 0)
-                          ? table.dailyRequirements.reduce((sum, v) => sum + (Number(v) || 0), 0)
-                          : (table.totalRequiredMonth || (table.totalRequiredDaily ? table.totalRequiredDaily * 31 : 0) || ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce((sum, fl) => sum + (table.data?.[fl as FlightName]?.reduce((s, c) => s + c, 0) || 0), 0));
+                        const isWeeklyMode = ratioPeriodMode === 'WEEKLY';
+                        const weeklyDayIndices = isWeeklyMode
+                          ? ((activeColumns && activeColumns.length > 0)
+                              ? activeColumns.slice(0, 7).map(c => c.dayIdx)
+                              : [0, 1, 2, 3, 4, 5, 6])
+                          : [];
+                        const calculatedTotal = isWeeklyMode
+                          ? weeklyDayIndices.reduce((sum, dIdx) => {
+                              const explicit = table.dailyRequirements?.[dIdx];
+                              if (explicit !== undefined && explicit !== null) return sum + (Number(explicit) || 0);
+                              if (table.totalRequiredDaily && (table.totalRequiredDaily * 31 === table.totalRequiredMonth)) {
+                                return sum + table.totalRequiredDaily;
+                              }
+                              return sum + ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce(
+                                (acc, fl) => acc + (table.data?.[fl as FlightName]?.[dIdx] || 0),
+                                0
+                              );
+                            }, 0)
+                          : ((table.dailyRequirements && Array.isArray(table.dailyRequirements) && table.dailyRequirements.length > 0)
+                              ? table.dailyRequirements.reduce((sum, v) => sum + (Number(v) || 0), 0)
+                              : (table.totalRequiredMonth || (table.totalRequiredDaily ? table.totalRequiredDaily * 31 : 0) || ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce((sum, fl) => sum + (table.data?.[fl as FlightName]?.reduce((s, c) => s + c, 0) || 0), 0)));
                         return (
                           <span className={`text-sm font-bold font-mono ${table.isDisabled ? 'text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
                             {calculatedTotal}
@@ -892,20 +932,64 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
             </div>
 
             {/* Modal for Calendar configuration */}
-            {settingsTableIdx !== null && matrix && matrix[settingsTableIdx] && (
+            {settingsTableIdx !== null && matrix && matrix[settingsTableIdx] && (() => {
+              const isWeeklyModal = ratioPeriodMode === 'WEEKLY';
+              const modalTable = matrix[settingsTableIdx];
+              const resolveDayReqForModal = (dayIndex: number): number => {
+                const explicit = modalTable?.dailyRequirements?.[dayIndex];
+                if (explicit !== undefined && explicit !== null) return Number(explicit) || 0;
+                if (modalTable) {
+                  if (modalTable.totalRequiredDaily && (modalTable.totalRequiredDaily * 31 === modalTable.totalRequiredMonth)) {
+                    return modalTable.totalRequiredDaily;
+                  }
+                  return ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce(
+                    (acc, fl) => acc + (modalTable.data?.[fl as FlightName]?.[dayIndex] || 0),
+                    0
+                  );
+                }
+                return 0;
+              };
+
+              const modalDays = isWeeklyModal
+                ? ((activeColumns && activeColumns.length > 0)
+                    ? activeColumns.slice(0, 7).map((col, i) => ({
+                        boxNum: i + 1,
+                        dayIdx: col.dayIdx,
+                        label: `Day ${i + 1}`,
+                        subLabel: col.dateLabel ? `${col.dateLabel}${col.dayShort ? ` (${col.dayShort})` : ''}` : undefined,
+                        isOffDay: col.isOffDay
+                      }))
+                    : Array.from({ length: 7 }, (_, i) => ({
+                        boxNum: i + 1,
+                        dayIdx: i,
+                        label: `Day ${i + 1}`,
+                        subLabel: undefined,
+                        isOffDay: false
+                      })))
+                : Array.from({ length: 31 }, (_, i) => ({
+                    boxNum: i + 1,
+                    dayIdx: i,
+                    label: `Day ${i + 1}`,
+                    subLabel: undefined,
+                    isOffDay: false
+                  }));
+
+              const displayedTotal = modalDays.reduce((acc, d) => acc + resolveDayReqForModal(d.dayIdx), 0);
+
+              return (
               <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                 <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
                   
                   {/* Modal Header */}
                   <div className="px-5 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap justify-between items-center gap-3 bg-slate-50 dark:bg-slate-800/50">
                     <div>
-                      <h3 className="font-bold text-lg text-slate-900 dark:text-white">Configure Daily Requirements</h3>
+                      <h3 className="font-bold text-lg text-slate-900 dark:text-white">
+                        Configure Daily Requirements {isWeeklyModal ? '(Weekly - 7 Days)' : ''}
+                      </h3>
                       <div className="flex items-center space-x-2 mt-0.5">
-                        <span className="text-sm font-semibold text-indigo-600 dark:text-indigo-400">{matrix[settingsTableIdx].title}</span>
+                        <span className="text-sm font-semibold text-indigo-600 dark:text-indigo-400">{modalTable.title}</span>
                         <span className="text-xs px-2 py-0.5 rounded-md font-bold font-mono bg-indigo-100 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-200">
-                          Total: {((matrix[settingsTableIdx].dailyRequirements && matrix[settingsTableIdx].dailyRequirements!.length > 0)
-                            ? matrix[settingsTableIdx].dailyRequirements!.reduce((a, b) => a + (Number(b) || 0), 0)
-                            : (matrix[settingsTableIdx].totalRequiredMonth || (matrix[settingsTableIdx].totalRequiredDaily ? matrix[settingsTableIdx].totalRequiredDaily * 31 : 0)))} days
+                          Total: {displayedTotal} days
                         </span>
                       </div>
                     </div>
@@ -961,7 +1045,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-5 gap-3 pb-4 border-b border-indigo-200/60 dark:border-indigo-800/40">
                         <div>
-                           <h4 className="font-bold text-sm text-indigo-900 dark:text-indigo-300 mb-0.5">Set Requirement for All Days</h4>
+                           <h4 className="font-bold text-sm text-indigo-900 dark:text-indigo-300 mb-0.5">
+                             Set Requirement for All {isWeeklyModal ? '7 Days' : 'Days'}
+                           </h4>
                            <p className="text-xs text-indigo-700/80 dark:text-indigo-300/70">
                              {dailyReqInputMode === 'tap'
                                ? 'Tap System ON: Click any day box below to cycle (0 → 1 → 2 → 3 → 0).'
@@ -987,7 +1073,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                               readOnly
                               id="panelGlobalReqInput"
                               className="w-10 px-1 py-0.5 text-sm font-bold font-mono text-center bg-transparent border-none focus:outline-none text-slate-800 dark:text-slate-100"
-                              defaultValue={matrix[settingsTableIdx]?.totalRequiredDaily || 0}
+                              defaultValue={modalTable?.totalRequiredDaily || 0}
                             />
                             <button 
                               type="button"
@@ -1010,9 +1096,21 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                               if (onMatrixChange) {
                                 const updated = [...matrix];
                                 updated[settingsTableIdx] = { ...updated[settingsTableIdx] };
-                                updated[settingsTableIdx].dailyRequirements = new Array(31).fill(val);
-                                updated[settingsTableIdx].totalRequiredDaily = val;
-                                updated[settingsTableIdx].totalRequiredMonth = val * 31;
+                                if (isWeeklyModal) {
+                                  const currentReqs = updated[settingsTableIdx].dailyRequirements
+                                    ? [...updated[settingsTableIdx].dailyRequirements!]
+                                    : Array.from({ length: 31 }, (_, dIdx) => resolveDayReqForModal(dIdx));
+                                  modalDays.forEach(d => {
+                                    currentReqs[d.dayIdx] = val;
+                                  });
+                                  updated[settingsTableIdx].dailyRequirements = currentReqs;
+                                  updated[settingsTableIdx].totalRequiredDaily = Math.max(...currentReqs, val);
+                                  updated[settingsTableIdx].totalRequiredMonth = currentReqs.reduce((a, b) => a + (Number(b) || 0), 0);
+                                } else {
+                                  updated[settingsTableIdx].dailyRequirements = new Array(31).fill(val);
+                                  updated[settingsTableIdx].totalRequiredDaily = val;
+                                  updated[settingsTableIdx].totalRequiredMonth = val * 31;
+                                }
                                 onMatrixChange(updated);
                               }
                             }}
@@ -1024,31 +1122,16 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       </div>
 
                       <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 gap-2.5 sm:gap-3">
-                        {Array.from({ length: 31 }, (_, i) => i + 1).map((dayNum, idx) => {
-                          const table = matrix[settingsTableIdx];
-                          const resolveDayReq = (dayIndex: number): number => {
-                            const explicit = table?.dailyRequirements?.[dayIndex];
-                            if (explicit !== undefined && explicit !== null) return Number(explicit) || 0;
-                            if (table) {
-                              if (table.totalRequiredDaily && (table.totalRequiredDaily * 31 === table.totalRequiredMonth)) {
-                                return table.totalRequiredDaily;
-                              }
-                              return ['Mechanics', 'Avionics', 'GCS', 'Admin'].reduce(
-                                (acc, fl) => acc + (table.data[fl as FlightName]?.[dayIndex] || 0),
-                                0
-                              );
-                            }
-                            return 0;
-                          };
-
-                          const req = resolveDayReq(idx);
+                        {modalDays.map((dayItem) => {
+                          const idx = dayItem.dayIdx;
+                          const req = resolveDayReqForModal(idx);
                           const updateDayValue = (newValue: number) => {
                             if (!onMatrixChange) return;
                             const updated = [...matrix];
                             updated[settingsTableIdx] = { ...updated[settingsTableIdx] };
                             const currentReqs = updated[settingsTableIdx].dailyRequirements
                               ? [...updated[settingsTableIdx].dailyRequirements!]
-                              : Array.from({ length: 31 }, (_, dIdx) => resolveDayReq(dIdx));
+                              : Array.from({ length: 31 }, (_, dIdx) => resolveDayReqForModal(dIdx));
                             currentReqs[idx] = Math.max(0, newValue);
                             updated[settingsTableIdx].dailyRequirements = currentReqs;
                             updated[settingsTableIdx].totalRequiredMonth = currentReqs.reduce((a, b) => a + (Number(b) || 0), 0);
@@ -1077,14 +1160,21 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           if (dailyReqInputMode === 'stepper') {
                             return (
                               <div
-                                key={dayNum}
+                                key={`${dayItem.boxNum}-${dayItem.dayIdx}`}
                                 className={`flex flex-col items-center justify-center rounded-xl border-2 py-2 px-1.5 shadow-sm transition-all w-full ${stateStyle}`}
                               >
-                                <div className="flex items-center gap-1.5 mb-1.5">
-                                  <span className={`w-1.5 h-1.5 rounded-full transition-colors ${badgeDot}`} />
-                                  <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
-                                    Day {dayNum}
-                                  </span>
+                                <div className="flex flex-col items-center mb-1.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`w-1.5 h-1.5 rounded-full transition-colors ${badgeDot}`} />
+                                    <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                                      {dayItem.label}
+                                    </span>
+                                  </div>
+                                  {dayItem.subLabel && (
+                                    <span className={`text-[9px] font-semibold mt-0.5 ${dayItem.isOffDay ? 'text-rose-500 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                      {dayItem.subLabel}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="flex items-center justify-between w-full gap-1 px-0.5">
                                   <button
@@ -1113,20 +1203,27 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
 
                           return (
                             <button
-                              key={dayNum}
+                              key={`${dayItem.boxNum}-${dayItem.dayIdx}`}
                               type="button"
-                              title={`Day ${dayNum}: Click to cycle (0 → 1 → 2 → 3 → 0)`}
+                              title={`${dayItem.label}: Click to cycle (0 → 1 → 2 → 3 → 0)`}
                               onClick={() => {
                                 const nextVal = req >= 3 ? 0 : req + 1;
                                 updateDayValue(nextVal);
                               }}
                               className={`group relative flex flex-col items-center justify-center rounded-xl border-2 py-2.5 px-2 shadow-sm transition-all duration-150 cursor-pointer select-none active:scale-95 hover:shadow-md w-full ${stateStyle}`}
                             >
-                              <div className="flex items-center gap-1.5 mb-1">
-                                <span className={`w-1.5 h-1.5 rounded-full transition-colors ${badgeDot}`} />
-                                <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
-                                  Day {dayNum}
-                                </span>
+                              <div className="flex flex-col items-center mb-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`w-1.5 h-1.5 rounded-full transition-colors ${badgeDot}`} />
+                                  <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                                    {dayItem.label}
+                                  </span>
+                                </div>
+                                {dayItem.subLabel && (
+                                  <span className={`text-[9px] font-semibold mt-0.5 ${dayItem.isOffDay ? 'text-rose-500 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                    {dayItem.subLabel}
+                                  </span>
+                                )}
                               </div>
                               <span className="font-mono font-black text-2xl leading-none tracking-tight">
                                 {req}
@@ -1142,11 +1239,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   {/* Modal Footer */}
                   <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-800/50">
                     <div className="flex items-center space-x-2">
-                      <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Total Monthly Requirement:</span>
+                      <span className="text-xs font-bold text-slate-500 dark:text-slate-400">
+                        {isWeeklyModal ? 'Total Weekly Requirement (7 Days):' : 'Total Monthly Requirement:'}
+                      </span>
                       <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono font-black text-sm">
-                        {((matrix[settingsTableIdx]?.dailyRequirements && matrix[settingsTableIdx]?.dailyRequirements!.length > 0)
-                          ? matrix[settingsTableIdx]?.dailyRequirements!.reduce((a, b) => a + (Number(b) || 0), 0)
-                          : (matrix[settingsTableIdx]?.totalRequiredMonth || (matrix[settingsTableIdx]?.totalRequiredDaily ? matrix[settingsTableIdx]?.totalRequiredDaily * 31 : 0)))}
+                        {displayedTotal}
                       </span>
                       <span className="text-xs text-slate-500 font-medium">days</span>
                     </div>
@@ -1173,7 +1270,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
 
                 </div>
               </div>
-            )}
+              );
+            })()}
 
           </div>
         )}
@@ -1916,16 +2014,31 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 </p>
               </div>
 
-              <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Duty Name <span className="text-red-500">*</span></label>
-                <input
-                  type="text"
-                  value={newDutyName}
-                  onChange={e => setNewDutyName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100"
-                  placeholder="e.g. Special Guard"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Duty Name <span className="text-red-500">*</span></label>
+                  <input
+                    type="text"
+                    value={newDutyName}
+                    onChange={e => setNewDutyName(e.target.value)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100"
+                    placeholder="e.g. Base Security Duty"
+                  />
+                </div>
+                <div className="sm:col-span-1">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Short Name <span className="text-red-500">*</span></label>
+                  <input
+                    type="text"
+                    value={newDutyShortName}
+                    onChange={e => setNewDutyShortName(e.target.value)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100 font-bold"
+                    placeholder="e.g. Sy"
+                  />
+                </div>
               </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-3">
+                Parade, PT ও Others State-এ এই Short Name দেখানো হবে (Duty On থাকলে <strong>{((newDutyShortName || newDutyName || 'Sy').replace(/\s+(duty|off)$/i, '').trim() || 'Sy')} Duty</strong> এবং Duty Off থাকলে <strong>{((newDutyShortName || newDutyName || 'Sy').replace(/\s+(duty|off)$/i, '').trim() || 'Sy')} Off</strong>)।
+              </p>
 
               <div>
                 <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
@@ -2197,10 +2310,13 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 onClick={() => {
                   if (!newDutyName.trim()) return;
                   const newCode = 'CUST_' + Date.now().toString();
+                  const resolvedShortName = (newDutyShortName.trim() || getDefaultDutyShortName({ title: newDutyName, dutyCode: newCode }))
+                    .replace(/\s+(duty|off)$/i, '')
+                    .trim() || newDutyName.trim();
                   const newCustomDuty: CustomDutyConfig = {
                     code: newCode as DutyCategoryCode,
                     name: newDutyName,
-                    shortName: newDutyName.substring(0, 4).toUpperCase(),
+                    shortName: resolvedShortName,
                     category: 'Special',
                     color: 'bg-indigo-600 text-white',
                     badgeBg: 'bg-indigo-100 dark:bg-indigo-900/40 border border-indigo-300 dark:border-indigo-700',
@@ -2228,6 +2344,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     const newDutyEntry: DutyRatioTable = {
                       id: newCode,
                       title: newDutyName,
+                      shortName: resolvedShortName,
                       serNo: reqSer,
                       dutyCode: newCode as DutyCategoryCode,
                       totalRequiredMonth: 0,
@@ -2252,6 +2369,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       d.serNo = idx + 1;
                     });
 
+                    saveDutyMatrix(sorted);
                     onMatrixChange(sorted);
                   }
                   
@@ -2300,16 +2418,31 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                 </p>
               </div>
 
-              <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Duty Name <span className="text-red-500">*</span></label>
-                <input
-                  type="text"
-                  value={editDutyName}
-                  onChange={e => setEditDutyName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100"
-                  placeholder="e.g. Special Guard"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Duty Name <span className="text-red-500">*</span></label>
+                  <input
+                    type="text"
+                    value={editDutyName}
+                    onChange={e => setEditDutyName(e.target.value)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100"
+                    placeholder="e.g. Base Security Duty"
+                  />
+                </div>
+                <div className="sm:col-span-1">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">Short Name <span className="text-red-500">*</span></label>
+                  <input
+                    type="text"
+                    value={editDutyShortName}
+                    onChange={e => setEditDutyShortName(e.target.value)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-slate-900 dark:text-slate-100 font-bold"
+                    placeholder="e.g. Sy"
+                  />
+                </div>
               </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-3">
+                Parade, PT ও Others State-এ এই Short Name দেখানো হবে (Duty On থাকলে <strong>{((editDutyShortName || editDutyName || 'Sy').replace(/\s+(duty|off)$/i, '').trim() || 'Sy')} Duty</strong> এবং Duty Off থাকলে <strong>{((editDutyShortName || editDutyName || 'Sy').replace(/\s+(duty|off)$/i, '').trim() || 'Sy')} Off</strong>)।
+              </p>
 
               <div>
                 <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
@@ -2616,7 +2749,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       // Update the edited duty's details
                       const targetItem = sorted.find(t => t.id === currentTable.id);
                       if (targetItem) {
+                        const cleanedShortName = (editDutyShortName.trim() || getDefaultDutyShortName({ ...targetItem, title: editDutyName, shortName: undefined }))
+                          .replace(/\s+(duty|off)$/i, '')
+                          .trim();
                         targetItem.title = editDutyName;
+                        targetItem.shortName = cleanedShortName || getDefaultDutyShortName(targetItem);
                         targetItem.eligibleFlights = editDutyFlights;
                         targetItem.eligibleRanks = editDutyRanks;
                         targetItem.allotmentType = finalAllotmentType;
@@ -2632,6 +2769,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                           const customDuties = getCustomDuties();
                           const cMatch = customDuties.find(cd => cd.code === targetItem.dutyCode || cd.code === targetItem.id);
                           if (cMatch) {
+                            cMatch.name = editDutyName;
+                            cMatch.shortName = targetItem.shortName;
                             cMatch.onParadeOnDutyDay = editDutyOnParade;
                             cMatch.dutyOffNextDay = editDutyDutyOff;
                             cMatch.onPtNextDay = editDutyDutyOff ? editDutyOnPt : false;
@@ -2645,6 +2784,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                         d.serNo = idx + 1;
                       });
 
+                      saveDutyMatrix(sorted);
                       onMatrixChange(sorted);
                     }
                     setEditingDutyIdx(null);

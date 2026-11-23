@@ -1182,7 +1182,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  } else if (codeUpper === 'RECEPTION' || notesLower.includes('reception') || notesLower.includes('k/o')) {
  receptionList.push({ airman, note: 'Reception' });
  } else if (['AIRPORT', 'AIR_FD', 'AIRFIELD', 'ATT'].includes(codeUpper) || notesLower.includes('air fd') || notesLower.includes('airfield')) {
- dutyOnList.push({ airman, note: 'Airfield' });
+ const dutyDisplay = formatDutyOnShortName(codeUpper, idaShift, notes, item.dutyName);
+ dutyOnList.push({ airman, note: dutyDisplay });
  } else if (['ADMIN_ORDER', 'BOI', 'COMMITTEE'].includes(codeUpper) || notesLower.includes('admin order') || notesLower.includes('boi')) {
  adminOrderList.push({ airman, note: 'Admin Order' });
  } else if (['CLASS_TRG', 'CLASS', 'TRG', 'LTTB'].includes(codeUpper) || notesLower.includes('class') || notesLower.includes('trg')) {

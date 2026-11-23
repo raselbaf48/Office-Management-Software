@@ -23,20 +23,31 @@
           if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js?v=25').catch(function () {});
           }
+          var hasSession = false;
+          try {
+            hasSession = Boolean(window.sessionStorage && window.sessionStorage.getItem('baf_user_session'));
+          } catch (e) {}
+
           var officeName = '155 UASU BAF';
+          var officeLogo = hasSession ? '/155-uasu-baf-logo.png' : '/office-management-logo.png?v=25';
+          var rawCfg = localStorage.getItem('custom_office_config') || localStorage.getItem('baf_custom_office_config');
+          if (rawCfg) {
+            var cfg = JSON.parse(rawCfg);
+            if (cfg && cfg.officeName && cfg.officeName !== 'Office Management') {
+              officeName = String(cfg.officeName).trim();
+            }
+            if (hasSession && cfg && cfg.officeLogo) {
+              officeLogo = String(cfg.officeLogo).trim();
+            }
+          }
           var rawMeta = localStorage.getItem('baf_pwa_active_office_meta');
           if (rawMeta) {
             var meta = JSON.parse(rawMeta);
             if (meta && meta.officeName && meta.officeName !== 'Office Management' && meta.officeName !== 'Office Management Application') {
               officeName = String(meta.officeName).trim();
             }
-          } else {
-            var rawCfg = localStorage.getItem('baf_custom_office_config');
-            if (rawCfg) {
-              var cfg = JSON.parse(rawCfg);
-              if (cfg && cfg.officeName && cfg.officeName !== 'Office Management') {
-                officeName = String(cfg.officeName).trim();
-              }
+            if (hasSession && meta && meta.rawLogo) {
+              officeLogo = String(meta.rawLogo).trim();
             }
           }
           var shortName = officeName.length > 25 ? officeName.slice(0, 25).trim() : officeName;
@@ -45,14 +56,12 @@
             var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=25';
             manifestEl.setAttribute('href', '/api/pwa-manifest?' + q);
           }
-          var icon192 = '/pwa-192x192-trans.png?v=25';
-          var icon512 = '/pwa-512x512-trans.png?v=25';
           var el192 = document.getElementById('pwa-icon-192');
           var el512 = document.getElementById('pwa-icon-512');
           var elApple = document.getElementById('pwa-apple-icon');
-          if (el192) el192.setAttribute('href', icon192);
-          if (el512) el512.setAttribute('href', icon512);
-          if (elApple) elApple.setAttribute('href', icon192);
+          if (el192) el192.setAttribute('href', officeLogo);
+          if (el512) el512.setAttribute('href', officeLogo);
+          if (elApple) elApple.setAttribute('href', officeLogo);
         } catch (e) {}
       })();
     </script>

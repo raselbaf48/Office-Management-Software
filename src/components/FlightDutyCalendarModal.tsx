@@ -8,6 +8,15 @@ interface FlightDutyCalendarModalProps {
   flight: FlightName;
   matrix?: DutyRatioTable[];
   target?: number;
+  ratioPeriodMode?: 'MONTHLY' | 'WEEKLY';
+  activeColumns?: Array<{
+    key: string;
+    dayNum: number;
+    dayIdx: number;
+    dateLabel?: string;
+    dayShort?: string;
+    isOffDay?: boolean;
+  }>;
   onClose: () => void;
   onSave: (newData: number[]) => void;
 }
@@ -17,10 +26,32 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
   flight,
   matrix,
   target,
+  ratioPeriodMode = 'MONTHLY',
+  activeColumns,
   onClose,
   onSave,
 }) => {
   const [data, setData] = useState<number[]>(table.data[flight] || new Array(31).fill(0));
+  const isWeekly = ratioPeriodMode === 'WEEKLY';
+  const visibleDays = isWeekly
+    ? (activeColumns && activeColumns.length > 0
+        ? activeColumns.slice(0, 7)
+        : Array.from({ length: 7 }, (_, i) => ({
+            key: `w_${i + 1}`,
+            dayNum: i + 1,
+            dayIdx: i,
+            dateLabel: `Day ${i + 1}`,
+            dayShort: '',
+            isOffDay: false,
+          })))
+    : Array.from({ length: 31 }, (_, i) => ({
+        key: `m_${i + 1}`,
+        dayNum: i + 1,
+        dayIdx: i,
+        dateLabel: String(i + 1),
+        dayShort: '',
+        isOffDay: false,
+      }));
 
   const reqValue = target !== undefined 
     ? target 
@@ -35,10 +66,20 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
   };
 
   const handleReset = () => {
-    setData(new Array(31).fill(0));
+    if (isWeekly) {
+      const next = [...data];
+      visibleDays.forEach((col) => {
+        next[col.dayIdx] = 0;
+      });
+      setData(next);
+    } else {
+      setData(new Array(31).fill(0));
+    }
   };
 
-  const totalFlightSelected = data.reduce((a, b) => a + b, 0);
+  const totalFlightSelected = isWeekly
+    ? visibleDays.reduce((sum, col) => sum + (data[col.dayIdx] || 0), 0)
+    : data.reduce((a, b) => a + b, 0);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4 animate-fadeIn">
@@ -50,7 +91,9 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
               <Calendar className="w-5 h-5 text-indigo-500" />
               <span>{flight}</span>
             </h3>
-            <p className="text-xs text-slate-500 font-bold mt-1 uppercase tracking-wider">{table.title}</p>
+            <p className="text-xs text-slate-500 font-bold mt-1 uppercase tracking-wider">
+              {table.title} {isWeekly ? '• Weekly (7 Days)' : ''}
+            </p>
           </div>
           <div className="flex flex-col items-end space-y-3">
             <div className="flex items-center space-x-2">
@@ -81,8 +124,16 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
                   onClick={() => {
                     const val = parseInt((document.getElementById('modalGlobalReqInput') as HTMLInputElement).value, 10);
                     if (isNaN(val)) return;
-                    const newData = new Array(31).fill(val);
-                    setData(newData);
+                    if (isWeekly) {
+                      const newData = [...data];
+                      visibleDays.forEach((col) => {
+                        newData[col.dayIdx] = val;
+                      });
+                      setData(newData);
+                    } else {
+                      const newData = new Array(31).fill(val);
+                      setData(newData);
+                    }
                   }}
                   className="px-2 py-1 ml-1 bg-indigo-600 text-white text-[10px] font-bold rounded hover:bg-indigo-700 transition-colors"
                 >
@@ -143,7 +194,8 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
         {/* Calendar Grid */}
         <div className="p-4 sm:p-6">
           <div className="grid grid-cols-7 gap-3 sm:gap-4">
-            {Array.from({ length: 31 }).map((_, i) => {
+            {visibleDays.map((col, idx) => {
+              const i = col.dayIdx;
               const val = data[i] || 0;
               const isPositive = val > 0;
               
@@ -163,14 +215,16 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
 
               return (
                 <button
-                  key={i}
+                  key={col.key}
                   type="button"
                   onClick={() => handleCellClick(i)}
-                  title={`${flight} on Day ${i + 1}: Total ${totalFlightDayCount} duties (${val} in ${table.title}, ${otherTablesCount} in other duties)`}
+                  title={`${flight} on ${isWeekly ? `${col.dateLabel} (${col.dayShort || `Day ${idx + 1}`})` : `Day ${i + 1}`}: Total ${totalFlightDayCount} duties (${val} in ${table.title}, ${otherTablesCount} in other duties)`}
                   className={`relative aspect-square rounded-full border-2 flex flex-col items-center justify-center transition-all ${
                     isPositive
                       ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/20 dark:border-indigo-800/50 cursor-pointer'
-                      : 'bg-slate-50 border-slate-200 hover:border-indigo-300 dark:bg-slate-800/50 dark:border-slate-700 dark:hover:border-indigo-500 cursor-pointer'
+                      : col.isOffDay
+                        ? 'bg-rose-50 border-rose-200 hover:border-rose-400 dark:bg-rose-950/30 dark:border-rose-800/60 cursor-pointer'
+                        : 'bg-slate-50 border-slate-200 hover:border-indigo-300 dark:bg-slate-800/50 dark:border-slate-700 dark:hover:border-indigo-500 cursor-pointer'
                   }`}
                 >
                   {/* Left Badge: Flight All Duty Day Total on this Date */}
@@ -196,12 +250,17 @@ export const FlightDutyCalendarModal: React.FC<FlightDutyCalendarModalProps> = (
                   )}
 
                   <span
-                    className={`text-sm font-black ${
-                      isPositive ? 'text-indigo-900 dark:text-indigo-200' : 'text-slate-500 dark:text-slate-400'
+                    className={`text-xs sm:text-sm font-black leading-none ${
+                      isPositive ? 'text-indigo-900 dark:text-indigo-200' : col.isOffDay ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'
                     }`}
                   >
-                    {i + 1}
+                    {isWeekly ? col.dayNum : (i + 1)}
                   </span>
+                  {isWeekly && col.dayShort && (
+                    <span className={`text-[9px] font-bold leading-none mt-0.5 ${col.isOffDay ? 'text-rose-500 dark:text-rose-300' : 'text-indigo-500 dark:text-indigo-400'}`}>
+                      {col.dayShort}
+                    </span>
+                  )}
 
                   <div className="flex items-center justify-center h-2 w-full mt-0.5">
                     {val > 0 && (

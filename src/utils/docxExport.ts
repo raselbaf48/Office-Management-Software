@@ -832,11 +832,12 @@ export async function exportParadeStateSingleDocx(
 
   // Format Duty Off as: `${rank} ${name} - ${duty} Off`
   const dutyOffDisplay = dutyOff.map((item) => {
-    let dutyNote = item.note || 'SY Off';
-    if (dutyNote.toLowerCase().includes('imported')) dutyNote = 'SY Off';
-    if (dutyNote === 'GD Off' || dutyNote === 'GD') dutyNote = 'SY Off';
+    let dutyNote = item.note || 'Sy Off';
+    if (dutyNote.toLowerCase().includes('imported')) dutyNote = 'Sy Off';
+    if (dutyNote === 'GD Off' || dutyNote === 'GD' || dutyNote === 'SY Off' || dutyNote === 'SY') dutyNote = 'Sy Off';
+    dutyNote = dutyNote.replace(/\s+Duty\s+Off$/i, ' Off');
     if (!dutyNote.toLowerCase().endsWith('off')) {
-      dutyNote = `${dutyNote} Off`;
+      dutyNote = `${dutyNote.replace(/\s+duty$/i, '').trim()} Off`;
     }
     return {
       displayName: `${formatRank(item.airman.rank)} ${formatRunningLetter(item.airman.name)} - ${dutyNote}`,
@@ -844,8 +845,8 @@ export async function exportParadeStateSingleDocx(
   });
 
   const dutyOnDisplay = dutyOn.map((item) => {
-    let dutyNote = item.note && !item.note.toLowerCase().includes('imported') ? item.note : 'SY';
-    if (dutyNote === 'GD' || dutyNote === 'Sy Duty') dutyNote = 'SY';
+    let dutyNote = item.note && !item.note.toLowerCase().includes('imported') ? item.note : 'Sy Duty';
+    if (dutyNote === 'GD' || dutyNote === 'SY' || dutyNote === 'Sy') dutyNote = 'Sy Duty';
     return {
       displayName: `${formatRank(item.airman.rank)} ${formatRunningLetter(item.airman.name)} - ${dutyNote}`,
     };

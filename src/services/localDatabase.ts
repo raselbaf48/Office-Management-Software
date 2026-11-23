@@ -4307,6 +4307,7 @@ export class LocalDatabaseEngine {
       onParadeOnDutyDay: boolean;
       dutyOffNextDay: boolean;
       onPtNextDay?: boolean;
+      shortName?: string;
       matchedTitle?: string;
     } => {
       if (!assignment) return { onParadeOnDutyDay: false, dutyOffNextDay: false, onPtNextDay: true };
@@ -4412,10 +4413,19 @@ export class LocalDatabaseEngine {
         onPtNextDay = true;
       }
 
+      const rawShortName =
+        table?.shortName ||
+        customDuty?.shortName ||
+        (table ? (table.title || '') : undefined);
+      const cleanedShortName = rawShortName
+        ? rawShortName.replace(/\s+(duty\s+off|duty|off)$/i, '').trim()
+        : undefined;
+
       return {
         onParadeOnDutyDay,
         dutyOffNextDay,
         onPtNextDay,
+        shortName: cleanedShortName,
         matchedTitle: table?.title || customDuty?.name || (codeUpper.includes('1794394') || name.toLowerCase().includes('escort') ? 'Escort' : undefined)
       };
     };
@@ -4752,9 +4762,11 @@ export class LocalDatabaseEngine {
           const yestRule = getDutyRule(yestAss);
 
           if (yestRule.dutyOffNextDay) {
-            let offShort = 'SY Off';
+            let offShort = 'Sy Off';
             const yCodeUpper = String(yestAss.dutyCode || '').toUpperCase().trim();
-            if (
+            if (yestRule.shortName) {
+              offShort = `${yestRule.shortName} Off`;
+            } else if (
               yCodeUpper === 'ESCORT' ||
               yCodeUpper === 'ESC' ||
               yCodeUpper === 'ESCT' ||
@@ -4763,27 +4775,27 @@ export class LocalDatabaseEngine {
               (yestAss.notes || '').toLowerCase().includes('escort') ||
               (yestRule.matchedTitle || '').toLowerCase().includes('escort')
             ) offShort = 'Esct Off';
-            else if (['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(yCodeUpper)) offShort = 'SY Off';
+            else if (['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(yCodeUpper)) offShort = 'Sy Off';
             else if (yCodeUpper === 'BTF') offShort = 'BTF Off';
             else if (yCodeUpper === 'NTF') offShort = 'NTF Off';
             else if (yCodeUpper === 'AIRPORT' || yCodeUpper === 'AIRFIELD') offShort = 'Airfield Off';
             else if (yCodeUpper === 'HALISHAHAR') offShort = 'Halishahar Off';
-            else if ((yCodeUpper === 'IDAC' || yCodeUpper === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC Nt Off';
-            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC Nt Off';
-            else if (yCodeUpper === 'DUTY_OFF') offShort = yestAss.previousDutyName || yestAss.notes || 'SY Off';
-            else if (yestRule.matchedTitle) offShort = `${yestRule.matchedTitle} Off`;
-            else offShort = `${yestAss.dutyCode} Off`;
+            else if ((yCodeUpper === 'IDAC' || yCodeUpper === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC "C" Off';
+            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if (yCodeUpper === 'DUTY_OFF') offShort = yestAss.previousDutyName || yestAss.notes || 'Sy Off';
+            else if (yestRule.matchedTitle) offShort = `${yestRule.matchedTitle.replace(/\s+(duty|off)$/i, '').trim()} Off`;
+            else offShort = `${String(yestAss.dutyCode).replace(/\s+(duty|off)$/i, '').trim()} Off`;
 
             offShort = (offShort || "")
               .replace(/Escort Duty Off/g, 'Esct Off')
               .replace(/Escort Off/g, 'Esct Off')
               .replace(/ESC Off/g, 'Esct Off')
               .replace(/ESCT Off/g, 'Esct Off')
-              .replace(/\bGD Off\b/gi, 'SY Off')
-              .replace(/\bSy Off\b/g, 'SY Off')
-              .replace(/DUTY_OFF/g, 'Duty')
-              .replace(/Off Off/g, 'Off')
-              .replace(/Duty Off Off/g, 'Duty Off');
+              .replace(/\bGD Off\b/gi, 'Sy Off')
+              .replace(/\bSY Off\b/g, 'Sy Off')
+              .replace(/\s+Duty\s+Off$/i, ' Off')
+              .replace(/DUTY_OFF/g, 'Sy')
+              .replace(/Off Off/g, 'Off');
 
             if (!isPT) {
               return { 
@@ -4992,11 +5004,13 @@ export class LocalDatabaseEngine {
         else if (codeStr === 'DUTY_OFF') {
           const yestAss = findInAssignmentMap(yestMap, airmanId);
           const yestRule = yestAss ? getDutyRule(yestAss) : undefined;
-          let offShort = 'SY Off';
+          let offShort = 'Sy Off';
 
           if (yestAss) {
             const yestCodeStr = String(yestAss.dutyCode || '').toUpperCase().trim();
-            if (
+            if (yestRule?.shortName) {
+              offShort = `${yestRule.shortName} Off`;
+            } else if (
               yestCodeStr === 'ESCORT' ||
               yestCodeStr === 'ESC' ||
               yestCodeStr === 'ESCT' ||
@@ -5005,21 +5019,21 @@ export class LocalDatabaseEngine {
               (yestAss.notes || '').toLowerCase().includes('escort') ||
               (yestRule?.matchedTitle || '').toLowerCase().includes('escort')
             ) offShort = 'Esct Off';
-            else if (['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(yestCodeStr)) offShort = 'SY Off';
+            else if (['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY'].includes(yestCodeStr)) offShort = 'Sy Off';
             else if (yestCodeStr === 'BTF') offShort = 'BTF Off';
             else if (yestCodeStr === 'NTF') offShort = 'NTF Off';
             else if (yestCodeStr === 'AIRPORT' || yestCodeStr === 'AIRFIELD' || yestCodeStr === 'ATT' || yestCodeStr === 'DETT') offShort = 'Airfield Off';
             else if (yestCodeStr === 'HALISHAHAR') offShort = 'Halishahar Off';
-            else if ((yestCodeStr === 'IDAC' || yestCodeStr === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC Nt Off';
-            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC Nt Off';
-            else if (yestCodeStr === 'DUTY_OFF') offShort = yestAss.previousDutyName || 'Duty Off';
-            else if (yestCodeStr === 'ON_PARADE' || yestCodeStr === 'PT' || yestCodeStr === 'PT_PARADE') offShort = 'Duty Off';
-            else if (yestRule?.matchedTitle) offShort = `${yestRule.matchedTitle} Off`;
-            else offShort = `${yestAss.dutyCode} Off`;
+            else if ((yestCodeStr === 'IDAC' || yestCodeStr === 'IDA') && yestAss.idaShift === 'Night') offShort = 'IDAC "C" Off';
+            else if (yestAss.notes?.toLowerCase().includes('idac') || yestAss.previousDutyName?.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if (yestCodeStr === 'DUTY_OFF') offShort = yestAss.previousDutyName || 'Sy Off';
+            else if (yestCodeStr === 'ON_PARADE' || yestCodeStr === 'PT' || yestCodeStr === 'PT_PARADE') offShort = 'Sy Off';
+            else if (yestRule?.matchedTitle) offShort = `${yestRule.matchedTitle.replace(/\s+(duty|off)$/i, '').trim()} Off`;
+            else offShort = `${String(yestAss.dutyCode).replace(/\s+(duty|off)$/i, '').trim()} Off`;
           } else if (ass.notes && !ass.notes.toLowerCase().includes('imported')) {
             if (ass.notes.toLowerCase().includes('escort') || ass.notes.toLowerCase().includes('esct')) offShort = 'Esct Off';
-            else if (ass.notes.toLowerCase().includes('idac')) offShort = 'IDAC Nt Off';
-            else if (/\bgd\b/i.test(ass.notes) || /\bsy\b/i.test(ass.notes) || ass.notes.toLowerCase().includes('security')) offShort = 'SY Off';
+            else if (ass.notes.toLowerCase().includes('idac')) offShort = 'IDAC "C" Off';
+            else if (/\bgd\b/i.test(ass.notes) || /\bsy\b/i.test(ass.notes) || ass.notes.toLowerCase().includes('security')) offShort = 'Sy Off';
             else if (ass.notes.toLowerCase().includes('btf')) offShort = 'BTF Off';
             else if (ass.notes.toLowerCase().includes('ntf')) offShort = 'NTF Off';
             else if (ass.notes.toLowerCase().includes('airport')) offShort = 'Airfield Off';
@@ -5032,14 +5046,14 @@ export class LocalDatabaseEngine {
             .replace(/Escort Off/g, 'Esct Off')
             .replace(/ESC Off/g, 'Esct Off')
             .replace(/ESCT Off/g, 'Esct Off')
-            .replace(/\bGD Off\b/gi, 'SY Off')
-            .replace(/\bSy Off\b/g, 'SY Off')
-            .replace(/DUTY_OFF/g, 'Duty')
-            .replace(/Off Off/g, 'Off')
-            .replace(/Duty Off Off/g, 'Duty Off');
+            .replace(/\bGD Off\b/gi, 'Sy Off')
+            .replace(/\bSY Off\b/g, 'Sy Off')
+            .replace(/\s+Duty\s+Off$/i, ' Off')
+            .replace(/DUTY_OFF/g, 'Sy')
+            .replace(/Off Off/g, 'Off');
 
           if (!offShort.toLowerCase().endsWith('off')) {
-            offShort = `${offShort} Off`;
+            offShort = `${offShort.replace(/\s+duty$/i, '').trim()} Off`;
           }
 
           if (isPT) {
