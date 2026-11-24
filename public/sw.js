@@ -1,4 +1,4 @@
-const PWA_SW_VERSION = 'v26';
+const PWA_SW_VERSION = 'v27';
 let activeOfficePwaData = null;
 
 function dataUrlToUint8Array(dataUrl) {
@@ -60,14 +60,14 @@ self.addEventListener('fetch', (event) => {
       return;
     }
 
-    // 2. Intercept Active Office 192x192 / 512x512 Icon requests
+    // 2. Intercept Active Office 192x192 / 512x512 Icon requests for ALL offices
     if (
       p === '/api/pwa-active-icon-192.png' ||
       p === '/api/pwa-active-icon-512.png' ||
       p === '/api/pwa-active-maskable-512.png' ||
       p.startsWith('/api/pwa-icon/')
     ) {
-      if (activeOfficePwaData && !activeOfficePwaData.is155Office) {
+      if (activeOfficePwaData) {
         const is192 = p.includes('192');
         const isMask = p.includes('maskable');
         const bytes = is192

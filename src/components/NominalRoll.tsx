@@ -131,6 +131,55 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
     return matchesStatus && matchesFlight && matchesTrade && matchesRank && matchesSearch;
   });
 
+  // Determine which columns have at least one non-blank value so completely blank columns auto-hide
+  const isBlankCell = (val?: string | null): boolean => {
+    if (val === undefined || val === null) return true;
+    const s = String(val).trim();
+    if (!s) return true;
+    const low = s.toLowerCase();
+    return s === '-' || s === '—' || s === '--' || low === 'n/a' || low === 'na' || low === 'none';
+  };
+
+  const isDefault155 = isDefault155UasuOffice();
+  const findInitialMatch = (airman: Airman) =>
+    isDefault155
+      ? INITIAL_AIRMEN.find((i) => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
+      : undefined;
+
+  const getResolvedFlight = (airman: Airman): string => {
+    const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
+    if (fl && !isBlankCell(String(fl))) return String(fl).trim();
+    const initMatch = findInitialMatch(airman);
+    return initMatch?.flightName && !isBlankCell(initMatch.flightName) ? initMatch.flightName : '';
+  };
+
+  const getResolvedBloodGroup = (airman: Airman): string => {
+    if (!isBlankCell(airman.bloodGroup)) return String(airman.bloodGroup).trim();
+    const initBg = isDefault155 ? INITIAL_AIRMEN.find((i) => i.bdNo === airman.bdNo)?.bloodGroup : undefined;
+    return !isBlankCell(initBg) ? String(initBg).trim() : '';
+  };
+
+  const getResolvedEmail = (airman: Airman): string => {
+    const raw = airman.email || (airman as any).gmail;
+    if (!isBlankCell(raw)) return String(raw).trim();
+    const initEmail = findInitialMatch(airman)?.email;
+    return !isBlankCell(initEmail) ? String(initEmail).trim() : '';
+  };
+
+  const columnCheckSource = filteredAirmen.length > 0 ? filteredAirmen : sortedAirmen;
+  const showBdNoCol = columnCheckSource.length === 0 || columnCheckSource.some((a) => !isBlankCell(a.bdNo));
+  const showRankCol = columnCheckSource.length === 0 || columnCheckSource.some((a) => !isBlankCell(a.rank));
+  const showTradeCol = columnCheckSource.some((a) => !isBlankCell(a.trade));
+  const showFlightCol = officeHasFlights && columnCheckSource.some((a) => !isBlankCell(getResolvedFlight(a)));
+  const showBloodGroupCol = variant === 'biodata' && columnCheckSource.some((a) => !isBlankCell(getResolvedBloodGroup(a)));
+  const showGmailCol = variant === 'biodata' && columnCheckSource.some((a) => !isBlankCell(getResolvedEmail(a)));
+  const showPresentAddressCol = columnCheckSource.some((a) => !isBlankCell(a.addressBlock));
+  const showPermanentAddressCol = variant === 'biodata' && columnCheckSource.some((a) => !isBlankCell(a.permanentAddress));
+  const showContactCol = columnCheckSource.some((a) => !isBlankCell(a.mobileNo));
+  const showPostingDateCol =
+    variant === 'biodata' &&
+    columnCheckSource.some((a) => !isBlankCell(a.dateJoined) && !isBlankCell(formatShortDate(a.dateJoined)));
+
   const handlePrint = () => {
     handleSafePrint();
   };
@@ -309,18 +358,19 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
             <thead>
               <tr className="bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 text-[11px] font-black uppercase tracking-wider border-b border-slate-200 dark:border-slate-700">
                 <th className="py-3 px-4 w-12 text-center">Ser</th>
-                {variant === 'biodata' && <th className="py-3 px-4 text-center">Seniority</th>}
-                <th className="py-3 px-4">BD No</th>
-                <th className="py-3 px-4">Rank</th>
+                {showBdNoCol && <th className="py-3 px-4">BD No</th>}
+                {showRankCol && <th className="py-3 px-4">Rank</th>}
                 <th className="py-3 px-4">Full Name</th>
-                <th className="py-3 px-4">Trade</th>
-                {officeHasFlights && <th className="py-3 px-4">Flight</th>}
-                {variant === 'biodata' && <th className="py-3 px-4">Blood Group</th>}
-                {variant === 'biodata' && <th className="py-3 px-4 text-center">Gmail Address</th>}
-                <th className="py-3 px-4">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
-                {variant === 'biodata' && <th className="py-3 px-4 text-center">Permanent Address</th>}
-                <th className="py-3 px-4">Contact</th>
-                {variant === 'biodata' && <th className="py-3 px-4 text-center">Dt of Posting</th>}
+                {showTradeCol && <th className="py-3 px-4">Trade</th>}
+                {showFlightCol && <th className="py-3 px-4">Flight</th>}
+                {showBloodGroupCol && <th className="py-3 px-4">Blood Group</th>}
+                {showGmailCol && <th className="py-3 px-4 text-center">Gmail Address</th>}
+                {showPresentAddressCol && (
+                  <th className="py-3 px-4">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
+                )}
+                {showPermanentAddressCol && <th className="py-3 px-4 text-center">Permanent Address</th>}
+                {showContactCol && <th className="py-3 px-4">Contact</th>}
+                {showPostingDateCol && <th className="py-3 px-4 text-center">Dt of Posting</th>}
                 {variant === 'biodata' && <th className="py-3 px-4 text-center">Status</th>}
               </tr>
             </thead>
@@ -341,21 +391,16 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                   <td className="py-3 px-4 font-mono font-bold text-slate-400 text-center">
                     {String(idx + 1).padStart(2, '0')}
                   </td>
-                  {variant === 'biodata' && (
-                    <td className="py-3 px-4 text-center">
-                      <span className="font-mono font-black text-xs px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                        #{airman.seniority !== undefined ? airman.seniority : idx + 1}
-                      </span>
+                  {showBdNoCol && (
+                    <td className="py-3 px-4 font-mono font-black text-slate-900 dark:text-slate-100">
+                      {airman.bdNo}
                     </td>
                   )}
-                  <td className="py-3 px-4 font-mono font-black text-slate-900 dark:text-slate-100">
-                    {airman.bdNo}
-                  </td>
-                  <td className="py-3 px-4">
-                    <span className="font-black px-2 py-0.5 rounded text-[10px] bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 font-mono border border-slate-300 dark:border-slate-700">
+                  {showRankCol && (
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-200 font-semibold whitespace-nowrap">
                       {formatAirmanName(airman.rank)}
-                    </span>
-                  </td>
+                    </td>
+                  )}
                   <td className="py-3 px-4">
                     <div className="flex items-center justify-between space-x-2">
                       <div className="flex items-center space-x-2">
@@ -363,9 +408,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                           {(() => {
                             const fn = airman.fullName || (airman as any)['Full Name'];
                             if (fn && fn !== airman.name) return fn;
-                            const initMatch = isDefault155UasuOffice()
-                              ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
-                              : undefined;
+                            const initMatch = findInitialMatch(airman);
                             return initMatch?.fullName || fn || airman.name;
                           })()}
                         </span>
@@ -388,27 +431,19 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       )}
                     </div>
                   </td>
-                  <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
-                    {airman.trade}
-                  </td>
-                  {officeHasFlights && (
+                  {showTradeCol && (
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
+                      {airman.trade}
+                    </td>
+                  )}
+                  {showFlightCol && (
                     <td className="py-3 px-4">
                       {(() => {
-                        const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
-                        if (fl && String(fl).trim()) {
+                        const fl = getResolvedFlight(airman);
+                        if (fl) {
                           return (
                             <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
                               {fl}
-                            </span>
-                          );
-                        }
-                        const initMatch = isDefault155UasuOffice()
-                          ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
-                          : undefined;
-                        if (initMatch?.flightName) {
-                          return (
-                            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                              {initMatch.flightName}
                             </span>
                           );
                         }
@@ -416,15 +451,15 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       })()}
                     </td>
                   )}
-                  {variant === 'biodata' && (
+                  {showBloodGroupCol && (
                     <td className="py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
-                      {airman.bloodGroup || (isDefault155UasuOffice() ? INITIAL_AIRMEN.find(i => i.bdNo === airman.bdNo)?.bloodGroup : undefined) || '-'}
+                      {getResolvedBloodGroup(airman) || '-'}
                     </td>
                   )}
-                  {variant === 'biodata' && (
+                  {showGmailCol && (
                     <td className="py-3 px-4">
                       {(() => {
-                        const emailVal = airman.email || (airman as any).gmail || (isDefault155UasuOffice() ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))?.email : undefined);
+                        const emailVal = getResolvedEmail(airman);
                         if (emailVal) {
                           return (
                             <a
@@ -457,33 +492,35 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       })()}
                     </td>
                   )}
-                  <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
-                    <div className="flex items-start space-x-1">
-                      <MapPin className="w-3 h-3 text-slate-400 shrink-0 mt-0.5" />
-                      <div className="text-left leading-tight" title={airman.addressBlock}>
-                        {airman.addressBlock ? (
-                          airman.addressBlock.includes("Mess, Block No:") ? (
-                            (() => {
-                              const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
-                              const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
-                              if (!cleanBlk) {
-                                return <span className="block whitespace-normal min-w-[120px]">{messName}</span>;
-                              }
-                              return (
-                                <>
-                                  <span className="block">{messName},</span>
-                                  <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
-                                </>
-                              );
-                            })()
-                          ) : (
-                            <span className="block whitespace-normal min-w-[120px]">{airman.addressBlock}</span>
-                          )
-                        ) : '-'}
+                  {showPresentAddressCol && (
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
+                      <div className="flex items-start space-x-1">
+                        <MapPin className="w-3 h-3 text-slate-400 shrink-0 mt-0.5" />
+                        <div className="text-left leading-tight" title={airman.addressBlock}>
+                          {airman.addressBlock ? (
+                            airman.addressBlock.includes("Mess, Block No:") ? (
+                              (() => {
+                                const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
+                                const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+                                if (!cleanBlk) {
+                                  return <span className="block whitespace-normal min-w-[120px]">{messName}</span>;
+                                }
+                                return (
+                                  <>
+                                    <span className="block">{messName},</span>
+                                    <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
+                                  </>
+                                );
+                              })()
+                            ) : (
+                              <span className="block whitespace-normal min-w-[120px]">{airman.addressBlock}</span>
+                            )
+                          ) : '-'}
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  {variant === 'biodata' && (
+                    </td>
+                  )}
+                  {showPermanentAddressCol && (
                     <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
                       <div className="text-center leading-tight text-[11px] whitespace-normal min-w-[150px]" title={airman.permanentAddress}>
                         {airman.permanentAddress ? (
@@ -503,44 +540,46 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                       </div>
                     </td>
                   )}
-                  <td className="py-3 px-4 font-mono text-slate-600 dark:text-slate-400 relative">
-                    <div 
-                      className="flex items-center space-x-1 cursor-pointer hover:text-emerald-600 transition-colors py-1"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveContactMenu(activeContactMenu === airman.id ? null : airman.id);
-                      }}
-                    >
-                      <Phone className="w-3 h-3 text-slate-400 shrink-0" />
-                      <span>{airman.mobileNo}</span>
-                    </div>
-                    {activeContactMenu === airman.id && (
+                  {showContactCol && (
+                    <td className="py-3 px-4 font-mono text-slate-600 dark:text-slate-400 relative">
                       <div 
-                        className="absolute z-10 left-4 mt-1 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1.5 px-1.5 overflow-hidden animate-in fade-in zoom-in-95 flex items-center space-x-1"
-                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center space-x-1 cursor-pointer hover:text-emerald-600 transition-colors py-1"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveContactMenu(activeContactMenu === airman.id ? null : airman.id);
+                        }}
                       >
-                        <a 
-                          href={`tel:${airman.mobileNo.replace(/\D/g, '')}`}
-                          className="w-10 h-10 flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 transition-colors"
-                          title="Normal Call"
-                        >
-                          <Phone className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-                        </a>
-                        <a 
-                          href={`https://wa.me/88${airman.mobileNo.replace(/\D/g, '')}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="w-10 h-10 flex items-center justify-center rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:hover:bg-emerald-900/50 transition-colors"
-                          title="WhatsApp"
-                        >
-                          <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.878-.788-1.47-1.761-1.643-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/>
-                          </svg>
-                        </a>
+                        <Phone className="w-3 h-3 text-slate-400 shrink-0" />
+                        <span>{airman.mobileNo}</span>
                       </div>
-                    )}
-                  </td>
-                  {variant === 'biodata' && (
+                      {activeContactMenu === airman.id && (
+                        <div 
+                          className="absolute z-10 left-4 mt-1 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1.5 px-1.5 overflow-hidden animate-in fade-in zoom-in-95 flex items-center space-x-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <a 
+                            href={`tel:${airman.mobileNo.replace(/\D/g, '')}`}
+                            className="w-10 h-10 flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 transition-colors"
+                            title="Normal Call"
+                          >
+                            <Phone className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                          </a>
+                          <a 
+                            href={`https://wa.me/88${airman.mobileNo.replace(/\D/g, '')}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-10 h-10 flex items-center justify-center rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:hover:bg-emerald-900/50 transition-colors"
+                            title="WhatsApp"
+                          >
+                            <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.878-.788-1.47-1.761-1.643-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/>
+                            </svg>
+                          </a>
+                        </div>
+                      )}
+                    </td>
+                  )}
+                  {showPostingDateCol && (
                     <td 
                       className="py-3 px-4 whitespace-nowrap text-center text-xs"
                       onClick={(e) => e.stopPropagation()}

@@ -23,7 +23,7 @@
       (function () {
         try {
           if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js?v=26').catch(function () {});
+            navigator.serviceWorker.register('/sw.js?v=27').catch(function () {});
           }
           var hasSession = false;
           try {
@@ -32,6 +32,7 @@
 
           var officeName = '155 UASU BAF';
           var officeLogo = hasSession ? '/155-uasu-baf-logo.png?v=26' : '/office-management-logo.png?v=26';
+          var iconHash = '';
           var rawCfg = localStorage.getItem('custom_office_config') || localStorage.getItem('baf_custom_office_config');
           if (rawCfg) {
             var cfg = JSON.parse(rawCfg);
@@ -48,14 +49,19 @@
             if (meta && meta.officeName && meta.officeName !== 'Office Management' && meta.officeName !== 'Office Management Application') {
               officeName = String(meta.officeName).trim();
             }
-            if (hasSession && meta && meta.rawLogo) {
-              officeLogo = String(meta.rawLogo).trim();
+            if (hasSession && meta && (meta.icon192Url || meta.rawLogo)) {
+              officeLogo = String(meta.icon192Url || meta.rawLogo).trim();
+            }
+            if (meta && meta.iconHash) {
+              iconHash = String(meta.iconHash).trim();
             }
           }
           var shortName = officeName.length > 12 ? officeName.slice(0, 12).trim() : officeName;
           var manifestEl = document.getElementById('pwa-manifest-link');
           if (manifestEl) {
-            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=26';
+            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=27';
+            if (iconHash) q += '&iconHash=' + encodeURIComponent(iconHash);
+            if (officeLogo && officeLogo.indexOf('data:') !== 0) q += '&logo=' + encodeURIComponent(officeLogo);
             manifestEl.setAttribute('href', '/api/pwa-manifest?' + q);
           }
           var el32 = document.getElementById('pwa-icon-32');

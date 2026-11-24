@@ -199,17 +199,21 @@ export interface RegisteredOfficeRecord {
 export type CustomFirebaseConfig = OfficeFirebaseConfig;
 export type RegisteredOfficeTelemetry = RegisteredOfficeRecord;
 
+export const DEFAULT_BAF_LOGO = '/baf-logo.png';
 export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=26';
 export const DEFAULT_APP_TITLE = 'Office Management Application';
 
 export function normalizeOfficeLogoUrl(rawLogo?: string, is155: boolean = false): string {
   const s = String(rawLogo || '').trim();
-  if (!s) return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_APP_LOGO;
+  if (!s) return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_BAF_LOGO;
   if (s.includes('155-uasu-baf-logo')) {
     return '/155-uasu-baf-logo.png?v=26';
   }
-  if (s.includes('office-management-logo') || s.includes('/baf-logo') || s.includes('BAF Logo')) {
-    return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_APP_LOGO;
+  if (s.includes('/baf-logo')) {
+    return DEFAULT_BAF_LOGO;
+  }
+  if (s.includes('office-management-logo') || s.includes('BAF Logo')) {
+    return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_BAF_LOGO;
   }
   return s;
 }
@@ -255,12 +259,12 @@ export function syncBrowserTabIdentity(
       passedLogo.includes('pwa-pc-512x512');
 
     const fallbackOfficeLogo = identity.isCustom
-      ? String(identity.officeLogo || DEFAULT_APP_LOGO).trim()
+      ? String(identity.officeLogo || DEFAULT_BAF_LOGO).trim()
       : String(identity.officeLogo || '/155-uasu-baf-logo.png').trim();
 
     const cleanLogo =
       (!isPassedGenericLogo ? passedLogo : fallbackOfficeLogo) ||
-      (identity.isCustom ? DEFAULT_APP_LOGO : '/155-uasu-baf-logo.png');
+      (identity.isCustom ? DEFAULT_BAF_LOGO : '/155-uasu-baf-logo.png');
 
     document.title =
       cleanName &&
@@ -890,12 +894,11 @@ export function getActiveOfficeIdentity(): {
       custom.officeLogo ||
       '';
 
-    // If candidateLogo is empty or generic, check Master Offices Cache & Pending Requests for this office's registered logo
+    // If candidateLogo is empty or generic (not an explicitly saved /baf-logo.png), check Master Offices Cache & Pending Requests
     if (
       !is155 &&
-      (!candidateLogo ||
-        candidateLogo.includes('office-management-logo') ||
-        candidateLogo.includes('/baf-logo'))
+      !profileOverride?.officeLogo &&
+      (!candidateLogo || candidateLogo.includes('office-management-logo'))
     ) {
       try {
         const upperCode = code.toUpperCase().trim();
@@ -972,7 +975,7 @@ export function updateActiveOfficeProfile(profile: Partial<OfficeProfileData>): 
     profile.officeSlogan !== undefined ? profile.officeSlogan : current.officeSlogan;
   const nextProfile: OfficeProfileData = {
     officeName: String(profile.officeName ?? current.officeName ?? '155 UASU BAF').trim() || '155 UASU BAF',
-    officeLogo: String(profile.officeLogo ?? current.officeLogo ?? '/155-uasu-baf-logo.png').trim() || '/155-uasu-baf-logo.png',
+    officeLogo: String(profile.officeLogo ?? current.officeLogo ?? DEFAULT_BAF_LOGO).trim() || DEFAULT_BAF_LOGO,
     officeSlogan: sanitizeOfficeSlogan(rawNextSlogan, isDefault155),
     officeBase: String(profile.officeBase ?? current.officeBase ?? 'BAF BASE ZHR').trim() || 'BAF BASE ZHR',
   };

@@ -28,11 +28,13 @@ export const Logo155UASU: React.FC<LogoProps> = ({
     window.addEventListener('baf_office_config_changed', refreshIdentity);
     window.addEventListener('baf_logo_updated', refreshIdentity);
     window.addEventListener('baf_settings_updated', refreshIdentity);
+    window.addEventListener('baf_pwa_identity_updated', refreshIdentity);
     window.addEventListener('storage', refreshIdentity);
     return () => {
       window.removeEventListener('baf_office_config_changed', refreshIdentity);
       window.removeEventListener('baf_logo_updated', refreshIdentity);
       window.removeEventListener('baf_settings_updated', refreshIdentity);
+      window.removeEventListener('baf_pwa_identity_updated', refreshIdentity);
       window.removeEventListener('storage', refreshIdentity);
     };
   }, []);
@@ -56,19 +58,17 @@ export const Logo155UASU: React.FC<LogoProps> = ({
     return className;
   };
 
-  const rawLogoSrc = logoOverride || identity.officeLogo || '/155-uasu-baf-logo.png?v=26';
+  const rawLogoSrc = logoOverride || identity.officeLogo || '/baf-logo.png';
   const normalizedLogoSrc =
     rawLogoSrc.includes('155-uasu-baf-logo')
       ? '/155-uasu-baf-logo.png?v=26'
-      : rawLogoSrc.includes('office-management-logo') ||
-          rawLogoSrc.includes('/baf-logo') ||
-          rawLogoSrc.includes('BAF Logo')
-        ? '/office-management-logo.png?v=26'
-        : rawLogoSrc;
+      : rawLogoSrc.includes('/baf-logo')
+        ? '/baf-logo.png'
+        : rawLogoSrc.includes('office-management-logo') || rawLogoSrc.includes('BAF Logo')
+          ? '/baf-logo.png'
+          : rawLogoSrc;
 
-  const activeLogoSrc = imgError
-    ? '/office-management-logo.png?v=26'
-    : normalizedLogoSrc;
+  const activeLogoSrc = imgError ? '/baf-logo.png' : normalizedLogoSrc;
 
   return (
     <div

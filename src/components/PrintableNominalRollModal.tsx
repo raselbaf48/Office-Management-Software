@@ -29,6 +29,34 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
   const officeHasFlights = doesOfficeHaveFlights(airmen);
   const safeOfficeFileCode = (officeIdentity.officeName || '155_UASU_BAF').replace(/[^a-zA-Z0-9_-]+/g, '_');
 
+  const isBlankCell = (val?: string | null): boolean => {
+    if (val === undefined || val === null) return true;
+    const s = String(val).trim();
+    if (!s) return true;
+    const low = s.toLowerCase();
+    return s === '-' || s === '—' || s === '--' || low === 'n/a' || low === 'na' || low === 'none';
+  };
+
+  const showTradeCol = airmen.some((a) => !isBlankCell(a.trade));
+  const showFlightCol = officeHasFlights && airmen.some((a) => !isBlankCell(a.flightName));
+  const showBloodGroupCol = variant === 'biodata' && airmen.some((a) => !isBlankCell(a.bloodGroup));
+  const showPresentAddressCol = airmen.some((a) => !isBlankCell(a.addressBlock));
+  const showPermanentAddressCol = variant === 'biodata' && airmen.some((a) => !isBlankCell(a.permanentAddress));
+  const showMobileCol = airmen.some((a) => !isBlankCell(a.mobileNo));
+  const showPostingDateCol =
+    variant === 'biodata' &&
+    airmen.some((a) => !isBlankCell(a.dateJoined) && !isBlankCell(formatShortDate(a.dateJoined)));
+
+  const visibleColCount =
+    4 + // Ser, BD No, Rank, Full Name
+    (showTradeCol ? 1 : 0) +
+    (showFlightCol ? 1 : 0) +
+    (showBloodGroupCol ? 1 : 0) +
+    (showPresentAddressCol ? 1 : 0) +
+    (showPermanentAddressCol ? 1 : 0) +
+    (showMobileCol ? 1 : 0) +
+    (showPostingDateCol ? 1 : 0);
+
   const preparedBy = getSavedPreparedBy();
   const authorizedBy = getSavedAuthorizedBy();
 
@@ -177,13 +205,15 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">BD No</th>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Rank</th>
                     <th className="p-1 sm:p-1.5 border border-black font-bold text-left">Full Name</th>
-                    <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Trade</th>
-                    {officeHasFlights && <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Flight</th>}
-                    {variant === 'biodata' && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Blood Group</th>}
-                    <th className="p-1 sm:p-1.5 border border-black font-bold text-left">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
-                    {variant === 'biodata' && <th className="p-1 sm:p-1.5 border border-black font-bold text-left">Permanent Address</th>}
-                    <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Mobile No</th>
-                    {variant === 'biodata' && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Dt of Posting</th>}
+                    {showTradeCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Trade</th>}
+                    {showFlightCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-center">Flight</th>}
+                    {showBloodGroupCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Blood Group</th>}
+                    {showPresentAddressCol && (
+                      <th className="p-1 sm:p-1.5 border border-black font-bold text-left">{variant === 'biodata' ? 'Present Address' : 'Address'}</th>
+                    )}
+                    {showPermanentAddressCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-left">Permanent Address</th>}
+                    {showMobileCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Mobile No</th>}
+                    {showPostingDateCol && <th className="p-1 sm:p-1.5 border border-black font-bold text-center whitespace-nowrap">Dt of Posting</th>}
                   </tr>
                 </thead>
                 <tbody style={{ display: 'table-row-group' }}>
@@ -201,43 +231,47 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                       <td className="p-1 sm:p-1.5 border border-black text-left font-semibold">
                         {airman.fullName || airman.name}
                       </td>
-                      <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
-                        {airman.trade}
-                      </td>
-                      {officeHasFlights && (
+                      {showTradeCol && (
+                        <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
+                          {airman.trade}
+                        </td>
+                      )}
+                      {showFlightCol && (
                         <td className="p-1 sm:p-1.5 border border-black text-left whitespace-nowrap">
                           {airman.flightName}
                         </td>
                       )}
-                      {variant === 'biodata' && (
+                      {showBloodGroupCol && (
                         <td className="p-1 sm:p-1.5 border border-black text-center whitespace-nowrap font-bold">
                           {airman.bloodGroup || '-'}
                         </td>
                       )}
-                      <td className="p-1 sm:p-1.5 border border-black text-left">
-                        <div className="leading-tight whitespace-normal min-w-[90px]">
-                          {airman.addressBlock ? (
-                            airman.addressBlock.includes("Mess, Block No:") ? (
-                              (() => {
-                                const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
-                                const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
-                                if (!cleanBlk) {
-                                  return <span className="block">{messName}</span>;
-                                }
-                                return (
-                                  <>
-                                    <span className="block">{messName},</span>
-                                    <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
-                                  </>
-                                );
-                              })()
-                            ) : (
-                              <span className="block">{airman.addressBlock}</span>
-                            )
-                          ) : '-'}
-                        </div>
-                      </td>
-                      {variant === 'biodata' && (
+                      {showPresentAddressCol && (
+                        <td className="p-1 sm:p-1.5 border border-black text-left">
+                          <div className="leading-tight whitespace-normal min-w-[90px]">
+                            {airman.addressBlock ? (
+                              airman.addressBlock.includes("Mess, Block No:") ? (
+                                (() => {
+                                  const [messName, rawBlk] = airman.addressBlock.split(", Block No:");
+                                  const cleanBlk = (rawBlk || '').replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+                                  if (!cleanBlk) {
+                                    return <span className="block">{messName}</span>;
+                                  }
+                                  return (
+                                    <>
+                                      <span className="block">{messName},</span>
+                                      <span className="block text-[10px] text-slate-500 font-bold">Block No: {cleanBlk}</span>
+                                    </>
+                                  );
+                                })()
+                              ) : (
+                                <span className="block">{airman.addressBlock}</span>
+                              )
+                            ) : '-'}
+                          </div>
+                        </td>
+                      )}
+                      {showPermanentAddressCol && (
                         <td className="p-1 sm:p-1.5 border border-black text-left">
                           <div className="leading-tight whitespace-normal min-w-[100px]">
                             {airman.permanentAddress ? (
@@ -257,10 +291,12 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                           </div>
                         </td>
                       )}
-                      <td className="p-1 sm:p-1.5 border border-black text-center font-mono whitespace-nowrap">
-                        {airman.mobileNo || '-'}
-                      </td>
-                      {variant === 'biodata' && (
+                      {showMobileCol && (
+                        <td className="p-1 sm:p-1.5 border border-black text-center font-mono whitespace-nowrap">
+                          {airman.mobileNo || '-'}
+                        </td>
+                      )}
+                      {showPostingDateCol && (
                         <td className="p-1 sm:p-1.5 border border-black text-center whitespace-nowrap font-mono font-medium">
                           {formatShortDate(airman.dateJoined)}
                         </td>
@@ -269,7 +305,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
                   ))}
                   {airmen.length === 0 && (
                     <tr>
-                      <td colSpan={variant === 'biodata' ? (officeHasFlights ? 11 : 10) : (officeHasFlights ? 8 : 7)} className="p-4 text-center text-slate-500 font-medium">
+                      <td colSpan={visibleColCount} className="p-4 text-center text-slate-500 font-medium">
                         No airmen found.
                       </td>
                     </tr>

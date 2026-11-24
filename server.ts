@@ -637,7 +637,7 @@ async function startServer() {
             officeCode: String(officeCode || '').trim(),
             officeSlogan: String(officeSlogan || '').trim(),
             is155Office: detected155,
-            iconHash: detected155 ? '' : String(resolvedHash || activePwaOfficeState.iconHash || ''),
+            iconHash: String(resolvedHash || activePwaOfficeState.iconHash || ''),
           },
           buffers
         );
@@ -652,10 +652,26 @@ async function startServer() {
   const sendActiveOrFallbackPwaIcon = (
     res: express.Response,
     sizeType: '192' | '512' | 'maskable',
-    _requestedHash?: string
+    requestedHash?: string
   ) => {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    const stored =
+      (requestedHash ? dynamicPwaIconStore.get(requestedHash) : undefined) ||
+      (activePwaOfficeState.iconHash ? dynamicPwaIconStore.get(activePwaOfficeState.iconHash) : undefined);
+
+    if (stored) {
+      const buf =
+        sizeType === '192'
+          ? stored.icon192
+          : sizeType === 'maskable'
+            ? stored.maskable512 || stored.icon512
+            : stored.icon512;
+      if (buf && buf.length > 0) {
+        return res.status(200).send(buf);
+      }
+    }
 
     const fallbackFile =
       sizeType === '192'
@@ -667,7 +683,7 @@ async function startServer() {
     if (fs.existsSync(fallbackPath)) {
       return res.sendFile(fallbackPath);
     }
-    return res.redirect('/pwa-512x512-trans.png?v=26');
+    return res.redirect('/baf-logo.png');
   };
 
   app.get('/api/pwa-icon/:hash/:file', (req, res) => {
@@ -680,7 +696,7 @@ async function startServer() {
           : '512';
       return sendActiveOrFallbackPwaIcon(res, sizeType, hash);
     } catch {
-      return res.redirect('/pwa-512x512-trans.png?v=26');
+      return res.redirect('/baf-logo.png');
     }
   });
 
@@ -699,13 +715,14 @@ async function startServer() {
     return sendActiveOrFallbackPwaIcon(res, 'maskable', hash);
   });
 
-  // Shared handler for both /manifest.json and /api/pwa-manifest so PWA ALWAYS uses the new BAF Logo
+  // Shared handler for both /manifest.json and /api/pwa-manifest so PWA updates in realtime with the active office logo
   const handlePwaManifestRequest = (req: express.Request, res: express.Response) => {
     try {
       const queryName = String(req.query.name || '').trim();
       const queryLogo = String(req.query.logo || '').trim();
       const queryCode = String(req.query.code || '').trim();
       const querySlogan = String(req.query.slogan || '').trim();
+      const queryIconHash = String(req.query.iconHash || '').trim();
 
       const isQueryGeneric =
         !queryName ||
@@ -730,10 +747,28 @@ async function startServer() {
         ? `${appName} — ${rawSlogan}`
         : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
 
-      const icon192Url = '/pwa-192x192-trans.png?v=26';
-      const icon512Url = '/pwa-512x512-trans.png?v=26';
-      const maskable192Url = '/pwa-192x192-full.png?v=26';
-      const maskable512Url = '/pwa-512x512-full.png?v=26';
+      const resolvedIconHash =
+        (queryIconHash && dynamicPwaIconStore.has(queryIconHash) ? queryIconHash : '') ||
+        (activePwaOfficeState.iconHash && dynamicPwaIconStore.has(activePwaOfficeState.iconHash)
+          ? activePwaOfficeState.iconHash
+          : '');
+
+      let icon192Url = '/pwa-192x192-trans.png?v=26';
+      let icon512Url = '/pwa-512x512-trans.png?v=26';
+      let maskable192Url = '/pwa-192x192-full.png?v=26';
+      let maskable512Url = '/pwa-512x512-full.png?v=26';
+
+      if (resolvedIconHash) {
+        icon192Url = `/api/pwa-icon/${resolvedIconHash}/icon-192.png`;
+        icon512Url = `/api/pwa-icon/${resolvedIconHash}/icon-512.png`;
+        maskable192Url = `/api/pwa-icon/${resolvedIconHash}/maskable-192.png`;
+        maskable512Url = `/api/pwa-icon/${resolvedIconHash}/maskable-512.png`;
+      } else if (queryLogo.includes('/baf-logo')) {
+        icon192Url = '/baf-logo.png?v=26';
+        icon512Url = '/baf-logo.png?v=26';
+        maskable192Url = '/baf-logo.png?v=26';
+        maskable512Url = '/baf-logo.png?v=26';
+      }
 
       const officeQuery = rawCode && !is155Office ? `?office=${encodeURIComponent(rawCode)}` : '';
 

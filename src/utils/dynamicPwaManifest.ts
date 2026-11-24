@@ -56,7 +56,7 @@ export function applyBrowserFaviconToHead(
   icon32Src?: string
 ): void {
   if (typeof document === 'undefined' || !document.head) return;
-  const target192 = icon192Src || `/office-management-logo.png?v=${PWA_ASSET_VERSION}`;
+  const target192 = icon192Src || `/baf-logo.png?v=${PWA_ASSET_VERSION}`;
   const target512 = icon512Src || target192;
   const targetSmall = icon32Src || target192;
 
@@ -272,7 +272,7 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
       if (cfg && cfg.officeName) {
         return {
           officeName: cfg.officeName,
-          officeLogo: cfg.officeLogo || `/office-management-logo.png?v=${PWA_ASSET_VERSION}`,
+          officeLogo: cfg.officeLogo || `/baf-logo.png?v=${PWA_ASSET_VERSION}`,
           officeCode: cfg.officeCode || cfg.firebaseConfig?.officeCode || '',
           officeSlogan: cfg.officeSlogan || cfg.firebaseConfig?.officeSlogan || '',
         };
@@ -359,11 +359,15 @@ export async function syncDynamicOfficePwaManifest(
     if (!rawLogo) {
       rawLogo = is155Office
         ? `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`
-        : `/office-management-logo.png?v=${PWA_ASSET_VERSION}`;
-    } else if (isGenericAppLogoUrl(rawLogo) && is155Office) {
-      rawLogo = `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`;
+        : `/baf-logo.png?v=${PWA_ASSET_VERSION}`;
+    } else if (isGenericAppLogoUrl(rawLogo)) {
+      rawLogo = is155Office
+        ? `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`
+        : `/baf-logo.png?v=${PWA_ASSET_VERSION}`;
     } else if (rawLogo === '/155-uasu-baf-logo.png') {
       rawLogo = `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`;
+    } else if (rawLogo === '/baf-logo.png') {
+      rawLogo = `/baf-logo.png?v=${PWA_ASSET_VERSION}`;
     }
 
     // 1. Immediately apply the active office's logo to the browser tab favicon
@@ -376,7 +380,8 @@ export async function syncDynamicOfficePwaManifest(
     const tabIcon512 = sizedCustomIcons?.icon512 || rawLogo;
     applyBrowserFaviconToHead(tabIcon192, tabIcon512, tabIcon32);
 
-    const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}__v${PWA_ASSET_VERSION}`;
+    const customIconHash = sizedCustomIcons?.hash || computeSimpleHash(rawLogo);
+    const sig = `${appName}__${customIconHash}__${officeCode}__${slogan}__v${PWA_ASSET_VERSION}`;
     if (sig === lastSyncedSignature) return;
     lastSyncedSignature = sig;
 
@@ -401,26 +406,22 @@ export async function syncDynamicOfficePwaManifest(
     }
     appNameMeta.content = appName;
 
-    const serverIcon192Url = tabIcon192;
-    const serverIcon512Url = tabIcon512;
-    const serverMaskable192Url = sizedCustomIcons?.maskable192 || UASU_MASKABLE_192;
-    const serverMaskable512Url = sizedCustomIcons?.maskable512 || UASU_MASKABLE_512;
-    const customIconHash = sizedCustomIcons?.hash || '';
+    const hasSizedPngDataUrls =
+      Boolean(sizedCustomIcons?.icon192?.startsWith('data:image/')) &&
+      Boolean(sizedCustomIcons?.icon512?.startsWith('data:image/'));
 
-    fetch('/api/pwa-icon-upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        officeName: appName,
-        officeCode: officeCode || (is155Office ? '155-UASU' : ''),
-        officeSlogan: slogan || (is155Office ? 'Intel • Surveillance • Strike' : ''),
-        is155Office,
-        iconHash: customIconHash,
-        icon192DataUrl: sizedCustomIcons?.icon192,
-        icon512DataUrl: sizedCustomIcons?.icon512,
-        maskable512DataUrl: sizedCustomIcons?.maskable512,
-      }),
-    }).catch(() => {});
+    const manifestIcon192Url = hasSizedPngDataUrls
+      ? `/api/pwa-icon/${customIconHash}/icon-192.png`
+      : tabIcon192;
+    const manifestIcon512Url = hasSizedPngDataUrls
+      ? `/api/pwa-icon/${customIconHash}/icon-512.png`
+      : tabIcon512;
+    const manifestMaskable192Url = hasSizedPngDataUrls
+      ? `/api/pwa-icon/${customIconHash}/maskable-192.png`
+      : sizedCustomIcons?.maskable192 || UASU_MASKABLE_192;
+    const manifestMaskable512Url = hasSizedPngDataUrls
+      ? `/api/pwa-icon/${customIconHash}/maskable-512.png`
+      : sizedCustomIcons?.maskable512 || UASU_MASKABLE_512;
 
     // Save active office PWA metadata to localStorage so index.html synchronous head script has it on reload
     try {
@@ -434,13 +435,13 @@ export async function syncDynamicOfficePwaManifest(
           rawLogo,
           is155Office,
           iconHash: customIconHash,
-          icon192Url: rawLogo,
-          icon512Url: rawLogo,
+          icon192Url: tabIcon192,
+          icon512Url: tabIcon512,
         })
       );
     } catch {}
 
-    // 4. Build manifest payload and push to Service Worker (sw.js)
+    // 3. Build manifest payload and push to Service Worker (sw.js) BEFORE refreshing <link rel="manifest">
     const officeQuery = officeCode && !is155Office ? `?office=${encodeURIComponent(officeCode)}` : '';
     const description = slogan
       ? `${appName} — ${slogan}`
@@ -459,25 +460,25 @@ export async function syncDynamicOfficePwaManifest(
       orientation: 'any',
       icons: [
         {
-          src: serverIcon192Url,
+          src: manifestIcon192Url,
           sizes: '192x192',
           type: 'image/png',
           purpose: 'any',
         },
         {
-          src: serverIcon512Url,
+          src: manifestIcon512Url,
           sizes: '512x512',
           type: 'image/png',
           purpose: 'any',
         },
         {
-          src: serverMaskable192Url,
+          src: manifestMaskable192Url,
           sizes: '192x192',
           type: 'image/png',
           purpose: 'maskable',
         },
         {
-          src: serverMaskable512Url,
+          src: manifestMaskable512Url,
           sizes: '512x512',
           type: 'image/png',
           purpose: 'maskable',
@@ -493,7 +494,25 @@ export async function syncDynamicOfficePwaManifest(
       is155Office,
     });
 
-    // 5. Update <link rel="manifest"> in document.head
+    // 4. Upload PNG icons to server BEFORE updating <link rel="manifest"> so server /api/pwa-manifest serves the exact new logo immediately
+    try {
+      await fetch('/api/pwa-icon-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          officeName: appName,
+          officeCode: officeCode || (is155Office ? '155-UASU' : ''),
+          officeSlogan: slogan || (is155Office ? 'Intel • Surveillance • Strike' : ''),
+          is155Office,
+          iconHash: customIconHash,
+          icon192DataUrl: sizedCustomIcons?.icon192,
+          icon512DataUrl: sizedCustomIcons?.icon512,
+          maskable512DataUrl: sizedCustomIcons?.maskable512,
+        }),
+      });
+    } catch {}
+
+    // 5. Update <link rel="manifest"> in document.head with fresh iconHash so browser picks up the new PWA logo in realtime
     const params = new URLSearchParams();
     params.set('name', appName);
     if (!rawLogo.startsWith('data:')) {
@@ -520,7 +539,7 @@ export async function syncDynamicOfficePwaManifest(
         detail: {
           officeName: appName,
           shortName,
-          officeLogo: serverIcon192Url,
+          officeLogo: tabIcon192,
           rawLogo,
           isGeneric: false,
         },

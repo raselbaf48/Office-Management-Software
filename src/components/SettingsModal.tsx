@@ -169,6 +169,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, [isOpen]);
 
+  const triggerRealtimePwaLogoSync = (nextLogo: string) => {
+    const cleanLogo = String(nextLogo || '').trim() || '/baf-logo.png';
+    const currentId = getActiveOfficeIdentity();
+    void syncDynamicOfficePwaManifest({
+      officeName: profileUnitName.trim() || currentId.officeName || '155 UASU BAF',
+      officeLogo: cleanLogo,
+      officeCode: currentId.officeCode,
+      officeSlogan: profileSlogan.trim() || currentId.officeSlogan,
+      officeBase: profileBase.trim() || currentId.officeBase || 'BAF BASE ZHR',
+    });
+  };
+
   const handleProfileLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     setProfileLogoError('');
     const file = e.target.files?.[0];
@@ -185,7 +197,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       img.onload = () => {
         try {
           const canvas = document.createElement('canvas');
-          const maxDim = 180;
+          const maxDim = 512;
           let width = img.width;
           let height = img.height;
           if (width > height && width > maxDim) {
@@ -198,28 +210,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           canvas.width = width;
           canvas.height = height;
           const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.clearRect(0, 0, width, height);
-            ctx.drawImage(img, 0, 0, width, height);
-            setProfileLogo(canvas.toDataURL('image/png', 0.88));
-          } else {
-            setProfileLogo(dataUrl);
-          }
+          const finalLogo = ctx
+            ? (() => {
+                ctx.clearRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+                return canvas.toDataURL('image/png', 0.9);
+              })()
+            : dataUrl;
+          setProfileLogo(finalLogo);
+          triggerRealtimePwaLogoSync(finalLogo);
         } catch {
           setProfileLogo(dataUrl);
+          triggerRealtimePwaLogoSync(dataUrl);
         }
       };
-      img.onerror = () => setProfileLogo(dataUrl);
+      img.onerror = () => {
+        setProfileLogo(dataUrl);
+        triggerRealtimePwaLogoSync(dataUrl);
+      };
       img.src = dataUrl;
     };
     reader.readAsDataURL(file);
+    // Reset input so re-selecting the same filename triggers onChange
+    e.target.value = '';
   };
 
   const handleSaveOfficeProfile = (e: React.FormEvent) => {
     e.preventDefault();
+    const currentId = getActiveOfficeIdentity();
     const saved = updateActiveOfficeProfile({
-      officeName: profileUnitName.trim() || '155 UASU BAF',
-      officeLogo: profileLogo.trim() || '/155-uasu-baf-logo.png',
+      officeName: profileUnitName.trim() || currentId.officeName || '155 UASU BAF',
+      officeLogo: profileLogo.trim() || '/baf-logo.png',
       officeSlogan: profileSlogan.trim(),
       officeBase: profileBase.trim() || 'BAF BASE ZHR',
     });
@@ -228,13 +249,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setProfileSlogan(saved.officeSlogan);
     setProfileBase(saved.officeBase);
     localDb.syncSettingToCloud(OFFICE_PROFILE_STORAGE_KEY, JSON.stringify(saved));
-    syncDynamicOfficePwaManifest({
+    void syncDynamicOfficePwaManifest({
       officeName: saved.officeName,
       officeLogo: saved.officeLogo,
+      officeCode: currentId.officeCode,
       officeSlogan: saved.officeSlogan,
       officeBase: saved.officeBase,
     });
-    setProfileSavedMsg('Office Profile updated across all views, headers, reports & exports!');
+    setProfileSavedMsg('Office Profile & PWA Logo updated in realtime across all views, browser tab, headers, reports & exports!');
     if (onRosterUpdated) {
       onRosterUpdated();
     }
@@ -1322,10 +1344,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <div className="flex flex-col sm:flex-row items-center gap-5">
                           <div className="w-20 h-20 rounded-2xl bg-slate-800/90 border border-emerald-500/40 p-2 flex items-center justify-center shrink-0 shadow-lg">
                             <img
-                              src={profileLogo || '/155-uasu-baf-logo.png'}
+                              src={profileLogo || '/baf-logo.png'}
                               alt="Office Crest"
                               onError={(e) => {
-                                (e.target as HTMLImageElement).src = '/155-uasu-baf-logo.png';
+                                (e.target as HTMLImageElement).src = '/baf-logo.png';
                               }}
                               className="w-full h-full object-contain rounded-xl"
                             />
@@ -1436,7 +1458,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             <input
                               type="text"
                               value={profileLogo}
-                              onChange={(e) => setProfileLogo(e.target.value)}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setProfileLogo(val);
+                                if (val.trim().startsWith('/') || val.trim().startsWith('http') || val.trim().startsWith('data:image/')) {
+                                  triggerRealtimePwaLogoSync(val.trim());
+                                }
+                              }}
                               placeholder="Upload image or paste Logo URL"
                               disabled={!isAdminRole}
                               className="flex-1 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500 disabled:opacity-60"
@@ -1461,9 +1489,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               <button
                                 type="button"
                                 disabled={!isAdminRole}
-                                onClick={() => setProfileLogo('/155-uasu-baf-logo.png')}
+                                onClick={() => {
+                                  setProfileLogo('/baf-logo.png');
+                                  triggerRealtimePwaLogoSync('/baf-logo.png');
+                                }}
                                 className="px-3 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
-                                title="Reset to default BAF crest"
+                                title="Reset to default Bangladesh Air Force logo"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                                 <span>Default</span>
