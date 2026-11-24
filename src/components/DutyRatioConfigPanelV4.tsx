@@ -1,5 +1,6 @@
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertCircle, Settings, Info, Users, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Calendar, X, Save, Power, PowerOff, Trash, Filter, Plus, Minus, Printer, Edit2, Shield, Cloud, RefreshCw, CheckCircle2, Copy, Check, UploadCloud, RotateCcw } from 'lucide-react';
 import { localDb } from '../services/localDatabase';
 import { Airman, Rank, FlightName, DutyCategoryCode } from '../types';
@@ -475,6 +476,19 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
 
   const [savedCustomList, setSavedCustomList] = useState<string[]>(() => getSavedCustomDisposals());
   const [openDropdownAirmanId, setOpenDropdownAirmanId] = useState<string | null>(null);
+  const [dropdownAnchor, setDropdownAnchor] = useState<{
+    airmanId: string;
+    currentVal: string;
+    airmanRank: string;
+    airmanName: string;
+    airmanGroup: string;
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+    width: number;
+    openUp: boolean;
+  } | null>(null);
   const [deletingCustomItem, setDeletingCustomItem] = useState<string | null>(null);
   const [customModalAirman, setCustomModalAirman] = useState<{ id: string; name: string; rank: string; flightName: string; currentValue: string } | null>(null);
   const [customInput, setCustomInput] = useState('');
@@ -486,6 +500,26 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     window.addEventListener('baf_custom_disposals_updated', handleCustomUpdate);
     return () => window.removeEventListener('baf_custom_disposals_updated', handleCustomUpdate);
   }, []);
+
+  useEffect(() => {
+    if (!openDropdownAirmanId) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenDropdownAirmanId(null);
+        setDropdownAnchor(null);
+      }
+    };
+    const handleScrollOrResize = () => {
+      setOpenDropdownAirmanId(null);
+      setDropdownAnchor(null);
+    };
+    window.addEventListener('keydown', handleKey);
+    window.addEventListener('resize', handleScrollOrResize);
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+      window.removeEventListener('resize', handleScrollOrResize);
+    };
+  }, [openDropdownAirmanId]);
 
   const handleSaveCustomDisposal = () => {
     if (!customModalAirman) return;
@@ -1558,22 +1592,45 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                               </td>
                               <td className="px-3 py-2 text-center whitespace-nowrap">
                                 <div className="flex items-center justify-center">
-                                  <select
-                                    value={currentVal || '-'}
-                                    onChange={(e) => {
-                                      saveAndSyncDisposals({ ...disposals, [a.id]: e.target.value });
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (openDropdownAirmanId === a.id) {
+                                        setOpenDropdownAirmanId(null);
+                                        setDropdownAnchor(null);
+                                        return;
+                                      }
+                                      const rect = e.currentTarget.getBoundingClientRect();
+                                      const spaceBelow = window.innerHeight - rect.bottom;
+                                      const openUp = spaceBelow < 280 && rect.top > spaceBelow;
+                                      setSavedCustomList(getSavedCustomDisposals());
+                                      setOpenDropdownAirmanId(a.id);
+                                      setDropdownAnchor({
+                                        airmanId: a.id,
+                                        currentVal: currentVal || '-',
+                                        airmanRank: a.rank,
+                                        airmanName: a.name,
+                                        airmanGroup: officeHasFlights ? a.flightName : a.trade,
+                                        top: rect.top,
+                                        bottom: rect.bottom,
+                                        left: rect.left,
+                                        right: rect.right,
+                                        width: rect.width,
+                                        openUp,
+                                      });
                                     }}
-                                    className="min-w-[130px] max-w-[165px] px-2.5 py-1 text-xs font-semibold rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-xs"
+                                    className={`min-w-[135px] max-w-[175px] px-2.5 py-1 text-xs font-semibold rounded-lg border flex items-center justify-between gap-1.5 cursor-pointer shadow-xs transition-colors ${
+                                      isCustomVal
+                                        ? 'bg-indigo-50 dark:bg-indigo-950/50 border-indigo-400 dark:border-indigo-600 text-indigo-800 dark:text-indigo-200'
+                                        : currentVal && currentVal !== '-'
+                                        ? 'bg-amber-50/70 dark:bg-amber-950/30 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200'
+                                        : 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-200 hover:border-indigo-400'
+                                    }`}
                                   >
-                                    <option value="-">-</option>
-                                    <option value="Orderly Room">Orderly Room</option>
-                                    <option value="UWO">UWO</option>
-                                    <option value="TDY (Air HQ)">TDY (Air HQ)</option>
-                                    <option value="TDY (HSIA)">TDY (HSIA)</option>
-                                    <option value="Att (SAIA)">Att (SAIA)</option>
-                                    <option value="Bake & Bite">Bake & Bite</option>
-                                    <option value="Canteen">Canteen</option>
-                                  </select>
+                                    <span className="truncate">{currentVal || '-'}</span>
+                                    <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-slate-400 transition-transform ${openDropdownAirmanId === a.id ? 'rotate-180 text-indigo-500' : ''}`} />
+                                  </button>
                                 </div>
                               </td>
                             </tr>
@@ -2919,6 +2976,147 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
             </div>
           </div>
         </div>
+      )}
+
+      {/* Nominal Roll Custom Disposal Portal Dropdown */}
+      {openDropdownAirmanId && dropdownAnchor && typeof document !== 'undefined' && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[65] bg-transparent"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpenDropdownAirmanId(null);
+              setDropdownAnchor(null);
+            }}
+          />
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              right: Math.max(8, window.innerWidth - dropdownAnchor.right),
+              ...(dropdownAnchor.openUp
+                ? { bottom: Math.max(8, window.innerHeight - dropdownAnchor.top + 4) }
+                : { top: Math.min(window.innerHeight - 100, dropdownAnchor.bottom + 4) }),
+              minWidth: Math.max(190, dropdownAnchor.width),
+            }}
+            className="fixed z-[68] max-w-[240px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn"
+          >
+            <div className="max-h-60 overflow-y-auto py-1">
+              {STANDARD_DISPOSALS.map((opt) => {
+                const isActiveOpt = dropdownAnchor.currentVal === opt;
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => {
+                      saveAndSyncDisposals({ ...disposals, [dropdownAnchor.airmanId]: opt });
+                      setOpenDropdownAirmanId(null);
+                      setDropdownAnchor(null);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                      isActiveOpt
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/60'
+                    }`}
+                  >
+                    <span className="truncate">{opt}</span>
+                    {isActiveOpt && <Check className="w-3.5 h-3.5 shrink-0" />}
+                  </button>
+                );
+              })}
+
+              {(() => {
+                const customItems = Array.from(
+                  new Set([
+                    ...savedCustomList.filter((item) => !STANDARD_DISPOSALS.includes(item)),
+                    ...(dropdownAnchor.currentVal && !STANDARD_DISPOSALS.includes(dropdownAnchor.currentVal)
+                      ? [dropdownAnchor.currentVal]
+                      : []),
+                  ])
+                );
+                if (customItems.length === 0) return null;
+                return (
+                  <div className="border-t border-slate-100 dark:border-slate-700 mt-1 pt-1">
+                    <div className="px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Custom Disposals
+                    </div>
+                    {customItems.map((item) => {
+                      const isActiveCustom = dropdownAnchor.currentVal === item;
+                      return (
+                        <div
+                          key={`custom-opt-${item}`}
+                          className={`flex items-center justify-between gap-1 px-2 py-1 text-xs font-semibold transition-colors ${
+                            isActiveCustom
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/60'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              saveCustomDisposal(item);
+                              saveAndSyncDisposals({ ...disposals, [dropdownAnchor.airmanId]: item });
+                              setOpenDropdownAirmanId(null);
+                              setDropdownAnchor(null);
+                            }}
+                            className="flex-1 text-left px-1 py-0.5 truncate flex items-center justify-between gap-1 cursor-pointer"
+                          >
+                            <span className="truncate">{item}</span>
+                            {isActiveCustom && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </button>
+                          <button
+                            type="button"
+                            title={`Remove ${item}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenDropdownAirmanId(null);
+                              setDropdownAnchor(null);
+                              setDeletingCustomItem(item);
+                            }}
+                            className={`p-1 rounded transition-colors shrink-0 cursor-pointer ${
+                              isActiveCustom
+                                ? 'text-indigo-100 hover:text-white hover:bg-red-500/80'
+                                : 'text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50'
+                            }`}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="border-t border-slate-200 dark:border-slate-700 p-1.5 bg-slate-50 dark:bg-slate-900">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const anchor = dropdownAnchor;
+                  setOpenDropdownAirmanId(null);
+                  setDropdownAnchor(null);
+                  setCustomInput('');
+                  setCustomModalAirman({
+                    id: anchor.airmanId,
+                    name: anchor.airmanName,
+                    rank: anchor.airmanRank,
+                    flightName: anchor.airmanGroup,
+                    currentValue: anchor.currentVal,
+                  });
+                }}
+                className="w-full px-2.5 py-1.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100/70 dark:hover:bg-indigo-950/60 rounded-lg flex items-center justify-between transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Custom...</span>
+                </span>
+                <span className="text-[10px] font-normal text-slate-400">New Disposal</span>
+              </button>
+            </div>
+          </div>
+        </>,
+        document.body
       )}
 
       {/* Custom Disposal (Others) Modal */}

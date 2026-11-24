@@ -940,6 +940,9 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
 
     // Find unfilled shift -> else exceeded shift -> else first ratio shift
+    if (userManuallySelectedFlightRef.current) {
+      return;
+    }
     const slot = findFirstUnfulfilledIdacSlot(fromDate, currentDayAssignments);
     if (slot && slot.isUnfulfilled) {
       if (activeIdaShift !== slot.shift) {
@@ -1061,8 +1064,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     const orderedFlights: FlightName[] = lockedFlt ? [lockedFlt] : getOrderedFlights();
 
     if (isIdacDutyCode(activeDutyCode)) {
-      // Respect user's manual Shift selection even when Duty is locked
-      if (userManuallySelectedShiftRef.current) {
+      // Respect user's manual Shift or Flight selection even when Duty is locked
+      if (userManuallySelectedShiftRef.current || userManuallySelectedFlightRef.current) {
         return;
       }
 
@@ -1791,36 +1794,12 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         ? proxyForFlight
         : activeFlight !== 'All'
         ? activeFlight
-        : airman.flightName;
+        : (officeHasFlights ? airman.flightName : ((airman.trade || airman.flightName) as FlightName));
     const flightQuota = getFlightDutyQuotaForDate(fromDate, targetFlight as FlightName, dutyCodeToUse, shiftToUse);
 
-    // Find airmen from this targetFlight who already have this duty on this date
-    const existingForFlight = assignmentsList.filter((a) => {
-      let aAirman = airmanMap.get(a.airmanId);
-      if (!aAirman) {
-        const d = String(a.airmanId).replace(/\D/g, '');
-        if (d) aAirman = airmanMap.get(d);
-      }
-      const aFlt = aAirman?.flightName || (a as any).proxyForFlight;
-      if (aFlt !== targetFlight) return false;
-      if (isSameAirman(a.airmanId, airman.id)) return false;
-
-      return doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
-    });
-
-    let replacedAirman: Airman | null = null;
-    let replacedAirmanId: string | undefined;
-    // User rule: If flight ratio quota is 1 (or quota is reached), auto-deselect previous person so 2 people are not selected!
-    if ((flightQuota === 1 && existingForFlight.length >= 1) || (flightQuota > 0 && existingForFlight.length >= flightQuota)) {
-      const prevToReplace = existingForFlight[0];
-      let foundPrev = airmanMap.get(prevToReplace.airmanId);
-      if (!foundPrev) {
-        const d = String(prevToReplace.airmanId).replace(/\D/g, '');
-        if (d) foundPrev = airmanMap.get(d);
-      }
-      replacedAirman = foundPrev || null;
-      replacedAirmanId = prevToReplace.airmanId;
-    }
+    // Allow manual extra duty assignments beyond quota (e.g. 3/2, 2/1) without auto-replacing already assigned airmen
+    const replacedAirman: Airman | null = null;
+    const replacedAirmanId: string | undefined = undefined;
 
     const notes = dutyCodeToUse === 'LEAVE' ? `${activeLeaveType} Leave` : '';
     const proxyFltVal = isProxyEnabled && proxyForFlight ? proxyForFlight : undefined;
@@ -1884,10 +1863,37 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     setTimeout(() => setToastMessage(''), 2500);
 
     // Unified Auto-Advance Workflow (uses staged nextAssignments):
-    // 1. Stay in current duty if it has another unfulfilled shift (IDAC) or ratio flight slot.
-    // 2. When current duty is completely filled, move to any other duty & ratio flight on fromDate that has unfulfilled quota (unless Duty is locked).
-    // 3. When all duties' quotas for the day just became completely filled, advance to the next day (staged changes stay queued across dates).
+    // 1. If the user is manually assigning an EXTRA duty beyond quota (already >= quota or 0 quota), do NOT jump away — stay on current Flight/Trade so they see e.g. 3/2 and can add more.
+    // 2. If current Flight/Trade still has remaining quota (e.g. 1/2), stay on current Flight/Trade until its full quota (2/2) is filled.
+    // 3. Once current Flight/Trade reaches its ratio quota (e.g. 2/2), auto-advance to the next eligible Flight/Trade with remaining quota, then next shift/duty/date when complete.
     if (dutyCodeToUse) {
+      const hasSpecificScope = Boolean(targetFlight && targetFlight !== 'All');
+      const scopeQuota = hasSpecificScope
+        ? flightQuota
+        : getRequiredCountForDuty(dutyCodeToUse, isIdac ? shiftToUse : undefined, 'All');
+      const prevScopeAssigned = hasSpecificScope
+        ? countAssignedForDutyFlightShift(assignmentsList, dutyCodeToUse, targetFlight as FlightName, isIdac ? shiftToUse : undefined)
+        : countTotalAssignedForDutyShift(assignmentsList, dutyCodeToUse, isIdac ? shiftToUse : undefined);
+      const nextScopeAssigned = hasSpecificScope
+        ? countAssignedForDutyFlightShift(nextAssignments, dutyCodeToUse, targetFlight as FlightName, isIdac ? shiftToUse : undefined)
+        : countTotalAssignedForDutyShift(nextAssignments, dutyCodeToUse, isIdac ? shiftToUse : undefined);
+
+      const isManualExtraAssignment = scopeQuota <= 0 || prevScopeAssigned >= scopeQuota;
+      const stillNeedsMoreInCurrentScope = scopeQuota > 0 && nextScopeAssigned < scopeQuota;
+
+      if (isManualExtraAssignment) {
+        // Stay right on the selected Flight/Trade when manually adding extra duties (e.g. 3/2)
+        if (activeFlight !== 'All') {
+          userManuallySelectedFlightRef.current = true;
+        }
+        return;
+      }
+
+      if (stillNeedsMoreInCurrentScope) {
+        // Stay on the current Flight/Trade until all required airmen for its ratio (e.g. 2/2) are selected
+        return;
+      }
+
       userManuallySelectedDutyRef.current = false;
       userManuallySelectedShiftRef.current = false;
       userManuallySelectedFlightRef.current = false;
@@ -3289,15 +3295,22 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               }).map((flt) => {
                 const isDisabledFlt = flt !== 'All' && ((officeHasFlights && isAdmin && adminFlight && flt !== adminFlight) || (isPastDate && !isSuperAdmin));
                 const isSelected = activeFlight === flt;
+                const shiftFilter = activeDutyCode && isIdacDutyCode(activeDutyCode) ? activeIdaShift : undefined;
                 const fltRatioQuota =
-                  flt !== 'All' && activeDutyCode
-                    ? getFlightDutyQuotaForDate(
-                        fromDate,
-                        flt,
-                        activeDutyCode,
-                        isIdacDutyCode(activeDutyCode) ? activeIdaShift : undefined
-                      )
+                  activeDutyCode
+                    ? flt === 'All'
+                      ? getRequiredCountForDuty(activeDutyCode, shiftFilter, 'All')
+                      : getFlightDutyQuotaForDate(fromDate, flt, activeDutyCode, shiftFilter)
                     : 0;
+                const fltAssignedCount =
+                  activeDutyCode
+                    ? flt === 'All'
+                      ? getAssignedAirmenForDuty(activeDutyCode, shiftFilter, 'All').length
+                      : countAssignedForDutyFlightShift(assignmentsList, activeDutyCode, flt, shiftFilter)
+                    : 0;
+                const showQuotaBadge = Boolean(activeDutyCode) && (fltRatioQuota > 0 || fltAssignedCount > 0);
+                const isOverFltQuota = fltAssignedCount > fltRatioQuota;
+                const isMatchedFltQuota = fltRatioQuota > 0 && fltAssignedCount === fltRatioQuota;
                 const isRatioFlight = flt !== 'All' && fltRatioQuota > 0;
                 return (
                 <button
@@ -3327,11 +3340,11 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                   }}
                   disabled={isDisabledFlt}
                   title={
-                    isRatioFlight
-                      ? `${flt} Flight has ratio quota (${fltRatioQuota}) for this duty`
+                    showQuotaBadge
+                      ? `${flt === 'All' ? 'Total' : flt}: ${fltAssignedCount}/${fltRatioQuota} assigned`
                       : flt === 'All'
                       ? 'Show airmen from all flights'
-                      : `${flt} Flight (manual override outside ratio)`
+                      : `${flt} (manual override outside ratio)`
                   }
                   className={`px-2.5 py-1 text-xs font-bold rounded-lg border transition-all flex items-center gap-1.5 ${
                     isDisabledFlt ? 'opacity-50 cursor-not-allowed bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700' :
@@ -3346,12 +3359,20 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                     <Lock className="w-3 h-3 text-amber-400 stroke-[2.5]" />
                   )}
                   <span>{flt}</span>
-                  {isRatioFlight && (
+                  {showQuotaBadge && (
                     <span
-                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                        isSelected ? 'bg-emerald-500 dark:bg-emerald-600' : 'bg-emerald-500'
+                      className={`text-[10px] font-black px-1.5 py-0.2 rounded-full leading-tight shrink-0 ${
+                        isOverFltQuota
+                          ? 'bg-rose-600 text-white shadow-2xs'
+                          : isMatchedFltQuota
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : isSelected
+                          ? 'bg-amber-400 text-slate-950 shadow-2xs'
+                          : 'bg-amber-100 dark:bg-amber-900/70 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700'
                       }`}
-                    />
+                    >
+                      {fltAssignedCount}/{fltRatioQuota}
+                    </span>
                   )}
                 </button>
                 );
