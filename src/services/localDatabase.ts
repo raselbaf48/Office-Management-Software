@@ -7,10 +7,16 @@ import {
   DutyCategoryCode,
   IDAShift,
   ImportHistoryBatch,
+  BiodataImportBatch,
   ParadeStateResponse,
   AirmanDutyStats,
   ConflictAlert,
 } from '../types';
+import {
+  collectStrictActiveOfficeLocalSettings,
+  isStorageKeyAllowedForActiveOfficeBackup,
+  validateBackupMatchesActiveOffice,
+} from '../utils/backupOfficeScope';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from '../data/officialJulyAugustData';
@@ -81,6 +87,7 @@ export interface LocalStorageDB {
   adminPasscode: string;
   detailedUsers?: any[];
   importHistory: ImportHistoryBatch[];
+  biodataImportHistory?: BiodataImportBatch[];
   lastUpdated: string;
 }
 
@@ -526,6 +533,7 @@ export class LocalDatabaseEngine {
         adminPasscode: DEFAULT_ADMIN_PASSCODE,
         detailedUsers: [],
         importHistory: [],
+        biodataImportHistory: [],
         lastUpdated: new Date().toISOString(),
       };
       this.db = freshDb;
@@ -2842,6 +2850,7 @@ export class LocalDatabaseEngine {
               adminPasscode: parsed.adminPasscode || DEFAULT_ADMIN_PASSCODE,
               detailedUsers: sanitizedDetailedUsers,
               importHistory: parsed.importHistory || [],
+              biodataImportHistory: Array.isArray(parsed.biodataImportHistory) ? parsed.biodataImportHistory : [],
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
             };
 
@@ -2882,6 +2891,7 @@ export class LocalDatabaseEngine {
         adminPasscode: initialPasscode,
         detailedUsers: [],
         importHistory: [],
+        biodataImportHistory: [],
         lastUpdated: new Date().toISOString(),
       };
       this.reconcileCustomOfficeAirmenAndUsers(brandNewDb, false);
@@ -2900,6 +2910,7 @@ export class LocalDatabaseEngine {
       adminPasscode: initialPasscode,
       detailedUsers: [],
       importHistory: [],
+      biodataImportHistory: [],
       lastUpdated: new Date().toISOString(),
     };
 
@@ -3380,7 +3391,10 @@ export class LocalDatabaseEngine {
     return this.db.airmen.find(a => a.id === id) || newAirman;
   }
 
-  public bulkAddAirmen(airmenList: Partial<Airman>[]): { count: number; airmen: Airman[] } {
+  public bulkAddAirmen(
+    airmenList: Partial<Airman>[],
+    importMeta?: { fileName?: string; sourceType?: 'EXCEL' | 'CSV' | 'PASTE'; importedBy?: string }
+  ): { count: number; airmen: Airman[]; batchId?: string } {
     let currentSerNo = this.db.airmen.length > 0 ? Math.max(...this.db.airmen.map((a) => a.serNo)) : 0;
     const createdAirmen: Airman[] = [];
 
@@ -3388,6 +3402,7 @@ export class LocalDatabaseEngine {
       currentSerNo++;
       const id = `airman-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const cleanBd = item.bdNo ? (item.bdNo.toUpperCase().startsWith('BD') ? item.bdNo : `BD/${item.bdNo}`) : `BD/${Date.now().toString().slice(-6)}`;
+      const cleanFlight = String(item.flightName || '').trim();
       const newAirman: Airman = {
         id,
         serNo: currentSerNo,
@@ -3402,7 +3417,7 @@ export class LocalDatabaseEngine {
         permanentAddress: item.permanentAddress || '',
         bloodGroup: item.bloodGroup || '',
         mobileNo: item.mobileNo || '01700000000',
-        flightName: (String(item.flightName || '').trim() ? item.flightName : (isDefault155UasuOffice() ? 'Admin' : '')) as FlightName,
+        flightName: cleanFlight as FlightName,
         dateJoined: item.dateJoined || '',
         remarks: item.remarks || 'Bulk Imported',
         active: true,
@@ -3410,6 +3425,33 @@ export class LocalDatabaseEngine {
 
       createdAirmen.push(newAirman);
       this.db.airmen.push(newAirman);
+    }
+
+    let batchId: string | undefined;
+    if (createdAirmen.length > 0) {
+      const existingHistory = this.getBiodataImportHistory();
+      batchId = `bio-import-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const newBatch: BiodataImportBatch = {
+        id: batchId,
+        timestamp: new Date().toISOString(),
+        fileName: importMeta?.fileName || 'Excel / Bulk Import',
+        sourceType: importMeta?.sourceType || 'EXCEL',
+        importedBy: importMeta?.importedBy || 'Admin',
+        airmenCount: createdAirmen.length,
+        airmenIds: createdAirmen.map((a) => a.id),
+        airmenSummary: createdAirmen.map((a) => ({
+          id: a.id,
+          bdNo: a.bdNo,
+          rank: a.rank,
+          name: a.name,
+          fullName: a.fullName,
+          trade: a.trade,
+          flightName: a.flightName || '',
+        })),
+      };
+      const updatedHistory = [newBatch, ...existingHistory].slice(0, 100);
+      this.db.biodataImportHistory = updatedHistory;
+      this.persistBiodataImportHistory(updatedHistory);
     }
 
     this.db.airmen = normalizeAirmenSeniority(this.db.airmen);
@@ -3425,10 +3467,165 @@ export class LocalDatabaseEngine {
       dutyCode: 'GD',
       fromDate: '',
       toDate: '',
-      notes: `Bulk imported ${createdAirmen.length} airmen to Nominal Roll`,
+      notes: `Bulk imported ${createdAirmen.length} airmen to Biodata Register (${importMeta?.fileName || 'Excel'})`,
     });
 
-    return { count: createdAirmen.length, airmen: createdAirmen };
+    return { count: createdAirmen.length, airmen: createdAirmen, batchId };
+  }
+
+  private getBiodataImportHistoryStorageKey(): string {
+    return getOfficeScopedStorageKey('baf_biodata_import_history_v1');
+  }
+
+  private persistBiodataImportHistory(list: BiodataImportBatch[]): void {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    try {
+      window.localStorage.setItem(this.getBiodataImportHistoryStorageKey(), JSON.stringify(list));
+    } catch {}
+  }
+
+  public getBiodataImportHistory(): BiodataImportBatch[] {
+    const dbList = Array.isArray(this.db.biodataImportHistory) ? this.db.biodataImportHistory : [];
+    let scopedList: BiodataImportBatch[] = [];
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const raw = window.localStorage.getItem(this.getBiodataImportHistoryStorageKey());
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) scopedList = parsed;
+        }
+      } catch {}
+    }
+
+    const mergedMap = new Map<string, BiodataImportBatch>();
+    for (const item of [...dbList, ...scopedList]) {
+      if (item && item.id && !mergedMap.has(item.id)) {
+        mergedMap.set(item.id, item);
+      }
+    }
+    return Array.from(mergedMap.values()).sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  }
+
+  public removeBiodataImportBatch(batchId: string): {
+    success: boolean;
+    removedCount: number;
+    skippedProtectedCount: number;
+  } {
+    const history = this.getBiodataImportHistory();
+    const batch = history.find((b) => b.id === batchId);
+    if (!batch) {
+      return { success: false, removedCount: 0, skippedProtectedCount: 0 };
+    }
+
+    const targetIds = new Set<string>(batch.airmenIds || []);
+    const targetBdDigits = new Set<string>();
+    (batch.airmenSummary || []).forEach((s) => {
+      if (s.id) targetIds.add(s.id);
+      const d = String(s.bdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (d) targetBdDigits.add(d);
+    });
+
+    const matchedTargets: Airman[] = [];
+    let skippedProtectedCount = 0;
+
+    for (const a of this.db.airmen) {
+      const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      const isInBatch = targetIds.has(a.id) || (aBd && targetBdDigits.has(aBd));
+      if (!isInBatch) continue;
+      if (aBd === '48456' || a.isProtected) {
+        skippedProtectedCount++;
+        continue;
+      }
+      matchedTargets.push(a);
+    }
+
+    const removeIdSet = new Set(matchedTargets.map((t) => t.id));
+    const removeBdSet = new Set(
+      matchedTargets
+        .map((t) => String(t.bdNo || t.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim())
+        .filter(Boolean)
+    );
+
+    if (matchedTargets.length > 0) {
+      this.db.airmen = normalizeAirmenSeniority(
+        this.db.airmen.filter((a) => {
+          if (removeIdSet.has(a.id)) return false;
+          const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+          if (aBd && removeBdSet.has(aBd)) return false;
+          return true;
+        })
+      );
+
+      // Clean assignments for removed airmen
+      if (this.db.assignments) {
+        Object.keys(this.db.assignments).forEach((monthKey) => {
+          if (Array.isArray(this.db.assignments[monthKey])) {
+            this.db.assignments[monthKey] = this.db.assignments[monthKey].filter(
+              (ass) => !removeIdSet.has(ass.airmanId)
+            );
+          }
+        });
+      }
+
+      // Clean detailedUsers for removed airmen (never delete 48456)
+      const deletedUsers: any[] = [];
+      const keepUser = (u: any) => {
+        const uBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        if (uBd === '48456' || u?.isProtected === true) return true;
+        const isMatch = removeIdSet.has(u?.airmanId) || (uBd && removeBdSet.has(uBd));
+        if (isMatch) {
+          deletedUsers.push(u);
+          return false;
+        }
+        return true;
+      };
+
+      if (this.db.detailedUsers) {
+        this.db.detailedUsers = this.db.detailedUsers.filter(keepUser);
+      }
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const scopedUsersKey = getActiveDetailedUsersStorageKey();
+          const rawScoped = window.localStorage.getItem(scopedUsersKey);
+          if (rawScoped) {
+            const parsedScoped = JSON.parse(rawScoped);
+            if (Array.isArray(parsedScoped)) {
+              window.localStorage.setItem(scopedUsersKey, JSON.stringify(parsedScoped.filter(keepUser)));
+            }
+          }
+        } catch {}
+      }
+
+      matchedTargets.forEach((target) => {
+        markUserPostedOutInGlobalDirectory(target.bdNo || target.id, true);
+        deleteAirmanFromFirebase(target).catch(() => {});
+      });
+      if (deletedUsers.length > 0) {
+        deleteUserProfileFromFirebase(deletedUsers).catch(() => {});
+      }
+    }
+
+    const remainingHistory = history.filter((b) => b.id !== batchId);
+    this.db.biodataImportHistory = remainingHistory;
+    this.persistBiodataImportHistory(remainingHistory);
+
+    this.logSystemAction(
+      batchId,
+      `Biodata Import (${batch.fileName})`,
+      `Removed bulk import batch "${batch.fileName}" (${matchedTargets.length} airmen deleted)`
+    );
+
+    this.saveToStorage();
+    updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
+
+    return {
+      success: true,
+      removedCount: matchedTargets.length,
+      skippedProtectedCount,
+    };
   }
 
   public async updateAirman(id: string, data: Partial<Airman>): Promise<Airman | null> {
@@ -5672,42 +5869,43 @@ export class LocalDatabaseEngine {
     return false;
   }
 
-  // --- DATABASE BACKUP & RESTORE ---
+  // --- DATABASE BACKUP & RESTORE (STRICT OFFICE ISOLATION) ---
   public exportDatabase(): string {
-    const localSettings: Record<string, string> = {};
-    const excludedKeys = new Set([
-      'baf_local_storage_snapshot',
-      'baf_drive_cloud_snapshot',
-      'baf_backup_restore_history_v1',
-      'baf_155_uasu_v2_db',
-      'baf_database_v2',
-    ]);
-    if (typeof window !== 'undefined' && window.localStorage) {
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const k = window.localStorage.key(i);
-        if (!k || excludedKeys.has(k)) continue;
-        const v = window.localStorage.getItem(k);
-        if (v !== null && v !== undefined) localSettings[k] = v;
-      }
-    }
+    const activeIdentity = getActiveOfficeIdentity();
+    const activeOfficeCode = activeIdentity.officeCode || getActiveOfficeCode() || '155-UASU';
+    const activeOfficeName = activeIdentity.officeName || (isDefault155UasuOffice() ? '155 UASU BAF' : activeOfficeCode);
+    const localSettings = collectStrictActiveOfficeLocalSettings();
+
     return JSON.stringify({
       exportedAt: new Date().toISOString(),
-      unit: '155 UASU, BAF BASE ZHR',
-      version: '2.5',
+      officeIsolated: true,
+      officeCode: activeOfficeCode,
+      officeName: activeOfficeName,
+      isDefault155: isDefault155UasuOffice(),
+      unit: activeOfficeName,
+      version: '3.1',
       airmen: this.db.airmen,
       assignments: this.db.assignments,
+      detailedUsers: this.db.detailedUsers || [],
       activityHistory: this.db.activityHistory,
       adminPasscode: this.db.adminPasscode,
       importHistory: this.db.importHistory,
+      biodataImportHistory: this.getBiodataImportHistory(),
       localSettings,
     }, null, 2);
   }
 
   public restoreDatabase(uploadedData: any): boolean {
-    const airmen = uploadedData.airmen || uploadedData.database?.airmen;
-    const assignments = uploadedData.assignments || uploadedData.database?.assignments;
-    const detailedUsers = uploadedData.detailedUsers || uploadedData.database?.detailedUsers;
-    const activityHistory = uploadedData.activityHistory || uploadedData.database?.activityHistory;
+    const officeCheck = validateBackupMatchesActiveOffice(uploadedData);
+    if (!officeCheck.ok) {
+      throw new Error(officeCheck.error || 'Office mismatch: cannot restore backup from another office.');
+    }
+
+    const airmen = uploadedData.airmen || uploadedData.database?.airmen || uploadedData.baf_unit_data?.airmen;
+    const assignments = uploadedData.assignments || uploadedData.database?.assignments || uploadedData.baf_unit_data?.assignments;
+    const detailedUsers = uploadedData.detailedUsers || uploadedData.database?.detailedUsers || uploadedData.baf_unit_data?.detailedUsers;
+    const activityHistory = uploadedData.activityHistory || uploadedData.database?.activityHistory || uploadedData.baf_unit_data?.activityHistory;
+    const biodataImportHistory = uploadedData.biodataImportHistory || uploadedData.database?.biodataImportHistory || uploadedData.baf_unit_data?.biodataImportHistory;
 
     let restoredAnything = false;
     if (airmen && Array.isArray(airmen)) {
@@ -5726,6 +5924,11 @@ export class LocalDatabaseEngine {
       this.db.activityHistory = activityHistory;
       restoredAnything = true;
     }
+    if (biodataImportHistory && Array.isArray(biodataImportHistory)) {
+      this.db.biodataImportHistory = biodataImportHistory;
+      this.persistBiodataImportHistory(biodataImportHistory);
+      restoredAnything = true;
+    }
     if (uploadedData.adminPasscode) {
       this.db.adminPasscode = uploadedData.adminPasscode;
       restoredAnything = true;
@@ -5733,7 +5936,7 @@ export class LocalDatabaseEngine {
 
     if (typeof window !== 'undefined' && window.localStorage && uploadedData.localSettings && typeof uploadedData.localSettings === 'object') {
       for (const [k, v] of Object.entries(uploadedData.localSettings)) {
-        if (k && v !== undefined && v !== null) {
+        if (k && v !== undefined && v !== null && isStorageKeyAllowedForActiveOfficeBackup(k)) {
           window.localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
           restoredAnything = true;
         }

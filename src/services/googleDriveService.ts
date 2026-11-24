@@ -1,4 +1,11 @@
 import { localDb } from './localDatabase';
+import { getActiveOfficeCode, getActiveOfficeIdentity, getOfficeScopedStorageKey, isDefault155UasuOffice } from '../firebase';
+import {
+  collectStrictActiveOfficeLocalSettings,
+  getOfficeBackupFilePrefix,
+  isStorageKeyAllowedForActiveOfficeBackup,
+  validateBackupMatchesActiveOffice,
+} from '../utils/backupOfficeScope';
 
 export interface User {
   email?: string | null;
@@ -13,7 +20,7 @@ export interface User {
  * Access tokens are stored exclusively IN-MEMORY and cleared on sign-out.
  */
 
-const DRIVE_FILE_NAME = '155_UASU_BAF_Backup.json';
+const getDriveBackupFileName = () => `${getOfficeBackupFilePrefix()}_Backup.json`;
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 export interface DriveSyncStatus {
@@ -261,7 +268,8 @@ export async function disconnectGoogleDrive(): Promise<void> {
  * Query user's Google Drive for existing 155_UASU_BAF_Backup.json file
  */
 async function findBackupFile(accessToken: string): Promise<{ id: string; name: string; modifiedTime: string; size?: string } | null> {
-  const q = encodeURIComponent(`name = '${DRIVE_FILE_NAME}' and trashed = false`);
+  const driveFileName = getDriveBackupFileName();
+  const q = encodeURIComponent(`name = '${driveFileName}' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime desc`;
 
   const response = await fetch(url, {
@@ -287,37 +295,6 @@ async function findBackupFile(accessToken: string): Promise<{ id: string; name: 
   return null;
 }
 
-const BACKUP_EXCLUDED_LOCAL_KEYS = new Set([
-  'baf_local_storage_snapshot',
-  'baf_drive_cloud_snapshot',
-  'baf_backup_restore_history_v1',
-  'baf_155_uasu_v2_db',
-  'baf_database_v2',
-  'canteen_members',
-  'canteen_members_cache',
-  'canteen_transactions',
-  'canteen_txs',
-]);
-
-function collectAllLocalSettings(): Record<string, string> {
-  const localSettings: Record<string, string> = {};
-  if (typeof window === 'undefined' || !window.localStorage) return localSettings;
-
-  try {
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (!key || BACKUP_EXCLUDED_LOCAL_KEYS.has(key)) continue;
-      const val = window.localStorage.getItem(key);
-      if (val !== null && val !== undefined) {
-        localSettings[key] = val;
-      }
-    }
-  } catch (err) {
-    console.warn('Could not collect localStorage settings:', err);
-  }
-  return localSettings;
-}
-
 function safeParseJson(raw: string | null | undefined): any {
   if (!raw) return undefined;
   try {
@@ -328,29 +305,19 @@ function safeParseJson(raw: string | null | undefined): any {
 }
 
 /**
- * Export full application data bundle including BAF Duty Roster, Duty Settings, Other Settings & Canteen
+ * Export strictly active-office application data bundle (ZERO other-office data or global registry keys)
  */
 export async function exportFullSystemData() {
   const localDbData = localDb.getDb();
-  const serverSettings: any[] = [];
+  const activeIdentity = getActiveOfficeIdentity();
+  const activeOfficeCode = activeIdentity.officeCode || getActiveOfficeCode() || '155-UASU';
+  const activeOfficeName = activeIdentity.officeName || (isDefault155UasuOffice() ? '155 UASU BAF' : activeOfficeCode);
+  const is155 = isDefault155UasuOffice();
 
-  const localSettings = collectAllLocalSettings();
+  const localSettings = collectStrictActiveOfficeLocalSettings();
   const nowIso = new Date().toISOString();
 
-  // Merge server app_settings + live localStorage settings (skipping duplicate raw data caches)
   const mergedSettingsMap = new Map<string, { setting_key: string; setting_value: string; updated_at: string }>();
-  if (Array.isArray(serverSettings)) {
-    for (const s of serverSettings) {
-      if (s && s.setting_key && s.setting_value !== undefined && !BACKUP_EXCLUDED_LOCAL_KEYS.has(s.setting_key)) {
-        mergedSettingsMap.set(s.setting_key, {
-          setting_key: s.setting_key,
-          setting_value: typeof s.setting_value === 'string' ? s.setting_value : JSON.stringify(s.setting_value),
-          updated_at: s.updated_at || nowIso,
-        });
-      }
-    }
-  }
-
   for (const [k, v] of Object.entries(localSettings)) {
     mergedSettingsMap.set(k, {
       setting_key: k,
@@ -361,9 +328,11 @@ export async function exportFullSystemData() {
 
   const allMergedSettings = Array.from(mergedSettingsMap.values());
 
-  // Extract structured Duty Settings explicitly for clarity & guaranteed restore
-  const getSettingStr = (k: string) =>
-    localSettings[k] ?? mergedSettingsMap.get(k)?.setting_value;
+  // Extract structured Duty Settings explicitly for the active office
+  const getSettingStr = (baseKey: string) => {
+    const scopedKey = getOfficeScopedStorageKey(baseKey);
+    return localSettings[scopedKey] ?? localSettings[baseKey] ?? mergedSettingsMap.get(scopedKey)?.setting_value;
+  };
 
   const dutySettings = {
     dutyMatrix: safeParseJson(getSettingStr('baf_official_duty_matrix_v4') || getSettingStr('baf_official_duty_matrix_v3')),
@@ -376,8 +345,12 @@ export async function exportFullSystemData() {
   };
 
   return {
-    version: '3.0',
-    app: '155 UASU BAF Office Management & Duty Register System',
+    version: '3.1',
+    officeIsolated: true,
+    officeCode: activeOfficeCode,
+    officeName: activeOfficeName,
+    isDefault155: is155,
+    app: `${activeOfficeName} Office Management & Duty Register System`,
     exportedAt: nowIso,
     baf_unit_data: localDbData,
     dutySettings,
@@ -445,10 +418,12 @@ export async function uploadBackupToDrive(customData?: any): Promise<{
         const delimiter = `\r\n--${boundary}\r\n`;
         const closeDelim = `\r\n--${boundary}--`;
 
+        const driveFileName = getDriveBackupFileName();
+        const activeIdentity = getActiveOfficeIdentity();
         const metadata = {
-          name: DRIVE_FILE_NAME,
+          name: driveFileName,
           mimeType: 'application/json',
-          description: `155 UASU BAF Complete Office Management & Duty Register System Backup (${email || 'Gmail'})`,
+          description: `${activeIdentity.officeName || 'Office'} Complete Office Management & Duty Register System Backup (${email || 'Gmail'})`,
         };
 
         const multipartRequestBody =
@@ -485,7 +460,7 @@ export async function uploadBackupToDrive(customData?: any): Promise<{
       // Save cloud snapshot for authenticated Gmail account
       fileId = `baf-drive-backup-${Date.now()}`;
       if (typeof window !== 'undefined') {
-        window.localStorage.setItem('baf_drive_cloud_snapshot', JSON.stringify({
+        window.localStorage.setItem(getOfficeScopedStorageKey('baf_drive_cloud_snapshot'), JSON.stringify({
           email,
           modifiedTime,
           data: backupPayload,
@@ -521,8 +496,9 @@ export async function fetchBackupFromDrive(): Promise<{ metadata: any; content: 
   try {
     if (cachedAccessToken && !cachedAccessToken.startsWith('drive-')) {
       const file = await findBackupFile(cachedAccessToken);
+      const driveFileName = getDriveBackupFileName();
       if (!file || !file.id) {
-        throw new Error('Google ড্রাইভে কোনো 155_UASU_BAF_Backup.json ব্যাকআপ ফাইল পাওয়া যায়নি।');
+        throw new Error(`Google ড্রাইভে কোনো ${driveFileName} ব্যাকআপ ফাইল পাওয়া যায়নি।`);
       }
 
       const downloadRes = await fetch(
@@ -545,14 +521,14 @@ export async function fetchBackupFromDrive(): Promise<{ metadata: any; content: 
     }
 
     if (typeof window !== 'undefined') {
-      const snapRaw = window.localStorage.getItem('baf_drive_cloud_snapshot');
+      const snapRaw = window.localStorage.getItem(getOfficeScopedStorageKey('baf_drive_cloud_snapshot'));
       if (snapRaw) {
         const snap = JSON.parse(snapRaw);
         emitStatus('idle', `${email || 'Google'} ড্রাইভ ব্যাকআপ ডাটা প্রস্তুত`);
         return {
           metadata: {
             id: 'baf-drive-snapshot',
-            name: DRIVE_FILE_NAME,
+            name: getDriveBackupFileName(),
             modifiedTime: snap.modifiedTime || new Date().toISOString(),
           },
           content: snap.data,
@@ -560,7 +536,7 @@ export async function fetchBackupFromDrive(): Promise<{ metadata: any; content: 
       }
     }
 
-    throw new Error('Google ড্রাইভে কোনো পূর্ববর্তী 155_UASU_BAF_Backup.json ব্যাকআপ পাওয়া যায়নি।');
+    throw new Error(`Google ড্রাইভে কোনো পূর্ববর্তী ${getDriveBackupFileName()} ব্যাকআপ পাওয়া যায়নি।`);
   } catch (err: any) {
     console.error('Fetch Drive Backup Error:', err);
     emitStatus('error', err.message || 'ড্রাইভ থেকে ব্যাকআপ লোড ব্যর্থ হয়েছে');
@@ -607,13 +583,20 @@ export async function restoreFromBackupData(
 
   try {
     await pauseStep(150);
+
+    // STRICT OFFICE ISOLATION GUARD: Block restoring another office's backup into the current office
+    const officeCheck = validateBackupMatchesActiveOffice(backupData);
+    if (!officeCheck.ok) {
+      throw new Error(officeCheck.error || 'Office mismatch: cannot restore another office backup.');
+    }
+
     const unitData = backupData.baf_unit_data || backupData;
     let restoredAirmen = 0;
     let restoredAssignments = 0;
     let restoredMembers = 0;
     let restoredSettings = 0;
 
-    // 1. Restore localDb in browser (Airmen & Assignments & History)
+    // 1. Restore localDb in browser (Airmen & Assignments & History) strictly into active office
     onProgress?.(24, 'Restoring airmen biodata and duty roster...');
     if (unitData) {
       localDb.restoreDatabase(unitData);
@@ -625,7 +608,7 @@ export async function restoreFromBackupData(
     }
     await pauseStep(180);
 
-    // 2. Restore Duty Settings & ALL other settings into browser localStorage
+    // 2. Restore Duty Settings & ONLY strictly active-office settings into browser localStorage
     onProgress?.(48, 'Restoring Duty Settings and app preferences...');
     const appliedSettingsMap = new Map<string, string>();
     if (typeof window !== 'undefined' && window.localStorage) {
@@ -634,7 +617,7 @@ export async function restoreFromBackupData(
       ];
 
       for (const s of rawSettingsSources) {
-        if (s && s.setting_key && s.setting_value !== undefined && !BACKUP_EXCLUDED_LOCAL_KEYS.has(s.setting_key)) {
+        if (s && s.setting_key && s.setting_value !== undefined && isStorageKeyAllowedForActiveOfficeBackup(s.setting_key)) {
           const val = typeof s.setting_value === 'string' ? s.setting_value : JSON.stringify(s.setting_value);
           try {
             window.localStorage.setItem(s.setting_key, val);
@@ -645,7 +628,7 @@ export async function restoreFromBackupData(
 
       if (backupData.localSettings && typeof backupData.localSettings === 'object' && !Array.isArray(backupData.localSettings)) {
         for (const [key, val] of Object.entries(backupData.localSettings)) {
-          if (key && val !== undefined && val !== null && !BACKUP_EXCLUDED_LOCAL_KEYS.has(key)) {
+          if (key && val !== undefined && val !== null && isStorageKeyAllowedForActiveOfficeBackup(key)) {
             const strVal = typeof val === 'string' ? val : JSON.stringify(val);
             try {
               window.localStorage.setItem(key, strVal);
@@ -658,16 +641,16 @@ export async function restoreFromBackupData(
       if (backupData.dutySettings && typeof backupData.dutySettings === 'object') {
         const ds = backupData.dutySettings;
         const dutyKeyMap: Record<string, string> = {
-          dutyMatrix: 'baf_official_duty_matrix_v4',
-          dutyRatioHistory: 'baf_duty_ratio_history_v1',
-          customDuties: 'baf_custom_duties_v1',
-          distributionManpower: 'baf_duty_distribution_manpower',
-          distributionDisposals: 'baf_duty_distribution_disposals_master',
-          distributionTotalDuty: 'baf_duty_distribution_total_duty',
-          distributionCustomFlt: 'baf_duty_distribution_custom_flt',
+          dutyMatrix: getOfficeScopedStorageKey('baf_official_duty_matrix_v4'),
+          dutyRatioHistory: getOfficeScopedStorageKey('baf_duty_ratio_history_v1'),
+          customDuties: getOfficeScopedStorageKey('baf_custom_duties_v1'),
+          distributionManpower: getOfficeScopedStorageKey('baf_duty_distribution_manpower'),
+          distributionDisposals: getOfficeScopedStorageKey('baf_duty_distribution_disposals_master'),
+          distributionTotalDuty: getOfficeScopedStorageKey('baf_duty_distribution_total_duty'),
+          distributionCustomFlt: getOfficeScopedStorageKey('baf_duty_distribution_custom_flt'),
         };
         for (const [field, storageKey] of Object.entries(dutyKeyMap)) {
-          if (ds[field] !== undefined && ds[field] !== null) {
+          if (ds[field] !== undefined && ds[field] !== null && isStorageKeyAllowedForActiveOfficeBackup(storageKey)) {
             const strVal = typeof ds[field] === 'string' ? ds[field] : JSON.stringify(ds[field]);
             try {
               window.localStorage.setItem(storageKey, strVal);
@@ -686,29 +669,32 @@ export async function restoreFromBackupData(
       compactLocalSettings[k] = v;
     });
 
-    // 3a. Sync Unit Database to Server (timeout-protected)
-    onProgress?.(66, 'Syncing unit roster database to server...');
-    if (unitData && (unitData.airmen || unitData.assignments)) {
-      try {
-        await postWithTimeout('/api/database/save', unitData, 8000);
-      } catch (err) {
-        console.warn('Server unit DB sync warning (non-fatal):', err);
+    // 3. Sync Unit Database & Settings to local server JSON ONLY for default 155 UASU office
+    if (isDefault155UasuOffice()) {
+      onProgress?.(66, 'Syncing unit roster database to server...');
+      if (unitData && (unitData.airmen || unitData.assignments)) {
+        try {
+          await postWithTimeout('/api/database/save', unitData, 8000);
+        } catch (err) {
+          console.warn('Server unit DB sync warning (non-fatal):', err);
+        }
       }
-    }
 
-    // 3b. Sync Duty Settings & App Preferences to Server (timeout-protected)
-    onProgress?.(82, 'Syncing duty settings to server...');
-    try {
-      await postWithTimeout(
-        '/api/full-system-restore',
-        {
-          localSettings: compactLocalSettings,
-          dutySettings: backupData.dutySettings,
-        },
-        8000
-      );
-    } catch (err) {
-      console.warn('Server settings sync warning (non-fatal):', err);
+      onProgress?.(82, 'Syncing duty settings to server...');
+      try {
+        await postWithTimeout(
+          '/api/full-system-restore',
+          {
+            localSettings: compactLocalSettings,
+            dutySettings: backupData.dutySettings,
+          },
+          8000
+        );
+      } catch (err) {
+        console.warn('Server settings sync warning (non-fatal):', err);
+      }
+    } else {
+      onProgress?.(82, 'Finalizing isolated office restore...');
     }
     await pauseStep(160);
 
@@ -766,7 +752,7 @@ export async function downloadOfflineBackupJson() {
   const a = document.createElement('a');
   a.href = url;
   const dateStr = new Date().toISOString().split('T')[0];
-  a.download = `155_UASU_BAF_Backup_${dateStr}.json`;
+  a.download = `${getOfficeBackupFilePrefix()}_Backup_${dateStr}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

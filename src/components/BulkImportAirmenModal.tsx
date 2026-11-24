@@ -22,6 +22,7 @@ import { localDb } from '../services/localDatabase';
 import { exportAirmenTemplateExcel, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { isJcoRank } from '../utils/seniority';
 import { doesOfficeHaveFlights } from '../firebase';
+import { getCurrentUserSession } from '../utils/authSession';
 
 interface BulkImportAirmenModalProps {
   isOpen: boolean;
@@ -62,6 +63,8 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
   const [activeTab, setActiveTab] = useState<'FILE' | 'PASTE'>('FILE');
   const [pasteText, setPasteText] = useState<string>('');
   const [fileName, setFileName] = useState<string>('');
+  const [sourceType, setSourceType] = useState<'EXCEL' | 'CSV' | 'PASTE'>('EXCEL');
+  const [hasFlightColumn, setHasFlightColumn] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
@@ -74,22 +77,118 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
   };
 
   const normalizeRank = (raw: string): { rank: Rank; valid: boolean } => {
-    const trimmed = raw.trim().toUpperCase();
+    const trimmed = raw.trim().toUpperCase().replace(/\s+/g, ' ');
     const found = VALID_RANKS.find((r) => r.toUpperCase() === trimmed);
     if (found) return { rank: found, valid: true };
-    if (trimmed === 'SERGEANT') return { rank: 'Sgt', valid: true };
-    if (trimmed === 'CORPORAL') return { rank: 'Cpl', valid: true };
-    if (trimmed === 'LEADING AIRMAN') return { rank: 'LAC', valid: true };
+    if (trimmed === 'MWO' || trimmed === 'MASTER WARRANT OFFICER') return { rank: 'MWO', valid: true };
+    if (trimmed === 'SWO' || trimmed === 'SENIOR WARRANT OFFICER') return { rank: 'SWO', valid: true };
+    if (trimmed === 'WO' || trimmed === 'WARRANT OFFICER') return { rank: 'WO', valid: true };
+    if (trimmed === 'SGT' || trimmed === 'SERGEANT') return { rank: 'Sgt', valid: true };
+    if (trimmed === 'CPL' || trimmed === 'CORPORAL') return { rank: 'Cpl', valid: true };
+    if (trimmed === 'LAC' || trimmed === 'LEADING AIRMAN' || trimmed === 'LEADING AIRCRAFTMAN') return { rank: 'LAC', valid: true };
+    // AC & AC-1 are the exact same rank
+    if (
+      trimmed === 'AC' ||
+      trimmed === 'AC-1' ||
+      trimmed === 'AC 1' ||
+      trimmed === 'AC1' ||
+      trimmed === 'AC-I' ||
+      trimmed === 'AC_1' ||
+      trimmed === 'AC.1' ||
+      trimmed === 'AIRCRAFTMAN' ||
+      trimmed === 'AIRCRAFTMAN 1' ||
+      trimmed === 'AIRCRAFTMAN-1'
+    ) {
+      return { rank: 'AC-1', valid: true };
+    }
+    if (
+      trimmed === 'AC-2' ||
+      trimmed === 'AC 2' ||
+      trimmed === 'AC2' ||
+      trimmed === 'AC-II' ||
+      trimmed === 'AC_2' ||
+      trimmed === 'AC.2' ||
+      trimmed === 'AIRCRAFTMAN 2' ||
+      trimmed === 'AIRCRAFTMAN-2'
+    ) {
+      return { rank: 'AC-2', valid: true };
+    }
     return { rank: 'LAC', valid: false };
   };
 
-  const normalizeFlight = (raw: string): { flight: FlightName; valid: boolean } => {
+  const isSgtOrAboveRank = (rankStr: string): boolean => {
+    const norm = normalizeRank(rankStr);
+    const r = norm.valid ? norm.rank : rankStr.trim();
+    return ['MWO', 'SWO', 'WO', 'Sgt'].includes(r);
+  };
+
+  /**
+   * Smart Address Parser for Biodata Import:
+   * - L/O -> Living Out (Outside Base: "L/O")
+   * - Block/Room pattern like "12/23" or "12/13" -> Living In:
+   *   - Sgt & above -> "Sgt's Mess, Block No: 12/23"
+   *   - Cpl & below -> "Airmen's Mess, Block No: 12/23"
+   */
+  const formatImportedAddress = (rawAddr: string, rankStr: string): string => {
+    const trimmed = String(rawAddr || '').trim();
+    if (!trimmed || trimmed === '-' || trimmed.toLowerCase() === 'n/a') return '';
+
+    const messName = isSgtOrAboveRank(rankStr) ? "Sgt's Mess" : "Airmen's Mess";
+
+    // 1. L/O -> Living Out, Outside Base = "L/O"
+    if (/^(?:l\s*\/\s*o|lo|living\s*out|live\s*out|outside\s*base\s*[-:,(\s]*l\s*\/\s*o\)?)$/i.test(trimmed)) {
+      return 'L/O';
+    }
+
+    // 2. Service Quarter
+    if (/^(?:svc\s*)?(?:qtr|quarter)\b/i.test(trimmed)) {
+      const cleanQ = trimmed
+        .replace(/^svc\s*qtr\s*(?:no\.?\s*[:\-]?\s*)?/i, '')
+        .replace(/^qtr\s*(?:no\.?\s*[:\-]?\s*)?/i, '')
+        .replace(/^quarter\s*(?:no\.?\s*[:\-]?\s*)?/i, '')
+        .trim();
+      return cleanQ ? `Svc Qtr No: ${cleanQ}` : 'L/O';
+    }
+
+    // 3. Already contains Sgt's Mess / Airmen's Mess -> align Mess name with Rank
+    if (/(?:sgt'?s?|airmen'?s?)\s*mess/i.test(trimmed)) {
+      const blkMatch = trimmed.match(/block\s*(?:no\.?\s*[:\-]?\s*)?(.+)$/i);
+      const cleanBlk = blkMatch ? blkMatch[1].replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim() : '';
+      return cleanBlk ? `${messName}, Block No: ${cleanBlk}` : messName;
+    }
+
+    // 4. Plain L/I -> Living In (Mess only)
+    if (/^(?:l\s*\/\s*i|li|living\s*in|live\s*in)$/i.test(trimmed)) {
+      return messName;
+    }
+
+    // 5. Block/Room pattern like "12/23", "12/13", "B-12/23", "L/I 12/23", "Block 12/23" -> Living In
+    const blockSlashMatch = trimmed.match(
+      /^(?:(?:l\s*\/\s*i|living\s*in|live\s*in)\s*[-:,]?\s*)?(?:block\s*(?:no\.?\s*[:\-]?\s*)?)?([a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?)$/i
+    );
+    if (blockSlashMatch) {
+      const cleanBlk = blockSlashMatch[1].replace(/\s+/g, '').trim();
+      return `${messName}, Block No: ${cleanBlk}`;
+    }
+
+    // 6. Explicit "Block ..." prefix -> Living In
+    const explicitBlockMatch = trimmed.match(/^block\s*(?:no\.?\s*[:\-]?\s*)?(.+)$/i);
+    if (explicitBlockMatch) {
+      const cleanBlk = explicitBlockMatch[1].replace(/^[.\-\s]+|[.\-\s]+$/g, '').trim();
+      return cleanBlk ? `${messName}, Block No: ${cleanBlk}` : messName;
+    }
+
+    return trimmed;
+  };
+
+  const normalizeFlight = (raw: string): { flight: FlightName | ''; valid: boolean } => {
     const trimmed = raw.trim().toLowerCase();
+    if (!trimmed) return { flight: '', valid: true };
     if (trimmed.includes('avionic') || trimmed === 'avi') return { flight: 'Avionics', valid: true };
     if (trimmed.includes('mechanic') || trimmed === 'mech') return { flight: 'Mechanics', valid: true };
     if (trimmed.includes('gcs')) return { flight: 'GCS', valid: true };
     if (trimmed.includes('admin') || trimmed === 'adm') return { flight: 'Admin', valid: true };
-    return { flight: 'Admin', valid: false };
+    return { flight: '', valid: false };
   };
 
   const officeHasFlights = doesOfficeHaveFlights(existingAirmen);
@@ -130,14 +229,14 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
         }
       }
 
-      // Rank validation
+      // Rank validation (AC & AC-1 are both accepted as AC-1)
       const rankCheck = normalizeRank(row.rank);
       if (!rankCheck.valid) {
-        errors.push(`Invalid rank "${row.rank}". Allowed: MWO, SWO, WO, Sgt, Cpl, LAC, AC-1, AC-2`);
+        errors.push(`Invalid rank "${row.rank}". Allowed: MWO, SWO, WO, Sgt, Cpl, LAC, AC-1 (AC), AC-2`);
       }
 
-      // Flight validation (only for offices with flights)
-      if (officeHasFlights) {
+      // Flight validation: ONLY validate if a flight value was explicitly provided (never require or auto-add Flight)
+      if (row.flightName && row.flightName.trim()) {
         const flightCheck = normalizeFlight(row.flightName);
         if (!flightCheck.valid) {
           errors.push(`Invalid flight "${row.flightName}". Allowed: Avionics, Mechanics, GCS, Admin`);
@@ -152,7 +251,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
     });
   };
 
-  const processData = (data: any[][]) => {
+  const processData = (data: any[][], displayData?: any[][]) => {
     if (!data || data.length < 2) {
       alert('The file is empty or missing data rows.');
       return;
@@ -185,16 +284,24 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
     const postingDateIdx = findCol(['dt of posting', 'date of posting', 'posting date', 'joining date', 'date joined', 'যোগদানের তারিখ']);
     const remarksIdx = findCol(['remarks', 'remark', 'note', 'মন্তব্য']);
 
+    const fileHasFlightCol = flightIdx >= 0;
+    setHasFlightColumn(fileHasFlightCol);
+
     const parsed: ParsedAirmanRow[] = [];
 
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
+      const dispRow = displayData?.[i];
       if (!row || row.every((c) => c === null || c === undefined || String(c).trim() === '')) {
         continue;
       }
 
-      const getVal = (idx: number, fallback = '') => {
-        if (idx < 0 || row[idx] === undefined || row[idx] === null) return fallback;
+      const getVal = (idx: number, fallback = '', preferDisplay = false) => {
+        if (idx < 0) return fallback;
+        if (preferDisplay && dispRow && dispRow[idx] !== undefined && dispRow[idx] !== null && String(dispRow[idx]).trim() !== '') {
+          return String(dispRow[idx]).trim();
+        }
+        if (row[idx] === undefined || row[idx] === null) return fallback;
         const val = row[idx];
         if (val instanceof Date) {
           if (!isNaN(val.getTime())) {
@@ -207,7 +314,10 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
         return String(val).trim();
       };
 
-      const rawRank = getVal(rankIdx, 'LAC');
+      const rawRankStr = getVal(rankIdx, 'LAC');
+      const normalizedRankObj = normalizeRank(rawRankStr);
+      const effectiveRank = normalizedRankObj.valid ? normalizedRankObj.rank : rawRankStr;
+
       const rawFullName = getVal(fullNameIdx, '');
       const rawSurname = getVal(surnameIdx, '');
       const rawGenericName = getVal(genericNameIdx, '');
@@ -216,14 +326,22 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
       const effectiveSurname = rawSurname || rawGenericName || rawFullName;
       const effectiveFullName = rawFullName || rawGenericName || rawSurname;
 
-      let rawBd = getVal(bdIdx, '').replace(/^BD\/?/i, '').trim();
+      let rawBd = getVal(bdIdx, '', true).replace(/^BD\/?/i, '').trim();
       const rawTrade = getVal(tradeIdx, 'Afr Fitt');
-      const rawFlight = officeHasFlights ? getVal(flightIdx, 'Admin') : '';
+
+      // NEVER auto-add Flight if Excel file has NO Flight column or cell is blank
+      const rawFlightCell = fileHasFlightCol ? getVal(flightIdx, '') : '';
+      const normalizedFlightObj = rawFlightCell ? normalizeFlight(rawFlightCell) : { flight: '', valid: true };
+      const effectiveFlight = rawFlightCell
+        ? (normalizedFlightObj.valid ? normalizedFlightObj.flight : rawFlightCell)
+        : '';
+
       const rawBloodGroup = getVal(bloodGroupIdx, '');
-      const rawPresentAddress = getVal(presentAddressIdx, '');
+      const rawPresentAddress = getVal(presentAddressIdx, '', true);
+      const formattedPresentAddress = formatImportedAddress(rawPresentAddress, effectiveRank);
       const rawPermanentAddress = getVal(permanentAddressIdx, '');
       
-      let rawMobile = getVal(mobileIdx, '');
+      let rawMobile = getVal(mobileIdx, '', true);
       if (rawMobile.startsWith('="') && rawMobile.endsWith('"')) {
         rawMobile = rawMobile.slice(2, -1);
       } else if (rawMobile.startsWith('=')) {
@@ -248,14 +366,14 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
       parsed.push({
         id: `row-${i}-${Date.now()}`,
         seniority: numSeniority,
-        rank: rawRank,
+        rank: effectiveRank,
         fullName: effectiveFullName,
         name: effectiveSurname,
         bdNo: rawBd,
         trade: rawTrade,
-        flightName: rawFlight,
+        flightName: effectiveFlight,
         bloodGroup: rawBloodGroup,
-        addressBlock: rawPresentAddress,
+        addressBlock: formattedPresentAddress,
         permanentAddress: rawPermanentAddress,
         mobileNo: rawMobile,
         dateJoined: cleanPostingDate,
@@ -280,6 +398,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
     const ext = file.name.split('.').pop()?.toLowerCase();
 
     if (ext === 'csv') {
+      setSourceType('CSV');
       Papa.parse(file, {
         header: false,
         skipEmptyLines: true,
@@ -291,6 +410,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
         },
       });
     } else if (ext === 'xlsx' || ext === 'xls') {
+      setSourceType('EXCEL');
       const reader = new FileReader();
       reader.onload = (evt) => {
         try {
@@ -298,7 +418,8 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
           const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
           const firstSheet = wb.Sheets[wb.SheetNames[0]];
           const data = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as any[][];
-          processData(data);
+          const displayData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false }) as any[][];
+          processData(data, displayData);
         } catch (err: any) {
           alert(`Excel Read Error: ${err.message}`);
         }
@@ -331,6 +452,10 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
   const handleRowChange = (id: string, field: keyof ParsedAirmanRow, value: string) => {
     const updated = rows.map((r) => {
       if (r.id === id) {
+        if (field === 'rank') {
+          const nextAddress = formatImportedAddress(r.addressBlock, value);
+          return { ...r, rank: value, addressBlock: nextAddress };
+        }
         return { ...r, [field]: value };
       }
       return r;
@@ -382,12 +507,14 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
       );
     }
 
+    setSourceType('PASTE');
     setFileName('Direct Paste / Typed');
     processData(rawRows);
   };
 
   const totalErrors = rows.reduce((sum, r) => sum + r.errors.length, 0);
   const canImport = rows.length > 0 && totalErrors === 0 && !isImporting;
+  const showFlightCol = hasFlightColumn || rows.some((r) => Boolean(r.flightName && r.flightName.trim()));
 
   const handleImport = async () => {
     if (!canImport) return;
@@ -398,6 +525,7 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
         const rankObj = normalizeRank(r.rank);
         const flightObj = normalizeFlight(r.flightName);
         const cleanBd = r.bdNo.trim().replace(/^BD\/?/i, '').trim();
+        const finalAddress = formatImportedAddress(r.addressBlock, rankObj.rank);
         return {
           rank: rankObj.rank,
           seniority: isJcoRank(rankObj.rank) && r.seniority !== undefined ? r.seniority : undefined,
@@ -405,20 +533,32 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
           name: r.name.trim(),
           bdNo: cleanBd,
           trade: r.trade.trim() || 'Afr Fitt',
-          addressBlock: r.addressBlock.trim(),
+          addressBlock: finalAddress,
           permanentAddress: r.permanentAddress?.trim() || '',
           bloodGroup: r.bloodGroup?.trim() || '',
           dateJoined: r.dateJoined?.trim() || '',
           mobileNo: r.mobileNo.trim() || '01700000000',
-          flightName: officeHasFlights ? flightObj.flight : ('' as any),
+          flightName: (r.flightName.trim() ? flightObj.flight : '') as any,
           remarks: r.remarks.trim() || 'Bulk Imported',
           code: `${rankObj.rank}-${r.name.trim().slice(0, 3).toUpperCase()}`,
         };
       });
 
-      // Use localDb bulk add
-      localDb.bulkAddAirmen(airmenToImport);
+      const session = getCurrentUserSession();
+      const importedBy = session
+        ? `${session.rank || ''} ${session.name || session.bdNo || 'Admin'}`.trim()
+        : 'Admin';
 
+      // Use localDb bulk add with Biodata Import History metadata
+      localDb.bulkAddAirmen(airmenToImport, {
+        fileName: fileName || (sourceType === 'PASTE' ? 'Direct Paste / Typed' : 'Excel Import'),
+        sourceType,
+        importedBy,
+      });
+
+      setRows([]);
+      setFileName('');
+      setPasteText('');
       onImportComplete();
       onClose();
     } catch (err: any) {
@@ -615,7 +755,9 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Full Name</th>
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Surname</th>
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Trade</th>
-                        <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Flight</th>
+                        {showFlightCol && (
+                          <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Flight</th>
+                        )}
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Address</th>
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700">Mobile</th>
                         <th className="p-2.5 border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Dt of Posting</th>
@@ -697,19 +839,22 @@ export const BulkImportAirmenModal: React.FC<BulkImportAirmenModalProps> = ({
                                 className="w-28 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
                               />
                             </td>
-                            <td className="p-2">
-                              <select
-                                value={row.flightName}
-                                onChange={(e) => handleRowChange(row.id, 'flightName', e.target.value)}
-                                className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white"
-                              >
-                                {VALID_FLIGHTS.map((f) => (
-                                  <option key={f} value={f}>
-                                    {f}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
+                            {showFlightCol && (
+                              <td className="p-2">
+                                <select
+                                  value={row.flightName}
+                                  onChange={(e) => handleRowChange(row.id, 'flightName', e.target.value)}
+                                  className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white"
+                                >
+                                  <option value="">— None —</option>
+                                  {VALID_FLIGHTS.map((f) => (
+                                    <option key={f} value={f}>
+                                      {f}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                            )}
                             <td className="p-2">
                               <input
                                 type="text"

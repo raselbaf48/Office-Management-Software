@@ -18,6 +18,10 @@ import {
   exportFullSystemData,
 } from '../services/googleDriveService';
 import {
+  extractBackupOfficeMeta,
+  validateBackupMatchesActiveOffice,
+} from '../utils/backupOfficeScope';
+import {
   localDb,
   getSyncLogs,
   clearSyncLogs,
@@ -204,7 +208,12 @@ export const StandaloneBackupPage: React.FC<StandaloneBackupPageProps> = ({ onBa
         const parsed = JSON.parse(text);
 
         if (!parsed.baf_unit_data && !parsed.airmen && !parsed.canteen) {
-          throw new Error('Invalid backup file. No 155 UASU database data found in this file.');
+          throw new Error('Invalid backup file. No valid office database data found in this file.');
+        }
+
+        const officeValidation = validateBackupMatchesActiveOffice(parsed);
+        if (!officeValidation.ok) {
+          throw new Error(officeValidation.error || 'Office mismatch: cannot restore another office backup.');
         }
 
         setPendingRestoreData(parsed);
@@ -888,6 +897,15 @@ export const StandaloneBackupPage: React.FC<StandaloneBackupPageProps> = ({ onBa
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-900/80 rounded-2xl p-3.5 border border-slate-200 dark:border-slate-800 text-xs text-slate-700 dark:text-slate-300 space-y-1.5">
+                  <div className="flex justify-between py-1 border-b border-slate-200 dark:border-slate-800/80">
+                    <span className="text-slate-500 dark:text-slate-400">Backup Office:</span>
+                    <strong className="text-emerald-600 dark:text-emerald-400 font-mono">
+                      {(() => {
+                        const meta = extractBackupOfficeMeta(pendingRestoreData);
+                        return meta.officeName ? `${meta.officeName} (${meta.officeCode})` : 'Current Office';
+                      })()}
+                    </strong>
+                  </div>
                   <div className="flex justify-between py-1 border-b border-slate-200 dark:border-slate-800/80">
                     <span className="text-slate-500 dark:text-slate-400">Airmen Count:</span>
                     <strong className="text-slate-900 dark:text-white font-mono">

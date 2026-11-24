@@ -667,7 +667,7 @@ async function startServer() {
     if (fs.existsSync(fallbackPath)) {
       return res.sendFile(fallbackPath);
     }
-    return res.redirect('/pwa-512x512-trans.png?v=25');
+    return res.redirect('/pwa-512x512-trans.png?v=26');
   };
 
   app.get('/api/pwa-icon/:hash/:file', (req, res) => {
@@ -680,7 +680,7 @@ async function startServer() {
           : '512';
       return sendActiveOrFallbackPwaIcon(res, sizeType, hash);
     } catch {
-      return res.redirect('/pwa-512x512-trans.png?v=25');
+      return res.redirect('/pwa-512x512-trans.png?v=26');
     }
   });
 
@@ -730,10 +730,10 @@ async function startServer() {
         ? `${appName} — ${rawSlogan}`
         : `Official PWA for ${appName} duty register, parade state, and personnel management.`;
 
-      const icon192Url = '/pwa-192x192-trans.png?v=25';
-      const icon512Url = '/pwa-512x512-trans.png?v=25';
-      const maskable192Url = '/pwa-192x192-full.png?v=25';
-      const maskable512Url = '/pwa-512x512-full.png?v=25';
+      const icon192Url = '/pwa-192x192-trans.png?v=26';
+      const icon512Url = '/pwa-512x512-trans.png?v=26';
+      const maskable192Url = '/pwa-192x192-full.png?v=26';
+      const maskable512Url = '/pwa-512x512-full.png?v=26';
 
       const officeQuery = rawCode && !is155Office ? `?office=${encodeURIComponent(rawCode)}` : '';
 

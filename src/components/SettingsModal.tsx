@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import { getOfficeBackupFilePrefix, validateBackupMatchesActiveOffice } from '../utils/backupOfficeScope';
 import { getAppConfig, saveAppConfig, AppConfig, getAppConfigHistory, addAppConfigHistory, AppConfigHistoryItem, updateAppConfigHistoryItemActiveStatus, deleteAppConfigHistoryItem, clearAppConfigHistory } from '../utils/appConfig';
 import { Megaphone, Wrench, Clock, Trash2 as TrashIcon, Power, PowerOff } from 'lucide-react';
 
@@ -145,7 +146,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const { themePreference, setThemePreference } = useGlobalTheme();
   const [activeSection, setActiveSection] = useState<SettingSection | null>(null);
   const [appManagementTab, setAppManagementTab] = useState<'notice' | 'maintenance'>('notice');
-  const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
 
   // Office Profile State
   const initialIdentity = getActiveOfficeIdentity();
@@ -801,15 +801,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
          URL.revokeObjectURL(url);
       };
 
+      const officePrefix = getOfficeBackupFilePrefix();
       // Export Airmen
       if (backupData.airmen && backupData.airmen.length > 0) {
-         downloadFile(Papa.unparse(backupData.airmen), `155_UASU_Airmen_${new Date().toISOString().split('T')[0]}.csv`);
+         downloadFile(Papa.unparse(backupData.airmen), `${officePrefix}_Airmen_${new Date().toISOString().split('T')[0]}.csv`);
       }
       
       // Export Users
       const usersToExport = backupData.detailedUsers || (localDb as any).db.detailedUsers;
       if (usersToExport && usersToExport.length > 0) {
-         downloadFile(Papa.unparse(usersToExport), `155_UASU_Users_${new Date().toISOString().split('T')[0]}.csv`);
+         downloadFile(Papa.unparse(usersToExport), `${officePrefix}_Users_${new Date().toISOString().split('T')[0]}.csv`);
       }
 
       // Export Assignments
@@ -819,7 +820,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
          assignmentsObj[month].forEach((a: any) => allAssignments.push({ month, ...a }));
       }
       if (allAssignments.length > 0) {
-         downloadFile(Papa.unparse(allAssignments), `155_UASU_Assignments_${new Date().toISOString().split('T')[0]}.csv`);
+         downloadFile(Papa.unparse(allAssignments), `${officePrefix}_Assignments_${new Date().toISOString().split('T')[0]}.csv`);
       }
       
     } catch (err: any) {
@@ -833,6 +834,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleDownloadBackup = async () => {
     setIsBackingUp(true);
     try {
+      const officePrefix = getOfficeBackupFilePrefix();
       const backupData = await localDb.exportDatabase();
       const backupJson = typeof backupData === 'string' ? backupData : JSON.stringify(backupData, null, 2);
       const blob = new Blob([backupJson], { type: 'application/json' });
@@ -840,7 +842,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       
       const a = document.createElement('a');
       a.href = url;
-      a.download = `155_UASU_Backup_${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `${officePrefix}_Backup_${new Date().toISOString().split('T')[0]}.json`;
       document.body.appendChild(a);
       a.click();
       
@@ -940,6 +942,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }
         }
 
+        const officeValidation = validateBackupMatchesActiveOffice(backupData);
+        if (!officeValidation.ok) {
+          throw new Error(officeValidation.error || 'Office mismatch: cannot restore another office backup.');
+        }
+
         setRestoreStatus('Importing backup to local database...');
         
         const success = await localDb.restoreDatabase(backupData);
@@ -965,28 +972,109 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     reader.readAsText(file);
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (pendingRestoreFile || deleteConfirmId || clearAllConfirmType || isDriveModalOpen) return;
+      if (activeSection) {
+        setActiveSection(null);
+      } else {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, activeSection, pendingRestoreFile, deleteConfirmId, clearAllConfirmType, isDriveModalOpen, onClose]);
+
   if (!isOpen) return null;
 
-  const sections = [
-    { id: 'officeProfile', label: 'Office Profile', icon: <Building2 className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' },
-    { id: 'appTheme', label: 'App Theme', icon: <Palette className="w-5 h-5" />, color: 'text-indigo-500 bg-indigo-100 dark:bg-indigo-950 dark:text-indigo-400' },
-    ...(isRunningInApk() ? [{ id: 'appUpdate', label: 'In-App Update (APK)', icon: <Download className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' }] : []),
-    ...(isAdminRole ? [{ id: 'cloudsync', label: 'Database Cloud Sync & Invite', icon: <Cloud className="w-5 h-5" />, color: 'text-blue-500 bg-blue-100 dark:bg-blue-950 dark:text-blue-400' }] : []),
-    ...(isAdminRole ? [
-      { id: 'appNotice', label: 'App Notice', icon: <Megaphone className="w-5 h-5" />, color: 'text-orange-500 bg-orange-100 dark:bg-orange-950 dark:text-orange-400' }
-    ] : []),
-    ...(isAdminRole ? [{ id: 'users', label: 'User Management', icon: <ShieldCheck className="w-5 h-5" />, color: 'text-purple-500 bg-purple-100 dark:bg-purple-950 dark:text-purple-400' }] : []),
-    { id: 'security', label: 'Security & Passcode', icon: <Lock className="w-5 h-5" />, color: 'text-amber-500 bg-amber-100 dark:bg-amber-950 dark:text-amber-400' },
-    ...(isAdminRole ? [{ id: 'database', label: 'Backup & Restore', icon: <Database className="w-5 h-5" />, color: 'text-emerald-500 bg-emerald-100 dark:bg-emerald-950 dark:text-emerald-400' }] : []),
-    ...(isAdminRole ? [{ id: 'history', label: 'Login History', icon: <History className="w-5 h-5" />, color: 'text-sky-500 bg-sky-100 dark:bg-sky-950 dark:text-sky-400' }] : []),
+  const sections: Array<{
+    id: SettingSection;
+    label: string;
+    description: string;
+    icon: React.ReactNode;
+    color: string;
+  }> = [
+    {
+      id: 'officeProfile',
+      label: 'Office Profile',
+      description: 'Unit name, crest logo, slogan & base details',
+      icon: <Building2 className="w-5 h-5" />,
+      color: 'text-emerald-600 bg-emerald-100 dark:bg-emerald-950/80 dark:text-emerald-400',
+    },
+    {
+      id: 'appTheme',
+      label: 'App Theme',
+      description: 'Switch between System, Light & Dark appearance',
+      icon: <Palette className="w-5 h-5" />,
+      color: 'text-indigo-600 bg-indigo-100 dark:bg-indigo-950/80 dark:text-indigo-400',
+    },
+    ...(isRunningInApk()
+      ? [{
+          id: 'appUpdate' as SettingSection,
+          label: 'In-App Update (APK)',
+          description: 'Check & install the latest Android app build',
+          icon: <Download className="w-5 h-5" />,
+          color: 'text-emerald-600 bg-emerald-100 dark:bg-emerald-950/80 dark:text-emerald-400',
+        }]
+      : []),
+    ...(isAdminRole
+      ? [{
+          id: 'cloudsync' as SettingSection,
+          label: 'Database Cloud Sync & Invite',
+          description: 'Firebase sync status, cloud mirror & device invite link',
+          icon: <Cloud className="w-5 h-5" />,
+          color: 'text-blue-600 bg-blue-100 dark:bg-blue-950/80 dark:text-blue-400',
+        }]
+      : []),
+    ...(isAdminRole
+      ? [{
+          id: 'appNotice' as SettingSection,
+          label: 'App Notice',
+          description: 'Publish live broadcast notices or maintenance alerts',
+          icon: <Megaphone className="w-5 h-5" />,
+          color: 'text-orange-600 bg-orange-100 dark:bg-orange-950/80 dark:text-orange-400',
+        }]
+      : []),
+    ...(isAdminRole
+      ? [{
+          id: 'users' as SettingSection,
+          label: 'User Management',
+          description: 'Manage accounts, roles, permissions & PIN resets',
+          icon: <ShieldCheck className="w-5 h-5" />,
+          color: 'text-purple-600 bg-purple-100 dark:bg-purple-950/80 dark:text-purple-400',
+        }]
+      : []),
+    {
+      id: 'security',
+      label: 'Security & Passcode',
+      description: 'Update your login PIN and account security controls',
+      icon: <Lock className="w-5 h-5" />,
+      color: 'text-amber-600 bg-amber-100 dark:bg-amber-950/80 dark:text-amber-400',
+    },
+    ...(isAdminRole
+      ? [{
+          id: 'database' as SettingSection,
+          label: 'Backup & Restore',
+          description: 'Office-isolated JSON/CSV backups & Google Drive sync',
+          icon: <Database className="w-5 h-5" />,
+          color: 'text-teal-600 bg-teal-100 dark:bg-teal-950/80 dark:text-teal-400',
+        }]
+      : []),
+    ...(isAdminRole
+      ? [{
+          id: 'history' as SettingSection,
+          label: 'Login History',
+          description: 'Active sessions and recent user login activity logs',
+          icon: <History className="w-5 h-5" />,
+          color: 'text-sky-600 bg-sky-100 dark:bg-sky-950/80 dark:text-sky-400',
+        }]
+      : []),
   ];
 
-  const defaultSection = (sections[0]?.id as SettingSection) || 'officeProfile';
-  const displayedSection = activeSection || defaultSection;
-
-  const getSectionTitle = (id: SettingSection) => {
-    return sections.find(s => s.id === id)?.label || 'Settings';
-  };
+  const displayedSection = activeSection;
+  const activeSectionMeta = activeSection ? sections.find(s => s.id === activeSection) : null;
 
   const handleDeleteHistoryItem = (item: any) => {
     const updated = appConfigHistory.filter(h => h.id !== item.id);
@@ -1023,77 +1111,107 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
       )}
-      {/* Responsive Layout: Sidebar + Detail Pane on desktop, Single View on mobile */}
-      <div className="w-full max-w-4xl h-full sm:h-[85vh] bg-white dark:bg-[#1e293b] border-0 sm:border border-slate-200 dark:border-slate-700 sm:rounded-3xl shadow-2xl flex flex-col sm:flex-row overflow-hidden relative">
-        
-        {/* Menu View (Shown when no activeSection on mobile, always shown in sidebar on desktop) */}
-        <div className={`w-full sm:w-72 h-full bg-slate-50 dark:bg-slate-900 flex-col shrink-0 sm:border-r border-slate-200 dark:border-slate-700/60 ${!activeSection ? 'flex' : 'hidden sm:flex'}`}>
-          <div className="p-6 pb-2 flex items-center justify-between">
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <Settings className="w-6 h-6 text-emerald-500" />
-              Settings
-            </h2>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 transition-colors cursor-pointer sm:hidden"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-          <div className="flex-col overflow-y-auto flex-1 px-3 pb-4 sm:pb-6 gap-1 mt-3 scrollbar-hide">
-            {sections.map(sec => {
-              const isCurrent = displayedSection === sec.id;
-              return (
-                <button
-                  key={sec.id}
-                  onClick={() => {
-                    if (sec.id === 'users' && onOpenUserManagement) {
-                      onOpenUserManagement();
-                    } else {
-                      setActiveSection(sec.id as SettingSection);
-                    }
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-2xl transition-all cursor-pointer text-left mb-1.5 border font-semibold text-sm active:scale-[0.99] touch-manipulation ${
-                    isCurrent
-                      ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border-indigo-500/40 shadow-sm'
-                      : 'bg-white dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-700/60'
-                  }`}
-                >
-                  <div className={isCurrent ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'}>
-                    {sec.icon}
-                  </div>
-                  <span className="text-sm flex-1 truncate">{sec.label}</span>
-                  <ChevronRight className={`w-4 h-4 transition-transform ${isCurrent ? 'text-indigo-500 translate-x-0.5' : 'text-slate-400'}`} />
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Detail View (Shown when an activeSection is selected on mobile, always shown on desktop) */}
-        <div className={`flex-1 w-full h-full bg-white dark:bg-[#1e293b] flex-col relative overflow-hidden ${!activeSection ? 'hidden sm:flex' : 'flex'}`}>
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 sm:px-8 py-4 sm:py-5 border-b border-slate-200 dark:border-slate-700/50 bg-white dark:bg-[#1e293b]">
-            <div className="flex items-center gap-3">
-              <button 
-                onClick={() => setActiveSection(null)}
-                className="p-2 -ml-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 transition-colors sm:hidden cursor-pointer"
-                title="Back to Settings list"
+      {/* Two-step Single-Surface Settings Container (Options Hub -> Dedicated Option Interface) */}
+      <div className="w-full max-w-4xl h-full sm:h-[85vh] bg-white dark:bg-[#1e293b] border-0 sm:border border-slate-200 dark:border-slate-700 sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
+        {!activeSection ? (
+          /* Step 1: Settings Options Hub */
+          <div className="flex-1 w-full h-full flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-900">
+            <div className="flex items-center justify-between px-5 sm:px-8 py-4 sm:py-5 border-b border-slate-200 dark:border-slate-700/60 bg-white dark:bg-[#1e293b] shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                  <Settings className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white leading-tight">
+                    Settings
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    {profileUnitName ? `${profileUnitName} • Choose an option to configure` : 'Choose an option to configure'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={onClose}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer shrink-0"
+                title="Close Settings"
               >
-                <ArrowLeft className="w-5 h-5" />
+                <X className="w-5 h-5" />
               </button>
-              <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                {getSectionTitle(displayedSection)}
-              </h3>
             </div>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer"
-              title="Close Settings"
-            >
-              <X className="w-5 h-5" />
-            </button>
+
+            <div className="flex-1 overflow-y-auto p-4 sm:p-7">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 max-w-3xl mx-auto">
+                {sections.map(sec => (
+                  <button
+                    key={sec.id}
+                    type="button"
+                    onClick={() => {
+                      if (sec.id === 'users' && onOpenUserManagement) {
+                        onOpenUserManagement();
+                      } else {
+                        setActiveSection(sec.id);
+                      }
+                    }}
+                    className="group w-full flex items-center gap-4 p-4 rounded-2xl bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-slate-800/90 border border-slate-200/90 dark:border-slate-700/70 hover:border-emerald-400/70 dark:hover:border-emerald-500/50 shadow-sm hover:shadow-md transition-all duration-150 cursor-pointer text-left active:scale-[0.99] touch-manipulation"
+                  >
+                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${sec.color}`}>
+                      {sec.icon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm sm:text-[15px] font-bold text-slate-900 dark:text-white truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
+                        {sec.label}
+                      </div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400 line-clamp-1 mt-0.5">
+                        {sec.description}
+                      </div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all shrink-0" />
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
+        ) : (
+          /* Step 2: Dedicated Full-Width Interface for the Selected Option */
+          <div className="flex-1 w-full h-full bg-white dark:bg-[#1e293b] flex flex-col relative overflow-hidden">
+            {/* Header with always-visible Back button */}
+            <div className="flex items-center justify-between gap-3 px-4 sm:px-7 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-700/60 bg-white dark:bg-[#1e293b] shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveSection(null)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs sm:text-sm transition-colors cursor-pointer shrink-0 active:scale-[0.98]"
+                  title="Back to Settings options"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Back</span>
+                </button>
+                <div className="h-6 w-px bg-slate-200 dark:bg-slate-700 shrink-0 hidden sm:block" />
+                {activeSectionMeta && (
+                  <div className={`w-9 h-9 rounded-xl hidden sm:flex items-center justify-center shrink-0 ${activeSectionMeta.color}`}>
+                    {activeSectionMeta.icon}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white truncate leading-tight">
+                    {activeSectionMeta?.label || 'Settings'}
+                  </h3>
+                  {activeSectionMeta?.description && (
+                    <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 truncate hidden sm:block">
+                      {activeSectionMeta.description}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer shrink-0"
+                title="Close Settings"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
           {/* Main Content Area */}
           <div className="flex-1 h-full overflow-hidden flex flex-col bg-white dark:bg-[#1e293b]">
@@ -2355,6 +2473,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     )}
   </div>
 </div>
+        )}
         {/* Modals */}
         
         {/* Delete Single History Item Confirmation Modal */}

@@ -10,6 +10,7 @@ import {
   DriveSyncStatus,
   exportFullSystemData,
 } from '../services/googleDriveService';
+import { validateBackupMatchesActiveOffice } from '../utils/backupOfficeScope';
 
 interface GoogleDriveBackupModalProps {
   isOpen: boolean;
@@ -138,6 +139,10 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
 
     try {
       const backup = await fetchBackupFromDrive();
+      const officeValidation = validateBackupMatchesActiveOffice(backup?.content);
+      if (!officeValidation.ok) {
+        throw new Error(officeValidation.error || 'Office mismatch: cannot restore another office backup.');
+      }
       setPendingRestoreData(backup);
       setShowRestoreConfirm(true);
     } catch (err: any) {

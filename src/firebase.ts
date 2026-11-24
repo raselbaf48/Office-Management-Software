@@ -199,17 +199,17 @@ export interface RegisteredOfficeRecord {
 export type CustomFirebaseConfig = OfficeFirebaseConfig;
 export type RegisteredOfficeTelemetry = RegisteredOfficeRecord;
 
-export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=25';
+export const DEFAULT_APP_LOGO = '/office-management-logo.png?v=26';
 export const DEFAULT_APP_TITLE = 'Office Management Application';
 
 export function normalizeOfficeLogoUrl(rawLogo?: string, is155: boolean = false): string {
   const s = String(rawLogo || '').trim();
-  if (!s) return is155 ? '/155-uasu-baf-logo.png' : DEFAULT_APP_LOGO;
+  if (!s) return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_APP_LOGO;
   if (s.includes('155-uasu-baf-logo')) {
-    return '/155-uasu-baf-logo.png';
+    return '/155-uasu-baf-logo.png?v=26';
   }
   if (s.includes('office-management-logo') || s.includes('/baf-logo') || s.includes('BAF Logo')) {
-    return is155 ? '/155-uasu-baf-logo.png' : DEFAULT_APP_LOGO;
+    return is155 ? '/155-uasu-baf-logo.png?v=26' : DEFAULT_APP_LOGO;
   }
   return s;
 }
@@ -230,10 +230,10 @@ export function syncBrowserTabIdentity(
     if (!hasActiveSession) {
       document.title = DEFAULT_APP_TITLE;
       const loginLogo = String(officeLogo || '').trim() || DEFAULT_APP_LOGO;
-      applyBrowserFaviconToHead(loginLogo, loginLogo);
+      applyBrowserFaviconToHead(loginLogo, loginLogo, loginLogo);
       void generateSizedPwaIcons(loginLogo).then((sized) => {
         if (!window.sessionStorage?.getItem('baf_user_session')) {
-          applyBrowserFaviconToHead(sized.icon192, sized.icon512);
+          applyBrowserFaviconToHead(sized.icon192, sized.icon512, sized.icon32);
         }
       });
       return;
@@ -269,7 +269,7 @@ export function syncBrowserTabIdentity(
         ? `${cleanName} | ${DEFAULT_APP_TITLE}`
         : DEFAULT_APP_TITLE;
 
-    applyBrowserFaviconToHead(cleanLogo, cleanLogo);
+    applyBrowserFaviconToHead(cleanLogo, cleanLogo, cleanLogo);
 
     void syncDynamicOfficePwaManifest({
       officeName: cleanName,

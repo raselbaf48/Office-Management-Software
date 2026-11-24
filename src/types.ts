@@ -266,6 +266,25 @@ export interface ImportHistoryBatch {
   }>;
 }
 
+export interface BiodataImportBatch {
+  id: string;
+  timestamp: string;
+  fileName: string;
+  sourceType: 'EXCEL' | 'CSV' | 'PASTE';
+  importedBy?: string;
+  airmenCount: number;
+  airmenIds: string[];
+  airmenSummary: Array<{
+    id: string;
+    bdNo: string;
+    rank: string;
+    name: string;
+    fullName?: string;
+    trade?: string;
+    flightName?: string;
+  }>;
+}
+
 export type UserLoginRole = 'OWNER' | 'SUPER_ADMIN' | 'ADMIN' | 'USER' | 'master_owner';
 export type UserLoginStatus = 'ACTIVE' | 'SUSPENDED' | 'DISABLED';
 

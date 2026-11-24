@@ -121,7 +121,7 @@ export default function App() {
       const activeId = getActiveOfficeIdentity();
       syncBrowserTabIdentity(activeId.officeName, activeId.officeLogo, activeId.officeBase);
     } else {
-      syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
+      syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
     }
   }, [userSession, officeIdentity]);
 
@@ -345,7 +345,7 @@ export default function App() {
     setJustLoggedIn(false);
     handleRoleChange('USER');
     setLastUsedPortal('Office');
-    syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
   };
 
   

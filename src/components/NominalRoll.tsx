@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { Airman, FlightName, Rank, UserRole } from '../types';
 import { Search, UserPlus, Edit3, Trash2, Filter, Phone, MapPin, Shield, CheckCircle, RefreshCw, Printer, FileDown, FileSpreadsheet, Upload, KeyRound, UserCheck, AlertTriangle, Calendar, User } from 'lucide-react';
 import { handleSafePrint } from "../utils/printUtils";
-import { sortAirmenBySeniority } from '../utils/seniority';
+import { sortAirmenBySeniority, getCanonicalRankKey } from '../utils/seniority';
 import { PrintableNominalRollModal } from './PrintableNominalRollModal';
 import { exportNominalRollDocx } from '../utils/docxExport';
 import { BulkImportAirmenModal } from './BulkImportAirmenModal';
+import { BiodataImportHistoryModal } from './BiodataImportHistoryModal';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { History } from 'lucide-react';
 import { localDb } from '../services/localDatabase';
@@ -50,9 +51,11 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
+  const [isBiodataImportHistoryOpen, setIsBiodataImportHistoryOpen] = useState(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const biodataImportHistoryCount = variant === 'biodata' ? localDb.getBiodataImportHistory().length : 0;
   
 
   const [airmanToDelete, setAirmanToDelete] = useState<Airman | null>(null);
@@ -112,7 +115,10 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
     
     const matchesFlight = !officeHasFlights || flightFilter === '' ? true : (flightFilter === 'All' || airman.flightName === flightFilter);
     const matchesTrade = tradeFilter === '' || tradeFilter === 'All' ? true : airman.trade === tradeFilter;
-    const matchesRank = rankFilter === '' ? true : (rankFilter === 'All' || airman.rank === rankFilter);
+    const matchesRank =
+      rankFilter === '' || rankFilter === 'All'
+        ? true
+        : getCanonicalRankKey(airman.rank) === getCanonicalRankKey(rankFilter);
     const q = search.toLowerCase();
     const matchesSearch =
       (airman.fullName || '').toLowerCase().includes(q) ||
@@ -158,15 +164,32 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
           </button>
 
           {variant === 'biodata' && (
-            <button
-              type="button"
-              onClick={() => setIsBulkImportOpen(true)}
-              className="flex items-center space-x-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl font-bold text-xs shadow-xs transition-colors cursor-pointer"
-              title="Import Airmen via Excel (.xlsx)"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Import</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setIsBulkImportOpen(true)}
+                className="flex items-center space-x-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl font-bold text-xs shadow-xs transition-colors cursor-pointer"
+                title="Import Airmen via Excel (.xlsx)"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Import</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsBiodataImportHistoryOpen(true)}
+                className="flex items-center space-x-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-xl font-bold text-xs shadow-xs transition-colors cursor-pointer border border-emerald-500/30"
+                title="View Biodata Excel Import History & Remove Mistaken Imports"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                <span>Import History</span>
+                {biodataImportHistoryCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    {biodataImportHistoryCount}
+                  </span>
+                )}
+              </button>
+            </>
           )}
 
           <button
@@ -346,7 +369,7 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                             return initMatch?.fullName || fn || airman.name;
                           })()}
                         </span>
-                        {(!airman.bdNo?.trim() || !airman.rank?.trim() || !airman.name?.trim() || !airman.trade?.trim() || ['General Tech', '-', 'N/A'].includes(airman.trade) || !airman.addressBlock?.trim() || ['-', 'N/A', 'L/O', 'L/I', "Live Out", "Live In"].includes(airman.addressBlock) || !airman.mobileNo?.trim() || ['01', '01700000000', '-'].includes(airman.mobileNo)) && (
+                        {(!airman.bdNo?.trim() || !airman.rank?.trim() || !airman.name?.trim() || !airman.trade?.trim() || ['General Tech', '-', 'N/A'].includes(airman.trade) || !airman.addressBlock?.trim() || ['-', 'N/A', 'L/I', 'Live In'].includes(airman.addressBlock) || !airman.mobileNo?.trim() || ['01', '01700000000', '-'].includes(airman.mobileNo)) && (
                           <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" title="Missing or incomplete information (Trade, Address, or Mobile). Click to update." />
                         )}
                       </div>
@@ -370,16 +393,27 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
                   </td>
                   {officeHasFlights && (
                     <td className="py-3 px-4">
-                      <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                        {(() => {
-                          const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
-                          if (fl && fl.trim()) return fl;
-                          const initMatch = isDefault155UasuOffice()
-                            ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
-                            : undefined;
-                          return initMatch?.flightName || 'Admin';
-                        })()}
-                      </span>
+                      {(() => {
+                        const fl = airman.flightName || (airman as any).flight || (airman as any).Flight;
+                        if (fl && String(fl).trim()) {
+                          return (
+                            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                              {fl}
+                            </span>
+                          );
+                        }
+                        const initMatch = isDefault155UasuOffice()
+                          ? INITIAL_AIRMEN.find(i => (i.bdNo && i.bdNo === airman.bdNo) || (i.id && i.id === airman.id))
+                          : undefined;
+                        if (initMatch?.flightName) {
+                          return (
+                            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                              {initMatch.flightName}
+                            </span>
+                          );
+                        }
+                        return <span className="text-slate-400 dark:text-slate-500 font-mono">-</span>;
+                      })()}
                     </td>
                   )}
                   {variant === 'biodata' && (
@@ -665,6 +699,17 @@ export const NominalRoll: React.FC<NominalRollProps> = ({
         onClose={() => setIsBulkImportOpen(false)}
         existingAirmen={airmen}
         onImportComplete={() => {
+          onRefresh();
+          window.dispatchEvent(new CustomEvent('baf_state_updated'));
+        }}
+      />
+
+      {/* Biodata Register Import History Modal */}
+      <BiodataImportHistoryModal
+        isOpen={isBiodataImportHistoryOpen}
+        onClose={() => setIsBiodataImportHistoryOpen(false)}
+        currentAirmen={airmen}
+        onDataChanged={() => {
           onRefresh();
           window.dispatchEvent(new CustomEvent('baf_state_updated'));
         }}

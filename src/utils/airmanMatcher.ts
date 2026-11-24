@@ -16,8 +16,8 @@ export function detectRankFromText(rawText: string): string | null {
   if (/\b(?:sgt|sergeant)\b/i.test(lower)) return 'Sgt';
   if (/\b(?:cpl|corporal)\b/i.test(lower)) return 'Cpl';
   if (/\b(?:lac|leading\s*aircraftman|l\s*a\s*c)\b/i.test(lower)) return 'LAC';
-  if (/\b(?:ac-1|ac 1|ac1)\b/i.test(lower)) return 'AC-1';
-  if (/\b(?:ac-2|ac 2|ac2|ac|aircraftman|a\s*c)\b/i.test(lower)) return 'AC-2';
+  if (/\b(?:ac-2|ac 2|ac2|ac-ii)\b/i.test(lower)) return 'AC-2';
+  if (/\b(?:ac-1|ac 1|ac1|ac-i|ac|aircraftman|a\s*c)\b/i.test(lower)) return 'AC-1';
 
   return null;
 }
@@ -52,8 +52,8 @@ function normalizeRank(rank: string): string {
   if (r === 'SGT' || r === 'SERGEANT') return 'Sgt';
   if (r === 'CPL' || r === 'CORPORAL') return 'Cpl';
   if (r === 'LAC' || r === 'LEADINGAIR') return 'LAC';
-  if (r === 'AC-1' || r === 'AC1') return 'AC-1';
-  if (r === 'AC-2' || r === 'AC2' || r === 'AC' || r === 'AIRCRAFTMA') return 'AC-2';
+  if (r === 'AC-2' || r === 'AC2' || r === 'AC-II') return 'AC-2';
+  if (r === 'AC-1' || r === 'AC1' || r === 'AC-I' || r === 'AC' || r === 'AIRCRAFTMA') return 'AC-1';
   return r;
 }
 

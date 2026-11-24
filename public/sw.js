@@ -1,3 +1,4 @@
+const PWA_SW_VERSION = 'v26';
 let activeOfficePwaData = null;
 
 function dataUrlToUint8Array(dataUrl) {

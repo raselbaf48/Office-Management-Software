@@ -56,17 +56,18 @@ export const Logo155UASU: React.FC<LogoProps> = ({
     return className;
   };
 
-  const rawLogoSrc = logoOverride || identity.officeLogo || '/155-uasu-baf-logo.png';
+  const rawLogoSrc = logoOverride || identity.officeLogo || '/155-uasu-baf-logo.png?v=26';
   const normalizedLogoSrc =
-    !rawLogoSrc.includes('155-uasu-baf-logo') &&
-    (rawLogoSrc.includes('office-management-logo') ||
-      rawLogoSrc.includes('/baf-logo') ||
-      rawLogoSrc.includes('BAF Logo'))
-      ? '/office-management-logo.png?v=25'
-      : rawLogoSrc;
+    rawLogoSrc.includes('155-uasu-baf-logo')
+      ? '/155-uasu-baf-logo.png?v=26'
+      : rawLogoSrc.includes('office-management-logo') ||
+          rawLogoSrc.includes('/baf-logo') ||
+          rawLogoSrc.includes('BAF Logo')
+        ? '/office-management-logo.png?v=26'
+        : rawLogoSrc;
 
   const activeLogoSrc = imgError
-    ? '/office-management-logo.png?v=25'
+    ? '/office-management-logo.png?v=26'
     : normalizedLogoSrc;
 
   return (

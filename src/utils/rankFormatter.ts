@@ -16,13 +16,17 @@ export const formatRank = (rank?: string): string => {
   if (upper === 'SGT' || upper === 'SERGEANT') return 'Sgt';
   if (upper === 'CPL' || upper === 'CORPORAL') return 'Cpl';
 
-  // 2. AC-1 and AC-2 normalization to block capital with hyphen
+  // 2. AC / AC-1 and AC-2 normalization to block capital with hyphen (AC & AC-1 are the same rank)
   if (
+    upper === 'AC' ||
     upper === 'AC-1' ||
     upper === 'AC1' ||
     upper === 'AC 1' ||
     upper === 'AC-I' ||
     upper === 'AC_1' ||
+    upper === 'AC.1' ||
+    upper === 'AIRCRAFTMAN' ||
+    upper === 'AIRCRAFTMAN 1' ||
     upper.startsWith('AC-1')
   ) {
     return 'AC-1';

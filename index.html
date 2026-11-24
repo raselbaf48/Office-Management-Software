@@ -13,15 +13,17 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Noto+Serif+Bengali:wght@400;500;600;700;800;900&family=Tiro+Bangla:ital@0;1&display=swap" rel="stylesheet" crossorigin="anonymous">
-    <link id="pwa-icon-192" rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192-trans.png?v=25" />
-    <link id="pwa-icon-512" rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512-trans.png?v=25" />
-    <link id="pwa-apple-icon" rel="apple-touch-icon" sizes="192x192" href="/pwa-192x192-trans.png?v=25" />
-    <link id="pwa-manifest-link" rel="manifest" href="/api/pwa-manifest?v=25" />
+    <link id="pwa-icon-32" rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=26" />
+    <link id="pwa-icon-48" rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png?v=26" />
+    <link id="pwa-icon-192" rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192-trans.png?v=26" />
+    <link id="pwa-icon-512" rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512-trans.png?v=26" />
+    <link id="pwa-apple-icon" rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=26" />
+    <link id="pwa-manifest-link" rel="manifest" href="/api/pwa-manifest?v=26" />
     <script>
       (function () {
         try {
           if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js?v=25').catch(function () {});
+            navigator.serviceWorker.register('/sw.js?v=26').catch(function () {});
           }
           var hasSession = false;
           try {
@@ -29,7 +31,7 @@
           } catch (e) {}
 
           var officeName = '155 UASU BAF';
-          var officeLogo = hasSession ? '/155-uasu-baf-logo.png' : '/office-management-logo.png?v=25';
+          var officeLogo = hasSession ? '/155-uasu-baf-logo.png?v=26' : '/office-management-logo.png?v=26';
           var rawCfg = localStorage.getItem('custom_office_config') || localStorage.getItem('baf_custom_office_config');
           if (rawCfg) {
             var cfg = JSON.parse(rawCfg);
@@ -50,15 +52,19 @@
               officeLogo = String(meta.rawLogo).trim();
             }
           }
-          var shortName = officeName.length > 25 ? officeName.slice(0, 25).trim() : officeName;
+          var shortName = officeName.length > 12 ? officeName.slice(0, 12).trim() : officeName;
           var manifestEl = document.getElementById('pwa-manifest-link');
           if (manifestEl) {
-            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=25';
+            var q = 'name=' + encodeURIComponent(officeName) + '&short_name=' + encodeURIComponent(shortName) + '&v=26';
             manifestEl.setAttribute('href', '/api/pwa-manifest?' + q);
           }
+          var el32 = document.getElementById('pwa-icon-32');
+          var el48 = document.getElementById('pwa-icon-48');
           var el192 = document.getElementById('pwa-icon-192');
           var el512 = document.getElementById('pwa-icon-512');
           var elApple = document.getElementById('pwa-apple-icon');
+          if (el32) el32.setAttribute('href', officeLogo);
+          if (el48) el48.setAttribute('href', officeLogo);
           if (el192) el192.setAttribute('href', officeLogo);
           if (el512) el512.setAttribute('href', officeLogo);
           if (elApple) elApple.setAttribute('href', officeLogo);

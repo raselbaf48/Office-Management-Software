@@ -795,7 +795,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
           <div className="flex justify-center">
             <Logo155UASU
               size="lg"
-              logoOverride="/office-management-logo.png?v=25"
+              logoOverride="/office-management-logo.png?v=26"
               title="Master Control Center"
             />
           </div>

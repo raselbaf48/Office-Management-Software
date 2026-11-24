@@ -11,6 +11,24 @@ export const RANK_SENIORITY: Record<Rank, number> = {
   "AC-2": 8,
 };
 
+export function getCanonicalRankKey(rank?: string): string {
+  const upper = String(rank || '').trim().toUpperCase();
+  if (upper === 'AC' || upper === 'AC-1' || upper === 'AC1' || upper === 'AC 1' || upper === 'AC-I' || upper === 'AC_1') {
+    return 'AC-1';
+  }
+  if (upper === 'AC-2' || upper === 'AC2' || upper === 'AC 2' || upper === 'AC-II' || upper === 'AC_2') {
+    return 'AC-2';
+  }
+  if (upper === 'SGT' || upper === 'SERGEANT') return 'Sgt';
+  if (upper === 'CPL' || upper === 'CORPORAL') return 'Cpl';
+  return String(rank || '').trim();
+}
+
+export function getRankWeight(rank?: Rank | string): number {
+  const canonical = getCanonicalRankKey(rank);
+  return RANK_SENIORITY[canonical as Rank] || 99;
+}
+
 export const JCO_RANKS: Rank[] = ['MWO', 'SWO', 'WO'];
 
 export function isJcoRank(rank: Rank | string): boolean {
@@ -24,8 +42,8 @@ export function isJcoRank(rank: Rank | string): boolean {
  * 3. Finally, by Serial Number
  */
 export function compareAirmenDefaultSeniority(a: Airman, b: Airman): number {
-  const rankA = RANK_SENIORITY[a.rank] || 99;
-  const rankB = RANK_SENIORITY[b.rank] || 99;
+  const rankA = getRankWeight(a.rank);
+  const rankB = getRankWeight(b.rank);
 
   if (rankA !== rankB) {
     return rankA - rankB;
@@ -56,9 +74,9 @@ export function compareAirmenDefaultSeniority(a: Airman, b: Airman): number {
  */
 export function sortAirmenBySeniority(airmen: Airman[]): Airman[] {
   return [...airmen].sort((a, b) => {
-    // 1. Absolute Rank Hierarchy Check (MWO > SWO > WO > Sgt > Cpl > LAC > AC-1 > AC-2)
-    const rankA = RANK_SENIORITY[a.rank] || 99;
-    const rankB = RANK_SENIORITY[b.rank] || 99;
+    // 1. Absolute Rank Hierarchy Check (MWO > SWO > WO > Sgt > Cpl > LAC > AC-1/AC > AC-2)
+    const rankA = getRankWeight(a.rank);
+    const rankB = getRankWeight(b.rank);
 
     if (rankA !== rankB) {
       return rankA - rankB;
@@ -103,12 +121,13 @@ export function getRankSeniorityRange(
   rank: Rank | string
 ): { minSeniority: number; maxSeniority: number; totalInRank: number } {
   const normalized = normalizeAirmenSeniority(airmen);
-  const matching = normalized.filter((a) => a.rank === rank);
+  const canonicalTarget = getCanonicalRankKey(rank);
+  const matching = normalized.filter((a) => getCanonicalRankKey(a.rank) === canonicalTarget);
   if (matching.length === 0) {
-    const rankWeight = RANK_SENIORITY[rank as Rank] || 99;
+    const rankWeight = getRankWeight(rank);
     let insertionPos = 1;
     for (const a of normalized) {
-      const aWeight = RANK_SENIORITY[a.rank as Rank] || 99;
+      const aWeight = getRankWeight(a.rank);
       if (aWeight < rankWeight) {
         insertionPos = (a.seniority || 0) + 1;
       }

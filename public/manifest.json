@@ -5,19 +5,25 @@
   "description": "Military personnel duty register, parade state tracker, TDY register, and monthly roster management system.",
   "icons": [
     {
-      "src": "/pwa-192x192-trans.png?v=25",
+      "src": "/pwa-192x192-trans.png?v=26",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "any"
     },
     {
-      "src": "/pwa-512x512-trans.png?v=25",
+      "src": "/pwa-512x512-trans.png?v=26",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
     },
     {
-      "src": "/pwa-512x512-full.png?v=25",
+      "src": "/pwa-192x192-full.png?v=26",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/pwa-512x512-full.png?v=26",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "maskable"

@@ -251,7 +251,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   const [regCustomBase, setRegCustomBase] = useState<string>('');
   const [availableBases, setAvailableBases] = useState<string[]>(() => getAvailableBases());
   const [regSlogan, setRegSlogan] = useState<string>('');
-  const [regLogo, setRegLogo] = useState<string>('/office-management-logo.png?v=25');
+  const [regLogo, setRegLogo] = useState<string>('/office-management-logo.png?v=26');
   // Step 2: User Info (USER ID (BD NO), RANK, NAME, TRADE, USER ROLE, PRESENT ADDRESS, CONTACT NO)
   const [regBdNo, setRegBdNo] = useState<string>('');
   const [regRank, setRegRank] = useState<Rank | ''>('');
@@ -345,7 +345,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   const displayedOfficeLogo = useMemo(() => {
-    if (!cleanTypedBd) return '/office-management-logo.png?v=25';
+    if (!cleanTypedBd) return '/office-management-logo.png?v=26';
     if (isMasterUserTyped) {
       return selectedMasterOffice?.officeLogo || '/155-uasu-baf-logo.png';
     }
@@ -355,12 +355,12 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
     if (matchedPendingRequest?.officeLogo) {
       return matchedPendingRequest.officeLogo;
     }
-    return '/office-management-logo.png?v=25';
+    return '/office-management-logo.png?v=26';
   }, [cleanTypedBd, isMasterUserTyped, selectedMasterOffice, matchedUserOffice, matchedPendingRequest]);
 
   // While on Login Portal (unauthenticated), keep Browser Address Bar synced to Default Office Management Application
   useEffect(() => {
-    syncBrowserTabIdentity('', '/office-management-logo.png?v=25', '');
+    syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
   }, []);
 
   const displayedOfficeSubtitle = useMemo(() => {
@@ -1125,7 +1125,7 @@ export const UserLoginGate: React.FC<UserLoginGateProps> = ({
         wing: '',
         officeBase: finalBase,
         officeSlogan: regSlogan.trim(),
-        officeLogo: regLogo || '/office-management-logo.png?v=25',
+        officeLogo: regLogo || '/office-management-logo.png?v=26',
         bdNo: cleanRegBdDigits,
         rank: (regRank || 'LAC') as Rank,
         fullName: cleanName,

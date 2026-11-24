@@ -7,13 +7,17 @@ export interface DynamicPWAOfficeIdentity {
 }
 
 const DEFAULT_OFFICE_NAME = '155 UASU BAF';
-const UASU_192_ICON = '/pwa-192x192-trans.png?v=25';
-const UASU_512_ICON = '/pwa-512x512-trans.png?v=25';
-const UASU_MASKABLE_192 = '/pwa-192x192-full.png?v=25';
-const UASU_MASKABLE_512 = '/pwa-512x512-full.png?v=25';
+const PWA_ASSET_VERSION = '26';
+const UASU_192_ICON = `/pwa-192x192-trans.png?v=${PWA_ASSET_VERSION}`;
+const UASU_512_ICON = `/pwa-512x512-trans.png?v=${PWA_ASSET_VERSION}`;
+const UASU_MASKABLE_192 = `/pwa-192x192-full.png?v=${PWA_ASSET_VERSION}`;
+const UASU_MASKABLE_512 = `/pwa-512x512-full.png?v=${PWA_ASSET_VERSION}`;
 
 let lastSyncedSignature = '';
-const iconResizeCache = new Map<string, { icon192: string; icon512: string; maskable512: string; hash: string }>();
+const iconResizeCache = new Map<
+  string,
+  { icon32: string; icon192: string; icon512: string; maskable192: string; maskable512: string; hash: string }
+>();
 
 function computeSimpleHash(str: string): string {
   let h = 2166136261;
@@ -44,12 +48,17 @@ function isGenericAppLogoUrl(logoStr: string): boolean {
 
 /**
  * Updates all <link rel="icon">, <link rel="shortcut icon">, and <link rel="apple-touch-icon">
- * tags in document.head so the browser tab always displays the requested logo immediately.
+ * tags in document.head so the browser tab & address bar always display the full-size logo immediately.
  */
-export function applyBrowserFaviconToHead(icon192Src: string, icon512Src?: string): void {
+export function applyBrowserFaviconToHead(
+  icon192Src: string,
+  icon512Src?: string,
+  icon32Src?: string
+): void {
   if (typeof document === 'undefined' || !document.head) return;
-  const target192 = icon192Src || '/office-management-logo.png?v=25';
+  const target192 = icon192Src || `/office-management-logo.png?v=${PWA_ASSET_VERSION}`;
   const target512 = icon512Src || target192;
+  const targetSmall = icon32Src || target192;
 
   const appleTouchIcons = document.head.querySelectorAll<HTMLLinkElement>('link[rel="apple-touch-icon"]');
   if (appleTouchIcons.length > 0) {
@@ -59,7 +68,7 @@ export function applyBrowserFaviconToHead(icon192Src: string, icon512Src?: strin
   } else {
     const appleIcon = document.createElement('link');
     appleIcon.rel = 'apple-touch-icon';
-    appleIcon.sizes = '192x192';
+    appleIcon.sizes = '180x180';
     appleIcon.href = target192;
     document.head.appendChild(appleIcon);
   }
@@ -67,8 +76,11 @@ export function applyBrowserFaviconToHead(icon192Src: string, icon512Src?: strin
   const favicons = document.head.querySelectorAll<HTMLLinkElement>('link[rel="icon"], link[rel="shortcut icon"]');
   if (favicons.length > 0) {
     favicons.forEach((linkEl) => {
-      if (linkEl.sizes?.value === '512x512') {
+      const sz = String(linkEl.sizes?.value || '');
+      if (sz === '512x512') {
         linkEl.href = target512;
+      } else if (sz === '32x32' || sz === '48x48') {
+        linkEl.href = targetSmall;
       } else {
         linkEl.href = target192;
       }
@@ -84,17 +96,75 @@ export function applyBrowserFaviconToHead(icon192Src: string, icon512Src?: strin
 }
 
 /**
- * Renders any office logo (URL or Base64) onto exact 192x192 and 512x512
- * square canvases so Chromium/Windows/Android renders a crisp square tab favicon & app icon.
+ * Scans an HTMLImageElement on an offscreen canvas to locate its tight non-transparent bounding box,
+ * eliminating wasted empty margins so logos fill 100% of browser tab, address bar, and PWA app icons.
+ */
+function getTrimmedImageBounds(img: HTMLImageElement): { sx: number; sy: number; sw: number; sh: number } {
+  const w = img.naturalWidth || img.width || 512;
+  const h = img.naturalHeight || img.height || 512;
+  const full = { sx: 0, sy: 0, sw: w, sh: h };
+  try {
+    // Downscale scan canvas for speed on very large source images while keeping exact proportional coordinates
+    const maxScan = 512;
+    const scale = Math.min(1, maxScan / Math.max(w, h));
+    const swScan = Math.max(1, Math.round(w * scale));
+    const shScan = Math.max(1, Math.round(h * scale));
+
+    const scanCanvas = document.createElement('canvas');
+    scanCanvas.width = swScan;
+    scanCanvas.height = shScan;
+    const sctx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    if (!sctx) return full;
+    sctx.clearRect(0, 0, swScan, shScan);
+    sctx.drawImage(img, 0, 0, swScan, shScan);
+
+    const imgData = sctx.getImageData(0, 0, swScan, shScan).data;
+    let minX = swScan;
+    let minY = shScan;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < shScan; y++) {
+      for (let x = 0; x < swScan; x++) {
+        const alpha = imgData[(y * swScan + x) * 4 + 3];
+        if (alpha > 12) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX <= minX || maxY <= minY) return full;
+
+    const invScale = 1 / scale;
+    const sx = Math.max(0, Math.floor(minX * invScale));
+    const sy = Math.max(0, Math.floor(minY * invScale));
+    const ex = Math.min(w, Math.ceil((maxX + 1) * invScale));
+    const ey = Math.min(h, Math.ceil((maxY + 1) * invScale));
+    const sw = ex - sx;
+    const sh = ey - sy;
+
+    if (sw <= 0 || sh <= 0) return full;
+    return { sx, sy, sw, sh };
+  } catch {
+    return full;
+  }
+}
+
+/**
+ * Auto-trims transparent borders and renders any office logo (URL or Base64) onto full-bleed
+ * 48x48, 192x192, and 512x512 square canvases so browser tabs, address bar, and PWA icons render at maximum size.
  */
 export async function generateSizedPwaIcons(
   logoSrc: string
-): Promise<{ icon192: string; icon512: string; maskable512: string; hash: string }> {
+): Promise<{ icon32: string; icon192: string; icon512: string; maskable192: string; maskable512: string; hash: string }> {
   const absSrc = resolveAbsoluteUrl(logoSrc);
   const cached = iconResizeCache.get(absSrc);
   if (cached) return cached;
 
-  const hash = computeSimpleHash(absSrc);
+  const hash = computeSimpleHash(`${absSrc}_v${PWA_ASSET_VERSION}`);
 
   return new Promise((resolve) => {
     try {
@@ -102,12 +172,17 @@ export async function generateSizedPwaIcons(
       img.crossOrigin = 'anonymous';
       img.onload = () => {
         try {
+          const bounds = getTrimmedImageBounds(img);
+
           const renderToSize = (size: number, isMaskable: boolean): string => {
             const canvas = document.createElement('canvas');
             canvas.width = size;
             canvas.height = size;
             const ctx = canvas.getContext('2d');
             if (!ctx) return absSrc;
+
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
 
             if (isMaskable) {
               ctx.fillStyle = '#020617';
@@ -116,41 +191,64 @@ export async function generateSizedPwaIcons(
               ctx.clearRect(0, 0, size, size);
             }
 
-            const paddingRatio = isMaskable ? 0.12 : 0.02;
+            // 0% padding for standard tab/address-bar/PWA icons (100% edge-to-edge max size)
+            // 5% tight safe-zone padding (90% visual fill) for maskable launcher icons
+            const paddingRatio = isMaskable ? 0.05 : 0;
             const pad = Math.round(size * paddingRatio);
             const availW = size - pad * 2;
             const availH = size - pad * 2;
 
-            const imgW = img.naturalWidth || size;
-            const imgH = img.naturalHeight || size;
-            const scale = Math.min(availW / imgW, availH / imgH);
-            const drawW = Math.round(imgW * scale);
-            const drawH = Math.round(imgH * scale);
+            const scale = Math.min(availW / bounds.sw, availH / bounds.sh);
+            const drawW = Math.round(bounds.sw * scale);
+            const drawH = Math.round(bounds.sh * scale);
             const dx = Math.round((size - drawW) / 2);
             const dy = Math.round((size - drawH) / 2);
 
-            ctx.drawImage(img, dx, dy, drawW, drawH);
+            ctx.drawImage(img, bounds.sx, bounds.sy, bounds.sw, bounds.sh, dx, dy, drawW, drawH);
             return canvas.toDataURL('image/png');
           };
 
           const result = {
+            icon32: renderToSize(48, false),
             icon192: renderToSize(192, false),
             icon512: renderToSize(512, false),
+            maskable192: renderToSize(192, true),
             maskable512: renderToSize(512, true),
             hash,
           };
           iconResizeCache.set(absSrc, result);
           resolve(result);
         } catch {
-          resolve({ icon192: absSrc, icon512: absSrc, maskable512: absSrc, hash });
+          resolve({
+            icon32: absSrc,
+            icon192: absSrc,
+            icon512: absSrc,
+            maskable192: absSrc,
+            maskable512: absSrc,
+            hash,
+          });
         }
       };
       img.onerror = () => {
-        resolve({ icon192: absSrc, icon512: absSrc, maskable512: absSrc, hash });
+        resolve({
+          icon32: absSrc,
+          icon192: absSrc,
+          icon512: absSrc,
+          maskable192: absSrc,
+          maskable512: absSrc,
+          hash,
+        });
       };
       img.src = absSrc;
     } catch {
-      resolve({ icon192: absSrc, icon512: absSrc, maskable512: absSrc, hash });
+      resolve({
+        icon32: absSrc,
+        icon192: absSrc,
+        icon512: absSrc,
+        maskable192: absSrc,
+        maskable512: absSrc,
+        hash,
+      });
     }
   });
 }
@@ -163,7 +261,7 @@ function buildShortName(officeName: string): string {
 
 function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
   if (typeof window === 'undefined') {
-    return { officeName: DEFAULT_OFFICE_NAME, officeLogo: '/155-uasu-baf-logo.png', officeCode: '155-UASU' };
+    return { officeName: DEFAULT_OFFICE_NAME, officeLogo: `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`, officeCode: '155-UASU' };
   }
   try {
     const customOfficeRaw =
@@ -174,7 +272,7 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
       if (cfg && cfg.officeName) {
         return {
           officeName: cfg.officeName,
-          officeLogo: cfg.officeLogo || '/office-management-logo.png?v=25',
+          officeLogo: cfg.officeLogo || `/office-management-logo.png?v=${PWA_ASSET_VERSION}`,
           officeCode: cfg.officeCode || cfg.firebaseConfig?.officeCode || '',
           officeSlogan: cfg.officeSlogan || cfg.firebaseConfig?.officeSlogan || '',
         };
@@ -186,7 +284,7 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
       if (parsed && parsed.officeName && parsed.officeName !== 'Office Management' && parsed.officeName !== 'Office Management Application') {
         return {
           officeName: parsed.officeName,
-          officeLogo: parsed.rawLogo || '/155-uasu-baf-logo.png',
+          officeLogo: parsed.rawLogo || `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`,
           officeCode: parsed.officeCode || '',
           officeSlogan: parsed.officeSlogan || '',
         };
@@ -195,7 +293,7 @@ function resolveFallbackOfficeFromStorage(): DynamicPWAOfficeIdentity {
   } catch {}
   return {
     officeName: DEFAULT_OFFICE_NAME,
-    officeLogo: '/155-uasu-baf-logo.png',
+    officeLogo: `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`,
     officeCode: '155-UASU',
     officeSlogan: 'Intel • Surveillance • Strike',
   };
@@ -259,21 +357,26 @@ export async function syncDynamicOfficePwaManifest(
 
     let rawLogo = String(effectiveIdentity.officeLogo || '').trim();
     if (!rawLogo) {
-      rawLogo = is155Office ? '/155-uasu-baf-logo.png' : '/office-management-logo.png?v=25';
+      rawLogo = is155Office
+        ? `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`
+        : `/office-management-logo.png?v=${PWA_ASSET_VERSION}`;
     } else if (isGenericAppLogoUrl(rawLogo) && is155Office) {
-      rawLogo = '/155-uasu-baf-logo.png';
+      rawLogo = `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`;
+    } else if (rawLogo === '/155-uasu-baf-logo.png') {
+      rawLogo = `/155-uasu-baf-logo.png?v=${PWA_ASSET_VERSION}`;
     }
 
     // 1. Immediately apply the active office's logo to the browser tab favicon
-    applyBrowserFaviconToHead(rawLogo, rawLogo);
+    applyBrowserFaviconToHead(rawLogo, rawLogo, rawLogo);
 
-    // Also generate crisp 192x192 and 512x512 square icons for the browser tab & PWA
+    // Also generate crisp auto-trimmed full-bleed 48x48, 192x192, and 512x512 square icons for tab, address bar & PWA
     const sizedCustomIcons = await generateSizedPwaIcons(rawLogo);
+    const tabIcon32 = sizedCustomIcons?.icon32 || rawLogo;
     const tabIcon192 = sizedCustomIcons?.icon192 || rawLogo;
     const tabIcon512 = sizedCustomIcons?.icon512 || rawLogo;
-    applyBrowserFaviconToHead(tabIcon192, tabIcon512);
+    applyBrowserFaviconToHead(tabIcon192, tabIcon512, tabIcon32);
 
-    const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}`;
+    const sig = `${appName}__${rawLogo.slice(0, 120)}__${officeCode}__${slogan}__v${PWA_ASSET_VERSION}`;
     if (sig === lastSyncedSignature) return;
     lastSyncedSignature = sig;
 
@@ -300,7 +403,7 @@ export async function syncDynamicOfficePwaManifest(
 
     const serverIcon192Url = tabIcon192;
     const serverIcon512Url = tabIcon512;
-    const serverMaskable192Url = sizedCustomIcons?.maskable512 || UASU_MASKABLE_192;
+    const serverMaskable192Url = sizedCustomIcons?.maskable192 || UASU_MASKABLE_192;
     const serverMaskable512Url = sizedCustomIcons?.maskable512 || UASU_MASKABLE_512;
     const customIconHash = sizedCustomIcons?.hash || '';
 
@@ -401,6 +504,7 @@ export async function syncDynamicOfficePwaManifest(
     }
     if (officeCode) params.set('code', officeCode);
     if (slogan) params.set('slogan', slogan);
+    params.set('v', PWA_ASSET_VERSION);
     const nextManifestHref = `/api/pwa-manifest?${params.toString()}`;
 
     let manifestLink = document.head.querySelector<HTMLLinkElement>('link[rel="manifest"]');

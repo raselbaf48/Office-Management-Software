@@ -42,7 +42,11 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   const [name, setName] = useState(airmanToEdit?.name || initialMatch?.name || '');
   const [bdNo, setBdNo] = useState(airmanToEdit?.bdNo || '');
   const [code, setCode] = useState(airmanToEdit?.code || '');
-  const [rank, setRank] = useState<Rank | ''>(airmanToEdit?.rank || (initialMatch?.rank as any) || '');
+  const [rank, setRank] = useState<Rank | ''>(() => {
+    const raw = String(airmanToEdit?.rank || (initialMatch?.rank as any) || '').trim();
+    if (raw.toUpperCase() === 'AC') return 'AC-1';
+    return (raw as Rank) || '';
+  });
   const [trade, setTrade] = useState(airmanToEdit?.trade || initialMatch?.trade || '');
   const [flightName, setFlightName] = useState<FlightName | ''>(
     airmanToEdit?.flightName || (initialMatch?.flightName as any) || ''
@@ -110,11 +114,19 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
   // Address Selection States: L/In vs L/Out
   const [livingType, setLivingType] = useState<'L_IN' | 'L_OUT' | null>(() => {
     if (airmanToEdit?.addressBlock) {
-      const lower = airmanToEdit.addressBlock.toLowerCase();
-      if (lower.includes('mess') || lower.match(/block/i) || lower === 'l/i' || lower === 'live in') {
+      const raw = airmanToEdit.addressBlock.trim();
+      const lower = raw.toLowerCase();
+      if (
+        lower.includes('mess') ||
+        lower.match(/block/i) ||
+        lower === 'l/i' ||
+        lower === 'live in' ||
+        lower === 'living in' ||
+        /^[a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?$/.test(raw)
+      ) {
         return 'L_IN';
       }
-      if (lower.trim() !== '' && lower !== '-' && lower !== 'n/a') {
+      if (lower !== '' && lower !== '-' && lower !== 'n/a') {
         return 'L_OUT';
       }
     }
@@ -126,6 +138,9 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     if (airmanToEdit?.addressBlock) {
       const raw = airmanToEdit.addressBlock.trim();
       const lower = raw.toLowerCase();
+      if (/^[a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?$/.test(raw)) {
+        return raw.replace(/\s+/g, '');
+      }
       if (lower.includes('mess') || lower.includes('block')) {
         const match = raw.match(/Block\s*(?:No[:\s]*)?([^,]+)/i);
         const extracted = match
@@ -166,17 +181,19 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
 
   const [outsideAddress, setOutsideAddress] = useState<string>(() => {
     if (airmanToEdit?.addressBlock) {
-      const lower = airmanToEdit.addressBlock.toLowerCase();
+      const raw = airmanToEdit.addressBlock.trim();
+      const lower = raw.toLowerCase();
+      if (lower === 'l/o' || lower === 'lo' || lower === 'live out' || lower === 'living out') {
+        return 'L/O';
+      }
       if (
         !lower.includes('qtr') &&
         !lower.includes('quarter') &&
         !lower.includes('mess') &&
         !lower.match(/block/i) &&
-        lower !== 'l/o' &&
-        lower !== 'live out' &&
-        lower !== 'living out'
+        !/^[a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?$/.test(raw)
       ) {
-        return airmanToEdit.addressBlock.replace(/Outside\s*Base[:\s]*/gi, '').trim();
+        return raw.replace(/Outside\s*Base[:\s]*/gi, '').trim();
       }
     }
     return '';
@@ -230,7 +247,9 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
     if (!finalTrade) {
       return setValidationError(trade === '__CUSTOM__' ? 'Please enter Custom Trade name' : 'Please select a Trade');
     }
-    if (officeHasFlights && !flightName) return setValidationError('Please select a Flight');
+    if (officeHasFlights && !flightName && !(airmanToEdit && !airmanToEdit.flightName)) {
+      return setValidationError('Please select a Flight');
+    }
     const rawMobile = mobileNo.trim().replace(/\s+/g, '');
     if (!/^01\d{9}$/.test(rawMobile)) {
       return setValidationError('Mobile Number must be 11 digits and start with 01');
@@ -528,18 +547,20 @@ export const AddEditAirmanModal: React.FC<AddEditAirmanModalProps> = ({
             {officeHasFlights && (
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Flight <span className="text-red-500">*</span>
+                  Flight {!(airmanToEdit && !airmanToEdit.flightName) && <span className="text-red-500">*</span>}
                 </label>
                 <select
                   value={flightName}
-                  required
+                  required={!(airmanToEdit && !airmanToEdit.flightName)}
                   onChange={(e) => {
                     setFlightName(e.target.value as any);
                     if (validationError) setValidationError('');
                   }}
                   className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-sm font-semibold text-slate-900 dark:text-white focus:outline-none cursor-pointer ${!flightName ? 'border-amber-400 bg-amber-50/40' : 'border-slate-300 dark:border-slate-700'}`}
                 >
-                  <option value="" disabled>-- Select Flight --</option>
+                  <option value="" disabled={!(airmanToEdit && !airmanToEdit.flightName)}>
+                    {airmanToEdit && !airmanToEdit.flightName ? '-- No Flight --' : '-- Select Flight --'}
+                  </option>
                   <option value="Avionics">Avionics Flight</option>
                   <option value="Mechanics">Mechanics Flight</option>
                   <option value="GCS">GCS Flight</option>
