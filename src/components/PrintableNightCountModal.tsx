@@ -428,7 +428,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  dutyCode: code,
  idaShift,
  proxyForFlight,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: 'NIGHT_COUNT',
  notes,
  },
  }),
@@ -455,6 +455,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  body: JSON.stringify({
  airmanId: activeEditCell.airman.id,
  date: activeEditCell.date,
+ disposalScope: 'NIGHT_COUNT',
  }),
  });
  if (res.ok) {
@@ -492,7 +493,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  });
  }
 
- const effectiveScope = isPtDocument ? 'PT' : (disposalScope === 'PT' ? 'PT' : 'PARADE');
+ const effectiveScope = 'NIGHT_COUNT';
 
  const promises = selectedDisposalAirmenIds.map((airmanId) =>
  fetch('/api/roster/assign-range', {
@@ -617,7 +618,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  dutyCode: effectiveDutyCode,
  fromDate: editDisposalFromDate,
  toDate: editDisposalToDate,
- disposalScope: isPtDocument ? 'PT' : 'PARADE',
+ disposalScope: 'NIGHT_COUNT',
  notes: effectiveNotes,
  }),
  });

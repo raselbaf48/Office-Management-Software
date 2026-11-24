@@ -1185,14 +1185,20 @@ export const isAirmanInUnitForMonth = (
   return true;
 };
 
-export function exportMonthlyAttendanceRegisterExcel(
+export interface AttendanceMonthSpec {
+  year: number;
+  month: number; // 1..12
+}
+
+const EXCEL_SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function buildMonthlyAttendanceWorksheet(
   airmen: Airman[],
   assignments: DutyAssignment[],
   year: number,
   month: number,
   selectedFlight: string = 'All',
-  selectedRank: string = 'All',
-  filename?: string
+  selectedRank: string = 'All'
 ) {
   const monthName = new Date(year, month - 1, 1).toLocaleString('en-US', {
     month: 'long',
@@ -1276,11 +1282,40 @@ export function exportMonthlyAttendanceRegisterExcel(
     }
 
     if (dutyCode === 'IDAC' || dutyCode === 'IDA') {
+      if ((ass?.notes || '').includes('IDAC A+C')) {
+        return 'IDAC "A+C"';
+      }
       const s = (ass?.idaShift || '').toLowerCase();
       return s.startsWith('m') ? 'IDAC "A"' : s.startsWith('a') ? 'IDAC "B"' : 'IDAC "C"';
     }
 
-    if (dutyCode === 'LEAVE') return 'LV';
+    if (dutyCode === 'LEAVE') {
+      const combined = `${ass?.notes || ''} ${(ass as any)?.dutyName || ''}`.toLowerCase();
+      if (combined.includes('recreation') || combined.includes('(rl)') || /\brl\b/.test(combined) || combined.includes('rec leave') || combined.includes('rec.')) return 'RL';
+      if (combined.includes('sick') || combined.includes('(sl)') || /\bsl\b/.test(combined) || combined.includes('medical')) return 'SL';
+      if (combined.includes('annual') || combined.includes('(al)') || /\bal\b/.test(combined)) return 'AL';
+      if (combined.includes('casual') || combined.includes('(cl)') || /\bcl\b/.test(combined)) return 'CL';
+
+      // Match Attendance Register UI & Print Preview: contiguous leave span > 7 days => AL, otherwise CL (never LV)
+      let streakLen = 1;
+      const baseUtcMs = Date.UTC(year, month - 1, day);
+      const dayMs = 86400000;
+      const formatUtc = (ms: number) => {
+        const dt = new Date(ms);
+        return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+      };
+      for (let step = 1; step <= 60; step++) {
+        const prevStr = formatUtc(baseUtcMs - step * dayMs);
+        if (resolveAirmanDutyForDate(airman.id, prevStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
+        else break;
+      }
+      for (let step = 1; step <= 60; step++) {
+        const nextStr = formatUtc(baseUtcMs + step * dayMs);
+        if (resolveAirmanDutyForDate(airman.id, nextStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
+        else break;
+      }
+      return streakLen > 7 ? 'AL' : 'CL';
+    }
     if (dutyCode === 'TDY') return 'TDY';
     if ((dutyCode as any) === 'ESCORT' || (dutyCode as any) === 'ESC' || (dutyCode as any) === 'ESCT' || (dutyCode && String(dutyCode).includes('1794394')) || (ass?.notes || '').toLowerCase().includes('escort')) return 'ESCT';
     if (dutyCode === 'GD' || (dutyCode as any) === 'SECURITY') return 'SY';
@@ -1320,13 +1355,13 @@ export function exportMonthlyAttendanceRegisterExcel(
 
   // Filter airmen based on:
   // 1. Belonging to unit in this month (join date <= monthEnd, left date >= monthStart, active)
-  // 2. Selected flight
+  // 2. Selected flight / trade
   // 3. Selected rank (Rank & Below)
   const filteredAirmen = airmen.filter((a) => {
     if (!isAirmanInUnitForMonth(a, year, month)) return false;
     if (selectedFlight !== 'All') {
       const fltFull = formatFlightFullName(a.flightName);
-      if (fltFull !== selectedFlight && a.flightName !== selectedFlight) return false;
+      if (fltFull !== selectedFlight && a.flightName !== selectedFlight && a.trade !== selectedFlight) return false;
     }
     if (selectedRank !== 'All') {
       const selectedTier = getRankTier(selectedRank);
@@ -1336,13 +1371,8 @@ export function exportMonthlyAttendanceRegisterExcel(
     return true;
   });
 
-  const wb = XLSX.utils.book_new();
   const rows: any[][] = [];
 
-  // Title Headers as requested:
-  // Heading: 155 UASU, BAF (BOLD)
-  // Attendance Register (underline)
-  // Month: [Month]
   rows.push([getActiveOfficeIdentity().officeName || '155 UASU, BAF']);
   rows.push(['ATTENDANCE REGISTER']);
   rows.push([`Month: ${monthName}`]);
@@ -1437,7 +1467,6 @@ export function exportMonthlyAttendanceRegisterExcel(
 
   const totalCols = headers.length;
 
-  // Title styling (Row 0, 1, 2) - Font Arial
   if (ws['A1']) {
     ws['A1'].s = {
       font: { name: 'Arial', sz: 14, bold: true, color: { rgb: '000000' } },
@@ -1457,14 +1486,12 @@ export function exportMonthlyAttendanceRegisterExcel(
     };
   }
 
-  // Merge title cells across all columns
   ws['!merges'] = [
     { s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } },
     { s: { r: 1, c: 0 }, e: { r: 1, c: totalCols - 1 } },
     { s: { r: 2, c: 0 }, e: { r: 2, c: totalCols - 1 } },
   ];
 
-  // Format table rows: Font Arial 12, wrapText: true, center/left alignment
   for (let r = tableHeaderRowIndex; r < rows.length; r++) {
     const isHeader = r === tableHeaderRowIndex;
     for (let c = 0; c < totalCols; c++) {
@@ -1499,14 +1526,13 @@ export function exportMonthlyAttendanceRegisterExcel(
     }
   }
 
-  // Column widths: All Date columns have the exact same uniform width (7), Name column width narrowed
   const colWidths = [
     { wch: 6 },  // SER
     { wch: 12 }, // BD NO
     { wch: 10 }, // RANK
-    { wch: 18 }, // NAME (narrowed from 28)
+    { wch: 18 }, // NAME
     { wch: 14 }, // FLT
-    ...Array.from({ length: daysInMonth }, () => ({ wch: 7 })), // Days: uniform width
+    ...Array.from({ length: daysInMonth }, () => ({ wch: 7 })), // Days
     { wch: 12 }, // On Parade
     { wch: 7 },  // SY
     { wch: 7 },  // BTF
@@ -1521,7 +1547,6 @@ export function exportMonthlyAttendanceRegisterExcel(
   ];
   ws['!cols'] = colWidths;
 
-  // Row heights: Header 28hpt, Data rows 32hpt to fit wrapped text comfortably
   const rowHeights: Array<{ hpt: number }> = [];
   rowHeights[0] = { hpt: 22 };
   rowHeights[1] = { hpt: 20 };
@@ -1533,16 +1558,77 @@ export function exportMonthlyAttendanceRegisterExcel(
   }
   ws['!rows'] = rowHeights;
 
-  // Freeze Panes: freeze rows up to Heading Row (Row 5) and columns up to Name (Col A..D)
   ws['!freeze'] = { xSplit: 4, ySplit: 5, topLeftCell: 'E6', activePane: 'bottomRight', state: 'frozen' };
   ws['!views'] = [{ xSplit: 4, ySplit: 5, topLeftCell: 'E6', activePane: 'bottomRight', state: 'frozen' }];
 
-  XLSX.utils.book_append_sheet(wb, ws, 'Attendance Register');
+  return ws;
+}
+
+export function exportMonthlyAttendanceRegisterExcel(
+  airmen: Airman[],
+  assignments: DutyAssignment[],
+  year: number,
+  month: number,
+  selectedFlight: string = 'All',
+  selectedRank: string = 'All',
+  filename?: string
+) {
+  const wb = XLSX.utils.book_new();
+  const ws = buildMonthlyAttendanceWorksheet(airmen, assignments, year, month, selectedFlight, selectedRank);
+  const sheetTitle = `${EXCEL_SHORT_MONTHS[month - 1] || 'Month'} ${year}`;
+  XLSX.utils.book_append_sheet(wb, ws, sheetTitle);
 
   const defaultName = `155_UASU_Attendance_Register_${year}_${String(month).padStart(2, '0')}.xlsx`;
   const cleanName = (filename || defaultName).replace(/\.(xlsx|csv)$/i, '') + '.xlsx';
   const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  
+
+  applyFreezePanesToWorkbook(wbout, 4, 5, 'E6')
+    .then((blob) => {
+      saveAs(blob, cleanName);
+    })
+    .catch((err) => {
+      console.warn('Fallback saving without freeze pane injection:', err);
+      const blob = new Blob([wbout], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      saveAs(blob, cleanName);
+    });
+}
+
+export function exportMultiMonthAttendanceRegisterExcel(
+  airmen: Airman[],
+  assignments: DutyAssignment[],
+  months: AttendanceMonthSpec[],
+  selectedFlight: string = 'All',
+  selectedRank: string = 'All',
+  filename?: string
+) {
+  if (!months || months.length === 0) return;
+
+  const wb = XLSX.utils.book_new();
+  const usedNames = new Set<string>();
+
+  months.forEach(({ year, month }) => {
+    const ws = buildMonthlyAttendanceWorksheet(airmen, assignments, year, month, selectedFlight, selectedRank);
+    let baseName = `${EXCEL_SHORT_MONTHS[month - 1] || `M${month}`} ${year}`.slice(0, 31);
+    let sheetName = baseName;
+    let suffix = 2;
+    while (usedNames.has(sheetName)) {
+      sheetName = `${baseName.slice(0, 27)} (${suffix++})`;
+    }
+    usedNames.add(sheetName);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+
+  const first = months[0];
+  const last = months[months.length - 1];
+  const defaultName =
+    months.length === 12 && first.month === 1 && last.month === 12 && first.year === last.year
+      ? `155_UASU_Attendance_Register_${first.year}_Full_Year.xlsx`
+      : `155_UASU_Attendance_Register_${first.year}_${String(first.month).padStart(2, '0')}_to_${last.year}_${String(last.month).padStart(2, '0')}.xlsx`;
+  const cleanName = (filename || defaultName).replace(/\.(xlsx|csv)$/i, '') + '.xlsx';
+  const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+
   applyFreezePanesToWorkbook(wbout, 4, 5, 'E6')
     .then((blob) => {
       saveAs(blob, cleanName);
@@ -1564,37 +1650,44 @@ async function applyFreezePanesToWorkbook(
 ): Promise<Blob> {
   try {
     const zip = await JSZip.loadAsync(wbout);
-    const sheetPath = 'xl/worksheets/sheet1.xml';
-    const sheetFile = zip.file(sheetPath);
-    if (!sheetFile) {
+    const sheetPaths = Object.keys(zip.files).filter((p) => /^xl\/worksheets\/sheet\d+\.xml$/.test(p));
+    if (sheetPaths.length === 0) {
       return new Blob([wbout], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
     }
 
-    let sheetXml = await sheetFile.async('text');
     const paneXml = `<pane xSplit="${xSplit}" ySplit="${ySplit}" topLeftCell="${topLeftCell}" activePane="bottomRight" state="frozen"/><selection pane="bottomRight" activeCell="${topLeftCell}" sqref="${topLeftCell}"/>`;
 
-    if (sheetXml.includes('<sheetView workbookViewId="0"/>')) {
-      sheetXml = sheetXml.replace(
-        '<sheetView workbookViewId="0"/>',
-        `<sheetView tabSelected="1" workbookViewId="0">${paneXml}</sheetView>`
-      );
-    } else if (sheetXml.includes('</sheetView>')) {
-      sheetXml = sheetXml.replace('</sheetView>', `${paneXml}</sheetView>`);
-    } else if (sheetXml.includes('<sheetViews>')) {
-      sheetXml = sheetXml.replace(
-        '<sheetViews>',
-        `<sheetViews><sheetView tabSelected="1" workbookViewId="0">${paneXml}</sheetView>`
-      );
-    } else if (sheetXml.includes('<sheetData')) {
-      sheetXml = sheetXml.replace(
-        '<sheetData',
-        `<sheetViews><sheetView tabSelected="1" workbookViewId="0">${paneXml}</sheetView></sheetViews><sheetData`
-      );
+    for (const sheetPath of sheetPaths) {
+      const sheetFile = zip.file(sheetPath);
+      if (!sheetFile) continue;
+      let sheetXml = await sheetFile.async('text');
+      const isFirstSheet = sheetPath === 'xl/worksheets/sheet1.xml';
+      const tabAttr = isFirstSheet ? ' tabSelected="1"' : '';
+
+      if (sheetXml.includes('<sheetView workbookViewId="0"/>')) {
+        sheetXml = sheetXml.replace(
+          '<sheetView workbookViewId="0"/>',
+          `<sheetView${tabAttr} workbookViewId="0">${paneXml}</sheetView>`
+        );
+      } else if (sheetXml.includes('</sheetView>')) {
+        sheetXml = sheetXml.replace('</sheetView>', `${paneXml}</sheetView>`);
+      } else if (sheetXml.includes('<sheetViews>')) {
+        sheetXml = sheetXml.replace(
+          '<sheetViews>',
+          `<sheetViews><sheetView${tabAttr} workbookViewId="0">${paneXml}</sheetView>`
+        );
+      } else if (sheetXml.includes('<sheetData')) {
+        sheetXml = sheetXml.replace(
+          '<sheetData',
+          `<sheetViews><sheetView${tabAttr} workbookViewId="0">${paneXml}</sheetView></sheetViews><sheetData`
+        );
+      }
+
+      zip.file(sheetPath, sheetXml);
     }
 
-    zip.file(sheetPath, sheetXml);
     const modifiedArray = await zip.generateAsync({ type: 'arraybuffer' });
     return new Blob([modifiedArray], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

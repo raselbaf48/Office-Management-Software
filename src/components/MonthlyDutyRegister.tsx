@@ -1048,31 +1048,6 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
               <ChevronRight className="w-5 h-5" />
             </button>
           </div>
-
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={() => setIsFullYearView(!isFullYearView)}
-              className={`flex items-center space-x-2 px-4 py-1.5 rounded-full text-xs font-bold border transition-all ${
-                isFullYearView
-                  ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                  : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100'
-              }`}
-              title="Toggle Full Year View"
-            >
-              <span>{isFullYearView ? '⭐ Full Year' : '⭐ Full Year'}</span>
-            </button>
-            <button
-              onClick={() => setOnlyHolidaysFilter(!onlyHolidaysFilter)}
-              className={`flex items-center space-x-2 px-4 py-1.5 rounded-full text-xs font-bold border transition-all ${
-                onlyHolidaysFilter
-                  ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
-                  : 'bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-800 hover:bg-amber-100'
-              }`}
-              title="Filter to show only Friday/Saturday and designated official holidays"
-            >
-              <span>{onlyHolidaysFilter ? '🏖️ Holidays Only' : '📅 All Days'}</span>
-            </button>
-          </div>
         </div>
 
         {/* Right - Action Buttons */}
@@ -1190,18 +1165,9 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
 
           <div className="text-xs text-slate-500 font-medium hidden md:flex items-center space-x-3">
             {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? (
-              <>
-                <button
-                  onClick={() => handleOpenBulkModal()}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-500/40 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors"
-                >
-                  <CalendarRange className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                  <span>Bulk Assign (Leave/TDY)</span>
-                </button>
-                <span className="text-emerald-600 dark:text-emerald-400 font-bold">
-                  * Auto Duty Register (Auto Duty Off & On Parade)
-                </span>
-              </>
+              <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                * Auto Duty Register (Auto Duty Off & On Parade)
+              </span>
             ) : (
               <span>* Read-Only Airman View</span>
             )}

@@ -349,13 +349,30 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
       // Process leave assignments per airman
       Object.keys(recordMap).forEach((airmanId) => {
         const rec = recordMap[airmanId];
-        const airmanLeaveAssignments = allAssignments
-          .filter((ass: any) => ass && ass.dutyCode === 'LEAVE' && matchAirmanId(ass.airmanId, airmanId) && ass.date)
-          .sort((a: any, b: any) => a.date.localeCompare(b.date));
+        const byDateMap = new Map<string, any>();
+        allAssignments.forEach((ass: any) => {
+          if (!ass || ass.dutyCode !== 'LEAVE' || !matchAirmanId(ass.airmanId, airmanId) || !ass.date) return;
+          const existing = byDateMap.get(ass.date);
+          if (!existing) {
+            byDateMap.set(ass.date, ass);
+          } else {
+            const exN = (existing.notes || '').trim();
+            const cuN = (ass.notes || '').trim();
+            if ((/f-295/i.test(cuN) && !/f-295/i.test(exN)) || (cuN.length > exN.length && !/f-295/i.test(exN))) {
+              byDateMap.set(ass.date, ass);
+            }
+          }
+        });
 
+        const airmanLeaveAssignments = Array.from(byDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
         if (airmanLeaveAssignments.length === 0) return;
 
-        // Group into contiguous date spans
+        const toUtcMs = (dStr: string) => {
+          const [y, m, d] = dStr.split('-').map(Number);
+          return Date.UTC(y, (m || 1) - 1, d || 1);
+        };
+
+        // Group into contiguous date spans (zero gap = single period)
         const spans: Array<Array<any>> = [];
         let currentSpan: any[] = [];
 
@@ -364,12 +381,10 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
             currentSpan.push(ass);
           } else {
             const prevAss = currentSpan[currentSpan.length - 1];
-            const prevDate = new Date(prevAss.date);
-            const currDate = new Date(ass.date);
-            const diffDays = Math.round((currDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24));
+            const diffDays = Math.round((toUtcMs(ass.date) - toUtcMs(prevAss.date)) / (1000 * 60 * 60 * 24));
 
-            if (diffDays === 1) {
-              currentSpan.push(ass);
+            if (diffDays <= 1) {
+              if (diffDays === 1) currentSpan.push(ass);
             } else {
               spans.push(currentSpan);
               currentSpan = [ass];
@@ -387,44 +402,49 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
           const firstDate = span[0].date;
           const lastDate = span[span.length - 1].date;
 
-          // Check if any assignment in the span specifies explicit F-295 free days
           let explicitF295: number | undefined = undefined;
+          let combinedNotes = '';
           span.forEach((ass) => {
+            if (ass.notes) combinedNotes += ' ' + ass.notes;
             const match = (ass.notes || '').match(/f-295:\s*(\d+)/i);
             if (match) {
               explicitF295 = parseInt(match[1], 10);
             }
           });
 
+          const notesLower = combinedNotes.toLowerCase();
+          const hasSickNote = notesLower.includes('sick');
+          const hasRecreationNote = notesLower.includes('recreation') || notesLower.includes('(rl)') || notesLower.includes(' rl') || notesLower.includes('rec leave');
+          const hasAnnualNote = notesLower.includes('annual') || notesLower.includes('(al)') || notesLower.includes(' al');
+          const hasCasualNote = notesLower.includes('casual') || notesLower.includes('(cl)') || notesLower.includes(' cl');
+
+          let spanType: 'Casual Leave' | 'Annual Leave' | 'Recreation Leave' | 'Sick Leave' | 'Leave' = 'Casual Leave';
+          if (hasSickNote) {
+            spanType = 'Sick Leave';
+          } else if (hasRecreationNote) {
+            spanType = 'Recreation Leave';
+          } else if (hasAnnualNote || isSpanAnnual) {
+            spanType = 'Annual Leave';
+          } else if (hasCasualNote) {
+            spanType = 'Casual Leave';
+          } else {
+            spanType = spanLength > 7 ? 'Annual Leave' : 'Casual Leave';
+          }
+
           const spanF295Calc = calculateLeaveDaysWithF295(firstDate, lastDate, explicitF295);
 
           span.forEach((ass) => {
-            const notesLower = (ass.notes || '').toLowerCase();
-            const hasRecreationNote = notesLower.includes('recreation') || notesLower.includes('(rl)') || notesLower.includes(' rl') || notesLower.includes('rec leave');
-            const hasCasualNote = notesLower.includes('casual') || notesLower.includes('(cl)') || notesLower.includes(' cl');
-            const hasAnnualNote = notesLower.includes('annual') || notesLower.includes('(al)') || notesLower.includes(' al');
-
-            let type: 'Casual Leave' | 'Annual Leave' | 'Recreation Leave' | 'Leave' = 'Casual Leave';
-            if (hasRecreationNote) {
-              type = 'Recreation Leave';
-            } else if (hasAnnualNote || isSpanAnnual) {
-              type = 'Annual Leave';
-            } else if (hasCasualNote) {
-              type = 'Casual Leave';
-            } else {
-              type = spanLength > 7 ? 'Annual Leave' : 'Casual Leave';
-            }
-
-            // Check if this date in the span falls into F-295 (Free Pass)
             const dayEntry = spanF295Calc.dayEntries.find((de) => de.date === ass.date);
             const isF295 = !!dayEntry?.isF295;
 
             if (isF295) {
               rec.f295Days++;
             } else {
-              if (type === 'Recreation Leave') {
+              if (spanType === 'Sick Leave') {
+                rec.sickLeaveDays++;
+              } else if (spanType === 'Recreation Leave') {
                 rec.recreationLeaveDays++;
-              } else if (type === 'Annual Leave') {
+              } else if (spanType === 'Annual Leave') {
                 rec.annualLeaveDays++;
               } else {
                 rec.casualLeaveDays++;
@@ -434,14 +454,14 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
             rec.leaveEntries.push({
               date: ass.date,
-              type,
+              type: spanType,
               notes: ass.notes,
               isF295,
             });
 
             if (ass.date === todayStr) {
               rec.currentlyOnLeave = true;
-              rec.currentLeaveType = type;
+              rec.currentLeaveType = spanType;
             }
           });
         });
@@ -823,7 +843,7 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
                   return (
                     <tr
                       key={`${airman.id}-${idx}`}
-                      onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'LEAVE', historyOnly: true })}
+                      onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'LEAVE', historyOnly: true, allowEditDelete: role !== 'USER', initialYear: Number(selectedYear) })}
                       className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer group"
                     >
                       <td className="py-3 px-4 text-center font-mono font-bold text-slate-500">
@@ -839,9 +859,12 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
                       </td>
                       <td className="py-3 px-4 font-black text-slate-900 dark:text-white" style={{ minWidth: getOptimalMinColumnWidth(airman.name, 120, 7.5, 32) }}>
                         <button
-                          onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'LEAVE', historyOnly: true })}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onViewProfile) onViewProfile(airman, { initialTab: 'history', initialCategory: 'LEAVE', historyOnly: true, allowEditDelete: role !== 'USER', initialYear: Number(selectedYear) });
+                          }}
                           className="hover:text-emerald-600 dark:hover:text-emerald-400 hover:underline text-left cursor-pointer"
-                          title="Click to view full duty & leave history"
+                          title="Click to view & edit leave history"
                         >
                           {airman.name}
                         </button>

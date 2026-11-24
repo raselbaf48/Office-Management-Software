@@ -552,6 +552,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
         body: JSON.stringify({
           airmanId: activeEditCell.airman.id,
           date: activeEditCell.date,
+          disposalScope: 'NIGHT_COUNT',
         }),
       });
       if (res.ok) {

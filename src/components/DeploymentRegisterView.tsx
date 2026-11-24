@@ -164,20 +164,29 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
 
       Object.keys(recordMap).forEach((airmanId) => {
         const rec = recordMap[airmanId];
-        const airmanAttAssignments = allAssignments
-          .filter((ass: any) => ass && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode) && matchAirmanId(ass.airmanId, airmanId) && ass.date)
-          .reduce((acc: any[], curr: any) => {
-            // Because we now store both deployment and base duties, 
-            // deduplicate by date so we don't count the same day twice for deployments
-            if (!acc.some(a => a.date === curr.date)) {
-              acc.push(curr);
+        const byDateMap = new Map<string, any>();
+        allAssignments.forEach((ass: any) => {
+          if (!ass || !['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(ass.dutyCode) || !matchAirmanId(ass.airmanId, airmanId) || !ass.date) return;
+          const existing = byDateMap.get(ass.date);
+          if (!existing) {
+            byDateMap.set(ass.date, ass);
+          } else {
+            const currMoreSpecific = existing.dutyCode === 'ATT' && ass.dutyCode !== 'ATT';
+            const currRicherNote = (ass.notes || '').trim().length > (existing.notes || '').trim().length;
+            if (currMoreSpecific || currRicherNote) {
+              byDateMap.set(ass.date, ass);
             }
-            return acc;
-          }, [])
-          .sort((a: any, b: any) => a.date.localeCompare(b.date));
+          }
+        });
 
-        
-        // Group into contiguous date spans
+        const airmanAttAssignments = Array.from(byDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
+
+        const toUtcMs = (dStr: string) => {
+          const [y, m, d] = dStr.split('-').map(Number);
+          return Date.UTC(y, (m || 1) - 1, d || 1);
+        };
+
+        // Group into contiguous date spans (zero gap = single period)
         const spans: Array<Array<any>> = [];
         let currentSpan: any[] = [];
 
@@ -186,12 +195,10 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
             currentSpan.push(ass);
           } else {
             const prevAss = currentSpan[currentSpan.length - 1];
-            const prevDate = new Date(prevAss.date);
-            const currDate = new Date(ass.date);
-            const diffDays = Math.round((currDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24));
+            const diffDays = Math.round((toUtcMs(ass.date) - toUtcMs(prevAss.date)) / (1000 * 60 * 60 * 24));
 
-            if (diffDays === 1) {
-              currentSpan.push(ass);
+            if (diffDays <= 1) {
+              if (diffDays === 1) currentSpan.push(ass);
             } else {
               spans.push([...currentSpan]);
               currentSpan = [ass];
@@ -204,7 +211,14 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
         spans.forEach((span) => {
           const first = span[0];
           const last = span[span.length - 1];
-          const location = first.notes || 'Outstation';
+          const bestNote = span.map((a) => (a.notes || '').trim()).find((n) => n.length > 0) || '';
+          const location =
+            bestNote ||
+            (span.some((a) => a.dutyCode === 'CANTEEN')
+              ? 'Canteen'
+              : span.some((a) => a.dutyCode === 'BAKE_N_BITE')
+              ? 'Bake & Bite'
+              : 'Outstation');
           
           span.forEach((ass) => {
             rec.totalAttDays++;
@@ -554,7 +568,7 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
                   return (
                     <tr
                       key={`${airman.id}-${idx}`}
-                      onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'ATT', historyOnly: true })}
+                      onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'DEPL', historyOnly: true, allowEditDelete: role !== 'USER', initialYear: Number(selectedYear) })}
                       className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer group"
                     >
                       <td className="py-3 px-4 text-center font-mono font-bold text-slate-500">
@@ -570,9 +584,12 @@ export const DeploymentRegisterView: React.FC<DeploymentRegisterViewProps> = ({
                       </td>
                       <td className="py-3 px-4 font-black text-slate-900 dark:text-white" style={{ minWidth: getOptimalMinColumnWidth(airman.name, 120, 7.5, 32) }}>
                         <button
-                          onClick={() => onViewProfile && onViewProfile(airman, { initialTab: 'history', initialCategory: 'ATT', historyOnly: true })}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onViewProfile) onViewProfile(airman, { initialTab: 'history', initialCategory: 'DEPL', historyOnly: true, allowEditDelete: role !== 'USER', initialYear: Number(selectedYear) });
+                          }}
                           className="hover:text-emerald-600 dark:hover:text-emerald-400 hover:underline text-left cursor-pointer"
-                          title="Click to view full duty & Deployment history"
+                          title="Click to view & edit Deployment history"
                         >
                           {airman.name}
                         </button>

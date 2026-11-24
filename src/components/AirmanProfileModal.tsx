@@ -1,7 +1,7 @@
 import { DateNavigator } from './DateNavigator';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Airman, DutyAssignment } from '../types';
-import { X, Shield, Phone, MapPin, Award, Calendar, FileText, User, Filter, Printer, Clock, Settings, Trash2, Check, RefreshCw, AlertCircle, ShoppingBag, CreditCard, Mail } from 'lucide-react';
+import { X, Shield, Phone, MapPin, Award, Calendar, FileText, User, Filter, Printer, Clock, Settings, Trash2, Check, RefreshCw, AlertCircle, ShoppingBag, CreditCard, Mail, Lock, Pencil } from 'lucide-react';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { isDefault155UasuOffice } from '../firebase';
@@ -55,11 +55,58 @@ interface AirmanProfileModalProps {
   historyOnly?: boolean;
   allowEditDelete?: boolean;
   canteenOnly?: boolean;
+  initialYear?: number;
 }
 
 const presetLocations = ['AIR HQ', 'BAF AKR', 'BAF BSR', 'BAF MTR', 'BAF CXB', 'BAF SMD'];
 
-export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, onClose, onEditAirman, onRemoveAirman, role, initialTab = 'profile', initialCategory = 'ALL', historyOnly = false, allowEditDelete = false, variant = "nominal", canteenOnly = false }) => {
+const DEPLOYMENT_DUTY_CODES = ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'];
+
+const parseIsoToUtcMs = (dateStr: string): number => {
+  const [y, m, d] = (dateStr || '').split('-').map(Number);
+  return Date.UTC(y || 1970, (m || 1) - 1, d || 1);
+};
+
+const addDaysToIso = (dateStr: string, offsetDays: number): string => {
+  const [y, m, d] = (dateStr || '').split('-').map(Number);
+  const dt = new Date(Date.UTC(y || 1970, (m || 1) - 1, d || 1));
+  dt.setUTCDate(dt.getUTCDate() + offsetDays);
+  return dt.toISOString().split('T')[0];
+};
+
+const getGroupBucket = (dutyCode?: string): string => {
+  if (!dutyCode) return '';
+  if (dutyCode === 'LEAVE') return 'LEAVE';
+  if (dutyCode === 'TDY') return 'TDY';
+  if (DEPLOYMENT_DUTY_CODES.includes(dutyCode)) return 'DEPL';
+  return dutyCode;
+};
+
+const getBestGroupNote = (group: DutyAssignment[]): string => {
+  let best = '';
+  for (const item of group) {
+    const n = (item?.notes || '').trim();
+    if (!n) continue;
+    if (!best) {
+      best = n;
+    } else if (/f-295/i.test(n) && !/f-295/i.test(best)) {
+      best = n;
+    } else if (n.length > best.length && !/f-295/i.test(best)) {
+      best = n;
+    }
+  }
+  return best;
+};
+
+export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, onClose, onEditAirman, onRemoveAirman, role, initialTab = 'profile', initialCategory = 'ALL', historyOnly = false, allowEditDelete = false, variant = "nominal", canteenOnly = false, initialYear }) => {
+  const normalizedInitialCategory = initialCategory === 'ATT' ? 'DEPL' : initialCategory;
+  const canEditRows = Boolean(allowEditDelete) && role !== 'USER';
+  const shouldDefaultFullYear = Boolean(
+    initialYear ||
+    (historyOnly && ['LEAVE', 'TDY', 'DEPL'].includes(normalizedInitialCategory))
+  );
+  const defaultTargetYear = initialYear || new Date().getFullYear();
+
   const initialAirman = useMemo(() => {
     if (!isDefault155UasuOffice()) return undefined;
     const cleanBd = (airman.bdNo || '').replace(/^BD\/?/i, '').trim();
@@ -73,12 +120,18 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   const [activeTab, setActiveTab] = useState<'history' | 'profile'>(historyOnly ? 'history' : initialTab);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [fromDate, setFromDate] = useState<string>(() => {
+    if (shouldDefaultFullYear) {
+      return `${defaultTargetYear}-01-01`;
+    }
     const d = new Date();
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     return `${y}-${m}-01`;
   });
   const [toDate, setToDate] = useState<string>(() => {
+    if (shouldDefaultFullYear) {
+      return `${defaultTargetYear}-12-31`;
+    }
     const d = new Date();
     const y = d.getFullYear();
     const lastDay = new Date(y, d.getMonth() + 1, 0).getDate();
@@ -90,7 +143,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   const [canteenMemberData, setCanteenMemberData] = useState<any>((airman as any)?.canteenMember || null);
   const [loading, setLoading] = useState<boolean>(false);
   
-  const [categoryFilter, setCategoryFilter] = useState<string>(canteenOnly ? 'ALL_CANTEEN' : initialCategory);
+  const [categoryFilter, setCategoryFilter] = useState<string>(canteenOnly ? 'ALL_CANTEEN' : normalizedInitialCategory);
   
   const [editingGroup, setEditingGroup] = useState<DutyAssignment[] | null>(null);
   const [showDeleteGroupConfirm, setShowDeleteGroupConfirm] = useState<boolean>(false);
@@ -127,14 +180,15 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
   const editLeaveDurationDays = useMemo(() => {
     if (!editFromDate || !editToDate) return 0;
-    const f = new Date(editFromDate);
-    const t = new Date(editToDate);
-    return Math.round((t.getTime() - f.getTime()) / (1000 * 3600 * 24)) + 1;
+    const diff = Math.round((parseIsoToUtcMs(editToDate) - parseIsoToUtcMs(editFromDate)) / (1000 * 3600 * 24)) + 1;
+    return Math.max(0, diff);
   }, [editFromDate, editToDate]);
 
   useEffect(() => {
     if (editingGroup && editingGroup[0].dutyCode === 'LEAVE') {
-      if (editLeaveDurationDays <= 10 && !['Sick', 'Recreation', 'Annual'].includes(editLeaveType)) {
+      if (editLeaveDurationDays > 10 && editLeaveType === 'Casual') {
+        setEditLeaveType('Annual');
+      } else if (editLeaveDurationDays <= 10 && !['Sick', 'Recreation', 'Annual', 'Casual'].includes(editLeaveType)) {
         setEditLeaveType('Casual');
       }
     }
@@ -146,9 +200,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
   const updateEditToDateWithBase = (baseDays: number, f295Days: number) => {
     if (editFromDate) {
-      const d = new Date(editFromDate);
-      d.setDate(d.getDate() + baseDays + f295Days - 1);
-      setEditToDate(d.toISOString().split('T')[0]);
+      setEditToDate(addDaysToIso(editFromDate, Math.max(1, baseDays + f295Days) - 1));
     }
   };
 
@@ -212,9 +264,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     const f295Extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
     
     if (!editFromDate || !editToDate) return { grossDays: 0, netLeaveDays: 0, f295Days: 0, totalCalendarDays: 0 };
-    const f = new Date(editFromDate);
-    const t = new Date(editToDate);
-    const gross = Math.round((t.getTime() - f.getTime()) / (1000 * 3600 * 24)) + 1;
+    const gross = Math.max(0, Math.round((parseIsoToUtcMs(editToDate) - parseIsoToUtcMs(editFromDate)) / (1000 * 3600 * 24)) + 1);
     return {
       grossDays: gross,
       netLeaveDays: Math.max(0, gross - f295Extra),
@@ -278,10 +328,13 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
       badgeBorder = spanLength > 7 ? 'border-amber-300 dark:border-amber-800' : 'border-sky-300 dark:border-sky-800';
     }
 
-    let cleanNote = (first.notes || '').trim();
-    cleanNote = cleanNote.replace(/^(Annual|Casual|Recreation|Sick)?\s*Leave\s*:?\s*/i, '').trim();
+    const bestNote = getBestGroupNote(group);
+    let cleanNote = bestNote
+      .replace(/\(F-295:\s*\d+\s*Free Days\)/gi, '')
+      .replace(/^(Annual|Casual|Recreation|Sick)?\s*Leave\s*:?\s*/i, '')
+      .trim();
 
-    const f295Match = combinedNotes.match(/\(F-295: (\d+) Free Days\)/i);
+    const f295Match = combinedNotes.match(/f-295:\s*(\d+)/i);
     let f295Text = '';
     if (f295Match) {
       f295Text = `(F-295: ${f295Match[1]} Free Days)`;
@@ -291,131 +344,178 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   };
 
   const handleGroupClick = (group: DutyAssignment[]) => {
-    if (!allowEditDelete) return;
+    if (!canEditRows || group.length === 0) return;
     setEditingGroup(group);
     setEditFromDate(group[0].date);
     setEditToDate(group[group.length - 1].date);
-    const rawNotes = group[0].notes || '';
+
+    // Reset preset toggles so both From & To dates remain visible & editable with pre-filled dates
+    setEditSelectedPresetDays(null);
+    setEditIsCustomPresetActive(false);
+    setEditTdyPresetDays(null);
+    setEditDepPresetDays(null);
+
+    const rawNotes = getBestGroupNote(group);
+    const combinedNotes = group.map((a) => a.notes || '').join(' ');
     setEditNotes(rawNotes);
 
-    if (group[0].dutyCode === 'TDY') {
-        let dest = 'Custom';
-        let customDest = rawNotes;
-        let rem = '';
-        let matched = false;
-        for (const loc of presetLocations) {
-            if (rawNotes.startsWith(loc)) {
-                dest = loc;
-                customDest = '';
-                const remainder = rawNotes.substring(loc.length).trim();
-                rem = remainder.startsWith('-') ? remainder.substring(1).trim() : remainder;
-                matched = true;
-                break;
-            }
-        }
-        if (!matched && rawNotes.includes('-')) {
-           const parts = rawNotes.split('-');
-           customDest = parts[0].trim();
-           rem = parts.slice(1).join('-').trim();
-        }
-        setEditTdyDestination(dest);
-        setEditTdyCustomDestination(customDest);
-        setEditTdyRemarks(rem);
-    } else if (group[0].dutyCode === 'LEAVE') {
-        const info = getLeaveBreakdownInfo(group);
-        let type = 'Casual';
-        if (info.leaveType === 'Annual Leave') type = 'Annual';
-        else if (info.leaveType === 'Sick Leave') type = 'Sick';
-        else if (info.leaveType === 'Recreation Leave') type = 'Recreation';
-        setEditLeaveType(type);
+    const bucket = getGroupBucket(group[0].dutyCode);
 
-        const f295Match = rawNotes.match(/\(F-295: (\d+) Free Days\)/);
-        if (f295Match && f295Match[1]) {
-            setEditIncludeF295(true);
-            const days = parseInt(f295Match[1], 10);
-            if (days === 2) {
-                setEditF295Option('2');
-            } else if (days === 3) {
-                setEditF295Option('3');
-            } else {
-                setEditF295Option('custom');
-                setEditF295CustomDays(days);
-            }
+    if (bucket === 'TDY') {
+      let dest = 'Custom';
+      let customDest = rawNotes;
+      let rem = '';
+      let matched = false;
+      for (const loc of presetLocations) {
+        if (rawNotes.toLowerCase().startsWith(loc.toLowerCase())) {
+          dest = loc;
+          customDest = '';
+          const remainder = rawNotes.substring(loc.length).trim();
+          rem = remainder.startsWith('-') ? remainder.substring(1).trim() : remainder;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && rawNotes.includes('-')) {
+        const parts = rawNotes.split('-');
+        customDest = parts[0].trim();
+        rem = parts.slice(1).join('-').trim();
+      }
+      setEditTdyDestination(dest);
+      setEditTdyCustomDestination(customDest);
+      setEditTdyRemarks(rem);
+    } else if (bucket === 'LEAVE') {
+      const info = getLeaveBreakdownInfo(group);
+      let type = 'Casual';
+      if (info.leaveType === 'Annual Leave') type = 'Annual';
+      else if (info.leaveType === 'Sick Leave') type = 'Sick';
+      else if (info.leaveType === 'Recreation Leave') type = 'Recreation';
+      setEditLeaveType(type);
+
+      const f295Match = combinedNotes.match(/f-295:\s*(\d+)/i);
+      let f295DaysParsed = 0;
+      if (f295Match && f295Match[1]) {
+        setEditIncludeF295(true);
+        const days = parseInt(f295Match[1], 10);
+        f295DaysParsed = days;
+        if (days === 2) {
+          setEditF295Option('2');
+        } else if (days === 3) {
+          setEditF295Option('3');
         } else {
-            setEditIncludeF295(false);
-            setEditF295Option('2');
-            setEditF295CustomDays(0);
+          setEditF295Option('custom');
+          setEditF295CustomDays(days);
         }
-    } else if (group[0].dutyCode === 'ATT') {
-        let dest = 'Custom';
-        let customDest = rawNotes;
-        let rem = '';
-        let matched = false;
-        for (const loc of presetDeployLocations) {
-            if (rawNotes.startsWith(loc)) {
-                dest = loc;
-                customDest = '';
-                const remainder = rawNotes.substring(loc.length).trim();
-                rem = remainder.startsWith('-') ? remainder.substring(1).trim() : remainder;
-                matched = true;
-                break;
-            }
+      } else {
+        setEditIncludeF295(false);
+        setEditF295Option('2');
+        setEditF295CustomDays(0);
+      }
+      setEditCustomLeaveDays(Math.max(1, group.length - f295DaysParsed));
+    } else if (bucket === 'DEPL') {
+      const hasCanteenCode = group.some((a) => a.dutyCode === 'CANTEEN');
+      const hasBakeCode = group.some((a) => a.dutyCode === 'BAKE_N_BITE');
+      const effectiveRaw = rawNotes || (hasCanteenCode ? 'Canteen' : hasBakeCode ? 'Bake & Bite' : '');
+
+      let dest = 'Custom';
+      let customDest = effectiveRaw;
+      let rem = '';
+      let matched = false;
+      for (const loc of presetDeployLocations) {
+        if (effectiveRaw.toLowerCase().startsWith(loc.toLowerCase())) {
+          dest = loc;
+          customDest = '';
+          const remainder = effectiveRaw.substring(loc.length).trim();
+          rem = remainder.startsWith('-') ? remainder.substring(1).trim() : remainder;
+          matched = true;
+          break;
         }
-        if (!matched && rawNotes.includes('-')) {
-           const parts = rawNotes.split('-');
-           customDest = parts[0].trim();
-           rem = parts.slice(1).join('-').trim();
-        }
-        setEditDepLocation(dest);
-        setEditDepCustomLocation(customDest);
-        setEditDepRemarks(rem);
+      }
+      if (!matched && hasCanteenCode && !effectiveRaw) {
+        dest = 'Canteen';
+        customDest = '';
+      } else if (!matched && hasBakeCode && !effectiveRaw) {
+        dest = 'Bake & Bite';
+        customDest = '';
+      } else if (!matched && effectiveRaw.includes('-')) {
+        const parts = effectiveRaw.split('-');
+        customDest = parts[0].trim();
+        rem = parts.slice(1).join('-').trim();
+      }
+      setEditDepLocation(dest);
+      setEditDepCustomLocation(customDest);
+      setEditDepRemarks(rem);
     }
-    
+
     setErrorMsg('');
   };
 
   const handleSaveEdit = async () => {
-    if (!editingGroup) return;
-    
+    if (!editingGroup || editingGroup.length === 0) return;
+
+    if (!editFromDate || !editToDate || editFromDate > editToDate) {
+      setErrorMsg('Please select a valid From Date and To Date.');
+      return;
+    }
+
+    const bucket = getGroupBucket(editingGroup[0].dutyCode);
     let finalNotes = editNotes;
     let finalDutyCode = editingGroup[0].dutyCode;
-    if (editingGroup[0].dutyCode === 'TDY') {
-        const destToUse = editTdyDestination === 'Custom' ? editTdyCustomDestination : editTdyDestination;
-        if (!destToUse) {
-            setErrorMsg('Please select or enter a destination.');
-            return;
-        }
-        finalNotes = destToUse;
-        finalDutyCode = 'TDY';
-    } else if (editingGroup[0].dutyCode === 'LEAVE') {
-        // Keep user typed notes if they modified it manually, otherwise reconstruct
-        const fullTypeName = editLeaveType === 'Casual' ? 'Casual Leave' : editLeaveType === 'Annual' ? 'Annual Leave' : editLeaveType === 'Sick' ? 'Sick Leave' : editLeaveType === 'Recreation' ? 'Recreation Leave' : 'Leave';
-        const f295Extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
-        finalNotes = f295Extra > 0 ? `${fullTypeName} (F-295: ${f295Extra} Free Days)` : fullTypeName;
-    } else if (['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(editingGroup[0].dutyCode)) {
-        const destToUse = editDepLocation === 'Custom' ? editDepCustomLocation : editDepLocation;
-        if (!destToUse) {
-            setErrorMsg('Please select or enter a deployment location.');
-            return;
-        }
-        finalNotes = destToUse;
-        finalDutyCode = destToUse === 'Canteen' ? 'CANTEEN' : destToUse.includes('Bake') ? 'BAKE_N_BITE' : 'ATT';
+
+    if (bucket === 'TDY') {
+      const destToUse = (editTdyDestination === 'Custom' ? editTdyCustomDestination : editTdyDestination).trim();
+      if (!destToUse) {
+        setErrorMsg('Please select or enter a destination.');
+        return;
+      }
+      finalNotes = destToUse;
+      finalDutyCode = 'TDY';
+    } else if (bucket === 'LEAVE') {
+      const fullTypeName =
+        editLeaveType === 'Casual'
+          ? 'Casual Leave'
+          : editLeaveType === 'Annual'
+          ? 'Annual Leave'
+          : editLeaveType === 'Sick'
+          ? 'Sick Leave'
+          : editLeaveType === 'Recreation'
+          ? 'Recreation Leave'
+          : 'Leave';
+      const f295Extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
+      finalNotes = f295Extra > 0 ? `${fullTypeName} (F-295: ${f295Extra} Free Days)` : fullTypeName;
+      finalDutyCode = 'LEAVE';
+    } else if (bucket === 'DEPL') {
+      const destToUse = (editDepLocation === 'Custom' ? editDepCustomLocation : editDepLocation).trim();
+      if (!destToUse) {
+        setErrorMsg('Please select or enter a deployment location.');
+        return;
+      }
+      finalNotes = destToUse;
+      finalDutyCode =
+        destToUse.toLowerCase() === 'canteen'
+          ? 'CANTEEN'
+          : destToUse.toLowerCase().includes('bake')
+          ? 'BAKE_N_BITE'
+          : 'DEPLOYMENT';
     }
-    
+
     setSavingEdit(true);
     setErrorMsg('');
     try {
-
-      await fetch('/api/roster/delete-range', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          airmanId: airman.id,
-          fromDate: editingGroup[0].date,
-          toDate: editingGroup[editingGroup.length - 1].date,
-          dutyCode: editingGroup[0].dutyCode,
-        }),
-      });
+      const distinctCodes = Array.from(new Set(editingGroup.map((a) => a.dutyCode).filter(Boolean)));
+      for (const code of distinctCodes) {
+        await fetch('/api/roster/delete-range', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            airmanId: airman.id,
+            fromDate: editingGroup[0].date,
+            toDate: editingGroup[editingGroup.length - 1].date,
+            dutyCode: code,
+            disposalScope: 'ALL',
+          }),
+        });
+      }
 
       const res = await fetch('/api/roster/assign-range', {
         method: 'POST',
@@ -431,11 +531,10 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
       });
 
       if (!res.ok) throw new Error('Failed to update entry');
-      
+
       setEditingGroup(null);
-      setRefreshKey(prev => prev + 1);
-      const fetchEvt = new CustomEvent('baf_state_updated');
-      window.dispatchEvent(fetchEvt);
+      setRefreshKey((prev) => prev + 1);
+      window.dispatchEvent(new CustomEvent('baf_state_updated'));
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to save edits');
     } finally {
@@ -447,29 +546,32 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     if (!editingGroup) return;
     setShowDeleteGroupConfirm(true);
   };
-  
+
   const confirmDeleteGroup = async () => {
-    if (!editingGroup) return;
+    if (!editingGroup || editingGroup.length === 0) return;
     setShowDeleteGroupConfirm(false);
     setDeletingGroup(true);
     setErrorMsg('');
     try {
-      const res = await fetch('/api/roster/delete-range', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          airmanId: airman.id,
-          fromDate: editingGroup[0].date,
-          toDate: editingGroup[editingGroup.length - 1].date,
-          dutyCode: editingGroup[0].dutyCode,
-        }),
-      });
-      if (!res.ok) throw new Error('Failed to delete entry');
-      
+      const distinctCodes = Array.from(new Set(editingGroup.map((a) => a.dutyCode).filter(Boolean)));
+      for (const code of distinctCodes) {
+        const res = await fetch('/api/roster/delete-range', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            airmanId: airman.id,
+            fromDate: editingGroup[0].date,
+            toDate: editingGroup[editingGroup.length - 1].date,
+            dutyCode: code,
+            disposalScope: 'ALL',
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to delete entry');
+      }
+
       setEditingGroup(null);
-      setRefreshKey(prev => prev + 1);
-      const fetchEvt = new CustomEvent('baf_state_updated');
-      window.dispatchEvent(fetchEvt);
+      setRefreshKey((prev) => prev + 1);
+      window.dispatchEvent(new CustomEvent('baf_state_updated'));
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to delete');
     } finally {
@@ -480,6 +582,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
   useEffect(() => {
     const fetchHistory = async () => {
+      setLoading(true);
       try {
         const [fromY, fromM] = fromDate.slice(0, 7).split('-').map(Number);
         const [toY, toM] = toDate.slice(0, 7).split('-').map(Number);
@@ -497,29 +600,58 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
           if (months.length > 24) break;
         }
 
-        const promises = months.map((mKey) =>
-          fetch(`/api/roster?month=${mKey}`)
-            .then(async (res) => {
-              if (!res.ok) return [];
-              const data = await res.json();
-              if (data && Array.isArray(data.assignments)) {
-                return data.assignments as DutyAssignment[];
-              }
-              if (Array.isArray(data)) {
-                return data as DutyAssignment[];
-              }
-              return [];
-            })
-            .catch(() => [] as DutyAssignment[])
-        );
+        let all: DutyAssignment[] = [];
+        if (months.length > 3) {
+          const years: number[] = [];
+          for (let y = fromY; y <= toY; y++) {
+            years.push(y);
+          }
+          const yearPromises = years.map((y) =>
+            fetch(`/api/roster/year?year=${y}`)
+              .then(async (res) => {
+                if (!res.ok) return [];
+                const data = await res.json();
+                if (data && Array.isArray(data.assignments)) return data.assignments as DutyAssignment[];
+                if (Array.isArray(data)) return data as DutyAssignment[];
+                return [];
+              })
+              .catch(() => [] as DutyAssignment[])
+          );
+          const yearResults = await Promise.all(yearPromises);
+          all = yearResults.flat();
+        } else {
+          const promises = months.map((mKey) =>
+            fetch(`/api/roster?month=${mKey}`)
+              .then(async (res) => {
+                if (!res.ok) return [];
+                const data = await res.json();
+                if (data && Array.isArray(data.assignments)) {
+                  return data.assignments as DutyAssignment[];
+                }
+                if (Array.isArray(data)) {
+                  return data as DutyAssignment[];
+                }
+                return [];
+              })
+              .catch(() => [] as DutyAssignment[])
+          );
+          const results = await Promise.all(promises);
+          all = results.flat();
+        }
 
-        const results = await Promise.all(promises);
-        const all: DutyAssignment[] = results.flat();
-        let airmanAss = all.filter(
-          (a) => a && matchAirmanId(a.airmanId, airman.id) && a.date >= fromDate && a.date <= toDate
-        );
-        airmanAss.sort((a, b) => a.date.localeCompare(b.date));
+        const dedupMap = new Map<string, DutyAssignment>();
+        all.forEach((a) => {
+          if (!a || !a.date) return;
+          const matchesThisAirman =
+            matchAirmanId(a.airmanId, airman.id) ||
+            (airman.bdNo ? matchAirmanId(a.airmanId, airman.bdNo) : false);
+          if (!matchesThisAirman) return;
+          if (a.date < fromDate || a.date > toDate) return;
+          const k = `${a.date}_${a.dutyCode}_${a.idaShift || ''}_${a.notes || ''}`;
+          dedupMap.set(k, a);
+        });
 
+        const airmanAss = Array.from(dedupMap.values()).sort((a, b) => a.date.localeCompare(b.date));
         setAssignments(airmanAss);
       } catch (err) {
         console.error('Failed to load airman history:', err);
@@ -537,33 +669,58 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     return () => {
       window.removeEventListener('baf_state_updated', handleGlobalUpdate);
     };
-  }, [airman.id, fromDate, toDate, refreshKey]);
+  }, [airman.id, airman.bdNo, fromDate, toDate, refreshKey]);
 
   const getGroupedList = (list: any[]) => {
     if (list.length === 0) return [];
-    
-    // Sort by dutyCode then date to group correctly and detect duplicates
-    const sorted = [...list].sort((a, b) => {
-      if (a.dutyCode !== b.dutyCode) return (a.dutyCode || '').localeCompare(b.dutyCode || '');
-      // Also separate by notes if they differ (e.g. different destinations)
-      if ((a.notes || '') !== (b.notes || '')) return (a.notes || '').localeCompare(b.notes || '');
+
+    // Deduplicate same (bucket, date) entries while preserving the richest notes / specific dutyCode
+    const byBucketDate = new Map<string, any>();
+    for (const item of list) {
+      if (!item || !item.date) continue;
+      const bucket = getGroupBucket(item.dutyCode);
+      const key = `${bucket}__${item.date}`;
+      const existing = byBucketDate.get(key);
+      if (!existing) {
+        byBucketDate.set(key, item);
+      } else {
+        const existingNotes = (existing.notes || '').trim();
+        const currNotes = (item.notes || '').trim();
+        const currMoreSpecificDepl =
+          bucket === 'DEPL' &&
+          existing.dutyCode === 'ATT' &&
+          item.dutyCode !== 'ATT';
+        const currRicherNote =
+          (/f-295/i.test(currNotes) && !/f-295/i.test(existingNotes)) ||
+          (currNotes.length > existingNotes.length && !/f-295/i.test(existingNotes));
+        if (currMoreSpecificDepl || currRicherNote) {
+          byBucketDate.set(key, item);
+        }
+      }
+    }
+
+    // Sort strictly by bucket then date so contiguous periods with zero gap ALWAYS merge into one period
+    const sorted = Array.from(byBucketDate.values()).sort((a, b) => {
+      const bA = getGroupBucket(a.dutyCode);
+      const bB = getGroupBucket(b.dutyCode);
+      if (bA !== bB) return bA.localeCompare(bB);
       return a.date.localeCompare(b.date);
     });
-    
-    const groups = [];
+
+    const groups: any[][] = [];
     let currentGroup = [sorted[0]];
-    
+
     for (let i = 1; i < sorted.length; i++) {
       const current = sorted[i];
       const prev = currentGroup[currentGroup.length - 1];
-      
-      const currDate = new Date(current.date);
-      const prevDate = new Date(prev.date);
-      const diffTime = Math.abs(currDate.getTime() - prevDate.getTime());
-      const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
 
-      const isContiguous = (diffDays === 1 || diffDays === 0); const isSameDutyCode = current.dutyCode === prev.dutyCode && (current.notes || '') === (prev.notes || ''); if (isSameDutyCode && isContiguous) {
-        if (diffDays === 1) { // avoid adding same date duplicates
+      const diffDays = Math.round(
+        (parseIsoToUtcMs(current.date) - parseIsoToUtcMs(prev.date)) / (1000 * 60 * 60 * 24)
+      );
+
+      const isSameBucket = getGroupBucket(current.dutyCode) === getGroupBucket(prev.dutyCode);
+      if (isSameBucket && diffDays <= 1) {
+        if (diffDays === 1) {
           currentGroup.push(current);
         }
       } else {
@@ -574,7 +731,8 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     if (currentGroup.length > 0) {
       groups.push(currentGroup);
     }
-    
+
+    groups.sort((a, b) => (a[0]?.date || '').localeCompare(b[0]?.date || ''));
     return groups;
   };
 
@@ -585,8 +743,9 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
       const first = group[0];
       if (filterFn(first)) {
         let groupDays = group.length;
-        if (first.dutyCode === 'LEAVE' && first.notes) {
-          const match = first.notes.match(/\(F-295: (\d+) Free Days\)/);
+        if (first.dutyCode === 'LEAVE') {
+          const combined = group.map((a) => a.notes || '').join(' ');
+          const match = combined.match(/f-295:\s*(\d+)/i);
           if (match && match[1]) {
             groupDays = Math.max(0, groupDays - parseInt(match[1], 10));
           }
@@ -602,14 +761,15 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   
   
   
-  const formatDateRange = (startDate, endDate) => {
+  const formatDateRange = (startDate: string, endDate: string) => {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formatSingle = (dateStr) => {
-      if(!dateStr) return '';
+    const formatSingle = (dateStr: string) => {
+      if (!dateStr) return '';
       const parts = dateStr.split('-');
+      const y = parts[0] ? parts[0].slice(-2) : '';
       const d = parseInt(parts[2], 10);
       const m = months[parseInt(parts[1], 10) - 1];
-      return `${d < 10 ? '0' + d : d} ${m}`;
+      return `${d < 10 ? '0' + d : d} ${m} ${y}`.trim();
     };
     
     if (startDate === endDate) return formatSingle(startDate);
@@ -621,7 +781,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
       return a.dutyCode === 'CANTEEN';
     }
     if (categoryFilter === 'DUTY') return !['LEAVE', 'TDY', 'ATT', 'DUTY_OFF', 'ON_PARADE', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(a.dutyCode);
-    if (categoryFilter === 'DEPL') return ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(a.dutyCode);
+    if (categoryFilter === 'DEPL' || categoryFilter === 'ATT') return ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(a.dutyCode);
     if (categoryFilter === 'LEAVE') return a.dutyCode === 'LEAVE';
     if (categoryFilter === 'TDY') return a.dutyCode === 'TDY';
     if (categoryFilter !== 'ALL') {
@@ -632,7 +792,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     return true;
   });
 
-  const isGroupedView = categoryFilter === 'ALL' || categoryFilter === 'LEAVE' || categoryFilter === 'TDY' || categoryFilter === 'DEPL' || categoryFilter === 'DUTY' || categoryFilter === 'CANTEEN';
+  const isGroupedView = categoryFilter === 'ALL' || categoryFilter === 'LEAVE' || categoryFilter === 'TDY' || categoryFilter === 'DEPL' || categoryFilter === 'ATT' || categoryFilter === 'DUTY' || categoryFilter === 'CANTEEN';
   const groupedList = isGroupedView ? getGroupedList(filteredList) : [];
 
   // Leave breakdown summary totals for the selected period
@@ -720,8 +880,9 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
   const _currM = String(_todayD.getMonth() + 1).padStart(2, '0');
   const _currLastDay = new Date(_currY, _todayD.getMonth() + 1, 0).getDate();
   const isThisMonthActive = fromDate === `${_currY}-${_currM}-01` && toDate === `${_currY}-${_currM}-${_currLastDay}`;
-  const isFullYearActive = fromDate === `${_currY}-01-01` && toDate === `${_currY}-12-31`;
-  const isDutyMatrixMode = historyOnly && initialCategory && !['ALL', 'DUTY', 'LEAVE', 'TDY', 'DEPL'].includes(initialCategory);
+  const _activeFromYear = fromDate.slice(0, 4);
+  const isFullYearActive = Boolean(_activeFromYear) && fromDate === `${_activeFromYear}-01-01` && toDate === `${_activeFromYear}-12-31`;
+  const isDutyMatrixMode = historyOnly && normalizedInitialCategory && !['ALL', 'DUTY', 'LEAVE', 'TDY', 'DEPL'].includes(normalizedInitialCategory);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/75 backdrop-blur-xs p-0 sm:p-5">
@@ -848,8 +1009,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                     </button>
                     <button
                       onClick={() => {
-                        const d = new Date();
-                        const y = d.getFullYear();
+                        const y = initialYear || Number(fromDate.slice(0, 4)) || new Date().getFullYear();
                         setFromDate(`${y}-01-01`);
                         setToDate(`${y}-12-31`);
                       }}
@@ -913,7 +1073,15 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                   </div>
                 ) : isDutyMatrixMode ? (
                   <div className="text-[12px] font-black text-slate-800 dark:text-white px-3 py-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg">
-                    {DUTY_TYPE_MAP.get(initialCategory as any)?.name || initialCategory}
+                    {DUTY_TYPE_MAP.get(normalizedInitialCategory as any)?.name || normalizedInitialCategory}
+                  </div>
+                ) : historyOnly && ['LEAVE', 'TDY', 'DEPL'].includes(normalizedInitialCategory) ? (
+                  <div className="text-[12px] font-black text-emerald-800 dark:text-emerald-200 px-3 py-1.5 bg-emerald-100 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800/70 rounded-lg">
+                    {normalizedInitialCategory === 'DEPL'
+                      ? 'Deployment History'
+                      : normalizedInitialCategory === 'TDY'
+                      ? 'TDY History'
+                      : 'Leave History'}
                   </div>
                 ) : !historyOnly && (
                   <div className="flex items-center space-x-1 bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-700 text-[11px] font-bold">
@@ -944,14 +1112,57 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
             {/* Assignments Table */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xs">
                 <div className="flex-1 overflow-y-auto relative">
-                {allowEditDelete && editingGroup ? (
+                {canEditRows && editingGroup ? (
                   <div className="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm animate-fadeIn">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-slate-900 dark:text-white">Edit / Remove Entry</h3>
-                      <button onClick={() => setEditingGroup(null)} className="p-1.5 bg-slate-100 dark:bg-slate-700 text-slate-500 hover:text-slate-700 rounded-lg">
+                    <div className="flex items-center justify-between mb-3.5">
+                      <div>
+                        <h3 className="font-black text-sm text-slate-900 dark:text-white">
+                          {getGroupBucket(editingGroup[0].dutyCode) === 'LEAVE'
+                            ? 'Edit / Remove Leave'
+                            : getGroupBucket(editingGroup[0].dutyCode) === 'TDY'
+                            ? 'Edit / Remove TDY'
+                            : getGroupBucket(editingGroup[0].dutyCode) === 'DEPL'
+                            ? 'Edit / Remove Deployment'
+                            : 'Edit / Remove Entry'}
+                        </h3>
+                        <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                          Update dates or options below, or remove this period completely.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setEditingGroup(null)}
+                        className="p-1.5 bg-slate-100 dark:bg-slate-700 text-slate-500 hover:text-slate-700 dark:text-slate-300 dark:hover:text-white rounded-lg cursor-pointer"
+                        title="Back to history"
+                      >
                         <X className="w-4 h-4" />
                       </button>
                     </div>
+
+                    {/* Fixed / Locked Personnel Banner (same format as Assign Leave / TDY / Deployment) */}
+                    <div className="mb-4 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          Airman / Personnel
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                          <span className="text-xs font-mono font-black text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/70 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800/80">
+                            {airman.bdNo}
+                          </span>
+                          <span className="text-sm font-black text-slate-900 dark:text-white truncate">
+                            {airman.rank} {effectiveFullName}
+                          </span>
+                        </div>
+                        <span className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
+                          {effectiveFlight} Flight • {airman.trade}
+                        </span>
+                      </div>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-black uppercase tracking-wider shrink-0 border border-slate-300/80 dark:border-slate-700">
+                        <Lock className="w-3 h-3" />
+                        Fixed
+                      </span>
+                    </div>
+
                     {errorMsg && (
                       <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-xs rounded-xl flex items-center space-x-2 font-bold">
                         <AlertCircle className="w-4 h-4 shrink-0" />
@@ -959,12 +1170,10 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                       </div>
                     )}
                     <div className="space-y-4">
-                      
-
-                      {editingGroup[0].dutyCode === 'LEAVE' ? (
+                      {getGroupBucket(editingGroup[0].dutyCode) === 'LEAVE' ? (
                         <div className="space-y-4">
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
                 From Date
@@ -977,15 +1186,11 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                   if (editToDate < val) setEditToDate(val);
                   
                   if (editSelectedPresetDays !== null) {
-                    const d = new Date(val);
                     const extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
-                    d.setDate(d.getDate() + editSelectedPresetDays + extra - 1);
-                    setEditToDate(d.toISOString().split('T')[0]);
+                    setEditToDate(addDaysToIso(val, editSelectedPresetDays + extra - 1));
                   } else if (editIsCustomPresetActive) {
-                    const d = new Date(val);
                     const extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
-                    d.setDate(d.getDate() + editCustomLeaveDays + extra - 1);
-                    setEditToDate(d.toISOString().split('T')[0]);
+                    setEditToDate(addDaysToIso(val, editCustomLeaveDays + extra - 1));
                   }
                 }}
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
@@ -1067,7 +1272,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
               <div className="flex items-center justify-between">
                 <div 
                   className="flex items-center space-x-2.5 cursor-pointer select-none group"
-                  onClick={() => setEditIncludeF295(!editIncludeF295)}
+                  onClick={() => handleEditF295Toggle(!editIncludeF295)}
                 >
                   <div className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ease-in-out ${editIncludeF295 ? 'bg-purple-600' : 'bg-slate-300 dark:bg-slate-600 group-hover:bg-slate-400 dark:group-hover:bg-slate-500'}`}>
                     <span className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm ring-0 transition-transform duration-200 ease-in-out ${editIncludeF295 ? 'translate-x-4.5' : 'translate-x-0.5'}`} style={{ transform: editIncludeF295 ? 'translateX(18px)' : 'translateX(3px)' }} />
@@ -1290,20 +1495,18 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                 Assignment Date
               </label>
              <div className="grid grid-cols-5 gap-1.5 mb-3">
-              {[{label: 'Today', val: 1}, {label: '2 Days', val: 2}, {label: '3 Days', val: 3}, {label: '7 Days', val: 7}, {label: '15 Days', val: 15}].map((opt) => {
+              {[{label: '1 Day', val: 1}, {label: '2 Days', val: 2}, {label: '3 Days', val: 3}, {label: '7 Days', val: 7}, {label: '15 Days', val: 15}].map((opt) => {
                 const isSelected = editTdyPresetDays === opt.val;
                 return (
                   <button
                     key={opt.val}
                     type="button"
                     onClick={() => {
-    setEditTdyPresetDays(opt.val);
-    if (editFromDate) {
-      const d = new Date(editFromDate);
-      d.setDate(d.getDate() + opt.val - 1);
-      setEditToDate(d.toISOString().split('T')[0]);
-    }
-  }}
+                      setEditTdyPresetDays(opt.val);
+                      if (editFromDate) {
+                        setEditToDate(addDaysToIso(editFromDate, opt.val - 1));
+                      }
+                    }}
                     className={`py-1.5 px-1 rounded-xl text-xs font-black transition-all cursor-pointer shadow-2xs text-center border ${
                       isSelected
                         ? 'bg-amber-600 text-white border-amber-600 ring-2 ring-amber-500/50 shadow-sm'
@@ -1317,8 +1520,8 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
             </div>
           </div>
 
-          {/* Date Range (Dynamic based on Preset) */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Date Range */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
                 From Date
@@ -1328,43 +1531,31 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                 onChange={(e) => {
                   const val = e.target.value;
                   setEditFromDate(val);
-                  
                   if (!editToDate || editToDate < val) {
                     setEditToDate(val);
                   }
-
-                  // Keep To Date in sync if it's a single day selection
-                  if (editTdyPresetDays === 1 || editTdyPresetDays === -1) {
-                      setEditToDate(val);
-                      const todayStr = new Date().toISOString().split('T')[0];
-                      setEditTdyPresetDays(val === todayStr ? 1 : -1);
-                  } else if (editTdyPresetDays !== null) {
-                      const d = new Date(val);
-                      d.setDate(d.getDate() + editTdyPresetDays - 1);
-                      setEditToDate(d.toISOString().split('T')[0]);
+                  if (editTdyPresetDays !== null && editTdyPresetDays > 0) {
+                    setEditToDate(addDaysToIso(val, editTdyPresetDays - 1));
                   }
                 }}
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
               />
             </div>
-            
-            {/* Show To Date only if > 1 day selected, or if user is manually overriding */}
-            {editTdyPresetDays !== 1 && editTdyPresetDays !== -1 && (
-                <div className="animate-fadeIn">
-                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
-                    To Date
-                  </label>
-                  <DateNavigator
-                    value={editToDate}
-                    min={editFromDate}
-                    onChange={(e) => {
-                      setEditToDate(e.target.value);
-                      setEditTdyPresetDays(null); // Custom end date removes preset
-                    }}
-                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
-                  />
-                </div>
-            )}
+
+            <div className="animate-fadeIn">
+              <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                To Date
+              </label>
+              <DateNavigator
+                value={editToDate}
+                min={editFromDate}
+                onChange={(e) => {
+                  setEditToDate(e.target.value);
+                  setEditTdyPresetDays(null);
+                }}
+                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
+              />
+            </div>
           </div>
 
           {/* Real-time Duration Summary */}
@@ -1434,7 +1625,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
 
           {/* Date Range */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
                 From Date
@@ -1450,9 +1641,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                   }
                   
                   if (editDepPresetDays !== null) {
-                    const d = new Date(val);
-                    d.setDate(d.getDate() + editDepPresetDays - 1);
-                    setEditToDate(d.toISOString().split('T')[0]);
+                    setEditToDate(addDaysToIso(val, editDepPresetDays - 1));
                   }
                 }}
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white outline-none cursor-pointer"
@@ -1489,13 +1678,11 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                     key={days}
                     type="button"
                     onClick={() => {
-    setEditDepPresetDays(days);
-    if (editFromDate) {
-      const d = new Date(editFromDate);
-      d.setDate(d.getDate() + days - 1);
-      setEditToDate(d.toISOString().split('T')[0]);
-    }
-  }}
+                      setEditDepPresetDays(days);
+                      if (editFromDate) {
+                        setEditToDate(addDaysToIso(editFromDate, days - 1));
+                      }
+                    }}
                     className={`py-2 px-1 rounded-xl text-xs font-black transition-all cursor-pointer shadow-2xs text-center border ${
                       isSelected
                         ? 'bg-teal-600 text-white border-teal-600 ring-2 ring-teal-500/50 shadow-sm'
@@ -1704,13 +1891,49 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                         </div>
                       </div>
                     )}
+                    {(categoryFilter === 'DEPL' || categoryFilter === 'TDY') && (
+                      <div className="grid grid-cols-2 gap-2 mb-3">
+                        <div className="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 text-center">
+                          <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider block">
+                            {categoryFilter === 'DEPL' ? 'Deployment Periods' : 'TDY Periods'}
+                          </span>
+                          <span className="text-base font-black text-indigo-700 dark:text-indigo-300">
+                            {groupedList.length} {groupedList.length === 1 ? 'Time' : 'Times'}
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-center">
+                          <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
+                            {categoryFilter === 'DEPL' ? 'Total Deployment Days' : 'Total TDY Days'}
+                          </span>
+                          <span className="text-base font-black text-emerald-700 dark:text-emerald-300">
+                            {groupedList.reduce((sum, g) => sum + g.length, 0)} {groupedList.reduce((sum, g) => sum + g.length, 0) === 1 ? 'Day' : 'Days'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {canEditRows && groupedList.length > 0 && (
+                      <div className="flex items-center justify-end px-3 py-1.5 bg-slate-50/70 dark:bg-slate-900/50 border-b border-slate-200/80 dark:border-slate-800 text-[10.5px] font-bold text-slate-500 dark:text-slate-400">
+                        <span className="inline-flex items-center gap-1">
+                          <Pencil className="w-3 h-3 text-emerald-500" />
+                          Click any row to edit or remove
+                        </span>
+                      </div>
+                    )}
                     <table className="w-full text-center border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold uppercase text-[10px] tracking-wider">
                           <th className="py-2.5 px-3.5">Ser</th>
-                          <th className="py-2.5 px-3.5">{categoryFilter === 'LEAVE' || initialCategory === 'LEAVE' ? 'Leave Type / Description' : 'Description'}</th>
-                          <th className="py-2.5 px-3.5">Period</th>
-                          <th className="py-2.5 px-3.5 text-right">Total</th>
+                          <th className="py-2.5 px-3.5">
+                            {categoryFilter === 'LEAVE' || normalizedInitialCategory === 'LEAVE'
+                              ? 'Leave Type / Description'
+                              : categoryFilter === 'DEPL' || normalizedInitialCategory === 'DEPL'
+                              ? 'Deployment / Place'
+                              : categoryFilter === 'TDY' || normalizedInitialCategory === 'TDY'
+                              ? 'TDY Destination / Remarks'
+                              : 'Description'}
+                          </th>
+                          <th className="py-2.5 px-3.5">Period (From – To)</th>
+                          <th className="py-2.5 px-3.5 text-right">Total Days</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1722,14 +1945,21 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                           groupedList.map((group, idx) => {
                             const first = group[0];
                             const last = group[group.length - 1];
-                            const isLeave = first.dutyCode === 'LEAVE';
+                            const bucket = getGroupBucket(first.dutyCode);
+                            const isLeave = bucket === 'LEAVE';
                             const leaveInfo = isLeave ? getLeaveBreakdownInfo(group) : null;
+                            const bestNote = getBestGroupNote(group);
                             const typeOrDest = (() => {
-                              if (first.dutyCode === 'LEAVE') return leaveInfo?.leaveType || first.notes || 'Leave';
-                              if (first.dutyCode === 'TDY') return first.notes || 'TDY';
-                              if (['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(first.dutyCode)) return first.notes || DUTY_TYPE_MAP.get(first.dutyCode)?.name || 'Deployment';
+                              if (bucket === 'LEAVE') return leaveInfo?.leaveType || bestNote || 'Leave';
+                              if (bucket === 'TDY') return bestNote || 'TDY';
+                              if (bucket === 'DEPL') {
+                                if (bestNote) return bestNote;
+                                if (group.some((a) => a.dutyCode === 'CANTEEN')) return 'Canteen';
+                                if (group.some((a) => a.dutyCode === 'BAKE_N_BITE')) return 'Bake & Bite';
+                                return DUTY_TYPE_MAP.get(first.dutyCode)?.name || 'Deployment';
+                              }
                               if (first.dutyCode === 'OTHERS' || first.dutyCode === 'OTHER' || (typeof first.dutyCode === 'string' && first.dutyCode.startsWith('OTHERS_'))) {
-                                const noteName = first.notes?.trim();
+                                const noteName = bestNote;
                                 return (noteName && !['OTHER', 'OTHERS', 'OTHER DISPOSAL', 'CUSTOM DISPOSAL', 'CUSTOM'].includes(noteName.toUpperCase())) ? noteName : 'Disposal';
                               }
                               return DUTY_TYPE_MAP.get(first.dutyCode)?.name || first.dutyCode;
@@ -1737,9 +1967,9 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                             return (
                               <tr
                                 key={idx}
-                                onClick={allowEditDelete ? () => handleGroupClick(group) : undefined}
-                                className={`transition-colors ${allowEditDelete ? 'hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer' : ''}`}
-                                title={allowEditDelete ? 'Click to edit or remove' : undefined}
+                                onClick={canEditRows ? () => handleGroupClick(group) : undefined}
+                                className={`group transition-colors ${canEditRows ? 'hover:bg-emerald-50/60 dark:hover:bg-slate-800/70 cursor-pointer' : ''}`}
+                                title={canEditRows ? 'Click to edit or remove' : undefined}
                               >
                                 <td className="py-2.5 px-3.5 font-mono font-bold text-slate-800 dark:text-slate-200">
                                   {String(idx + 1).padStart(2, '0')}
@@ -1768,17 +1998,23 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                                 <td className="py-2.5 px-3.5 text-slate-600 dark:text-slate-400 font-semibold whitespace-nowrap">
                                   {formatDateRange(first.date, last.date)}
                                 </td>
-                                <td className="py-2.5 px-3.5 text-right font-black text-emerald-600 dark:text-emerald-400">
-                                  {(() => {
-                                    let days = group.length;
-                                    if (first.dutyCode === 'LEAVE' && first.notes) {
-                                      const match = first.notes.match(/\(F-295: (\d+) Free Days\)/);
-                                      if (match && match[1]) {
-                                        days = Math.max(0, days - parseInt(match[1], 10));
+                                <td className="py-2.5 px-3.5 text-right font-black text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                  <span className="inline-flex items-center justify-end gap-1.5">
+                                    {(() => {
+                                      let days = group.length;
+                                      if (isLeave) {
+                                        const combined = group.map((a) => a.notes || '').join(' ');
+                                        const match = combined.match(/f-295:\s*(\d+)/i);
+                                        if (match && match[1]) {
+                                          days = Math.max(0, days - parseInt(match[1], 10));
+                                        }
                                       }
-                                    }
-                                    return `${String(days).padStart(2, '0')} days`;
-                                  })()}
+                                      return `${String(days).padStart(2, '0')} days`;
+                                    })()}
+                                    {canEditRows && (
+                                      <Pencil className="w-3 h-3 text-slate-400 group-hover:text-emerald-500 transition-colors" />
+                                    )}
+                                  </span>
                                 </td>
                               </tr>
                             );
@@ -1827,9 +2063,9 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                           return (
                             <tr
                               key={idx}
-                              onClick={allowEditDelete ? () => handleGroupClick([item]) : undefined}
-                              className={`transition-colors ${allowEditDelete ? 'hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer' : ''}`}
-                              title={allowEditDelete ? 'Click to edit or remove' : undefined}
+                              onClick={canEditRows ? () => handleGroupClick([item]) : undefined}
+                              className={`transition-colors ${canEditRows ? 'hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer' : ''}`}
+                              title={canEditRows ? 'Click to edit or remove' : undefined}
                             >
                               <td className="py-2.5 px-3.5 font-mono font-bold text-slate-800 dark:text-slate-200">
                                 {item.date}

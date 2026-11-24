@@ -4,9 +4,11 @@ import { Airman, DutyAssignment } from '../types';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { resolveAirmanDutyForDate, addAssignmentToMap, calculateDutyStats } from '../data/rosterGenerator';
 import { formatRank } from '../utils/rankFormatter';
-import { Printer, FileSpreadsheet, X, Filter, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Printer, FileSpreadsheet, X, Filter, ChevronLeft, ChevronRight, ArrowLeft, Calendar, Layers, Loader2 } from 'lucide-react';
 import {
   exportMonthlyAttendanceRegisterExcel,
+  exportMultiMonthAttendanceRegisterExcel,
+  AttendanceMonthSpec,
   formatFlightFullName,
   getRankTier,
   getAirmanJoinDateISO,
@@ -48,10 +50,30 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   const [selectedRank, setSelectedRank] = useState<string>('All');
   const [dbRefreshTick, setDbRefreshTick] = useState<number>(0);
 
+  // Dedicated full-screen Excel Export page state (Current Month, Full Year, or From Month -> To Month)
+  const [showExcelMenu, setShowExcelMenu] = useState<boolean>(false);
+  const [isExportingExcel, setIsExportingExcel] = useState<boolean>(false);
+  const [exportFullYear, setExportFullYear] = useState<number>(year);
+  const [rangeFromYear, setRangeFromYear] = useState<number>(year);
+  const [rangeFromMonth, setRangeFromMonth] = useState<number>(1);
+  const [rangeToYear, setRangeToYear] = useState<number>(year);
+  const [rangeToMonth, setRangeToMonth] = useState<number>(month);
+
   useEffect(() => {
     setSelectedYear(year);
     setSelectedMonth(month);
+    setExportFullYear(year);
+    setRangeFromYear(year);
+    setRangeFromMonth(1);
+    setRangeToYear(year);
+    setRangeToMonth(month);
   }, [year, month]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setShowExcelMenu(false);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (flightFilter && flightFilter !== 'All') {
@@ -96,11 +118,15 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
   const daysArray = Array.from({ length: daysInMonth }, (_, i) => i + 1);
   const monthKey = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
 
-  // Dynamically combine assignments from localDb for the active selectedYear & selectedMonth (plus previous month for Day 1 Duty Off) and passed assignments prop
+  // Dynamically combine assignments from localDb for the active selectedYear & selectedMonth (plus adjacent months for Day 1 Duty Off & cross-month AL/CL leave streak detection)
   const effectiveAssignments = useMemo(() => {
     const prevYear = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
     const prevMonth = selectedMonth === 1 ? 12 : selectedMonth - 1;
     const prevMonthKey = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+
+    const nextYear = selectedMonth === 12 ? selectedYear + 1 : selectedYear;
+    const nextMonth = selectedMonth === 12 ? 1 : selectedMonth + 1;
+    const nextMonthKey = `${nextYear}-${String(nextMonth).padStart(2, '0')}`;
 
     const dedup = new Map<string, DutyAssignment>();
     const addItems = (list?: DutyAssignment[]) => {
@@ -108,7 +134,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       list.forEach((a) => {
         if (!a || !a.date || (a as any).isDeleted) return;
         const dStr = String(a.date);
-        if (!dStr.startsWith(monthKey) && !dStr.startsWith(prevMonthKey)) return;
+        if (!dStr.startsWith(monthKey) && !dStr.startsWith(prevMonthKey) && !dStr.startsWith(nextMonthKey)) return;
         const key = `${a.airmanId}_${dStr}_${a.dutyCode}_${a.idaShift || ''}_${a.disposalScope || 'ALL'}`;
         dedup.set(key, a);
       });
@@ -117,6 +143,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
     try {
       addItems(localDb.getRoster(monthKey).assignments);
       addItems(localDb.getRoster(prevMonthKey).assignments);
+      addItems(localDb.getRoster(nextMonthKey).assignments);
     } catch {}
     addItems(assignments);
 
@@ -272,15 +299,24 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       if (combined.includes('annual') || combined.includes('(al)') || /\bal\b/.test(combined)) {
         return { label: 'AL', type: 'LEAVE' };
       }
-      // Check contiguous leave streak length around this day (span > 7 days => AL)
+      if (combined.includes('casual') || combined.includes('(cl)') || /\bcl\b/.test(combined)) {
+        return { label: 'CL', type: 'LEAVE' };
+      }
+      // Check contiguous leave streak length around this day across month boundaries (span > 7 days => AL)
       let streakLen = 1;
-      for (let d = day - 1; d >= 1; d--) {
-        const dStr = `${monthKey}-${d < 10 ? `0${d}` : `${d}`}`;
+      const baseUtcMs = Date.UTC(selectedYear, selectedMonth - 1, day);
+      const dayMs = 86400000;
+      const formatUtc = (ms: number) => {
+        const dt = new Date(ms);
+        return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+      };
+      for (let step = 1; step <= 60; step++) {
+        const dStr = formatUtc(baseUtcMs - step * dayMs);
         if (resolveAirmanDutyForDate(airman.id, dStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
         else break;
       }
-      for (let d = day + 1; d <= daysInMonth; d++) {
-        const dStr = `${monthKey}-${d < 10 ? `0${d}` : `${d}`}`;
+      for (let step = 1; step <= 60; step++) {
+        const dStr = formatUtc(baseUtcMs + step * dayMs);
         if (resolveAirmanDutyForDate(airman.id, dStr, assignmentMap)?.dutyCode === 'LEAVE') streakLen++;
         else break;
       }
@@ -372,11 +408,74 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
     return map;
   }, [filteredAirmen, daysArray, monthKey, assignmentMap]);
 
+  const MONTH_LABELS = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const SHORT_MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const yearOptions = useMemo(() => {
+    const base = new Date().getFullYear();
+    const minY = Math.min(base - 2, selectedYear - 2, 2024);
+    const maxY = Math.max(base + 2, selectedYear + 2);
+    const yrs: number[] = [];
+    for (let y = minY; y <= maxY; y++) yrs.push(y);
+    return yrs;
+  }, [selectedYear]);
+
+  const computedRangeMonths = useMemo<AttendanceMonthSpec[]>(() => {
+    const startVal = rangeFromYear * 12 + (rangeFromMonth - 1);
+    const endVal = rangeToYear * 12 + (rangeToMonth - 1);
+    if (startVal > endVal) return [];
+    const list: AttendanceMonthSpec[] = [];
+    for (let v = startVal; v <= endVal && list.length < 36; v++) {
+      list.push({ year: Math.floor(v / 12), month: (v % 12) + 1 });
+    }
+    return list;
+  }, [rangeFromYear, rangeFromMonth, rangeToYear, rangeToMonth]);
+
+  const fetchAssignmentsForMonths = async (monthsList: AttendanceMonthSpec[]): Promise<DutyAssignment[]> => {
+    const yearsSet = new Set<number>();
+    monthsList.forEach(({ year: y, month: m }) => {
+      yearsSet.add(y);
+      if (m === 1) yearsSet.add(y - 1);
+    });
+
+    const dedup = new Map<string, DutyAssignment>();
+    const addItems = (list?: DutyAssignment[]) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((a) => {
+        if (!a || !a.date || (a as any).isDeleted) return;
+        const dStr = String(a.date);
+        const key = `${a.airmanId}_${dStr}_${a.dutyCode}_${a.idaShift || ''}_${a.disposalScope || 'ALL'}`;
+        dedup.set(key, a);
+      });
+    };
+
+    const years = Array.from(yearsSet).sort((a, b) => a - b);
+    await Promise.all(
+      years.map(async (y) => {
+        try {
+          const res = await fetch(`/api/roster/year?year=${y}`);
+          if (res.ok) {
+            const data = await res.json();
+            addItems(Array.isArray(data?.assignments) ? data.assignments : Array.isArray(data) ? data : []);
+          }
+        } catch {}
+        try {
+          addItems(localDb.getRosterYear(y).assignments);
+        } catch {}
+      })
+    );
+    addItems(assignments);
+    return Array.from(dedup.values());
+  };
+
   const handlePrint = () => {
     window.print();
   };
 
-  const handleExportExcel = () => {
+  const handleExportCurrentMonthExcel = () => {
     exportMonthlyAttendanceRegisterExcel(
       airmen,
       effectiveAssignments,
@@ -386,14 +485,319 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       selectedRank,
       `155_UASU_Attendance_Register_${selectedYear}_${String(selectedMonth).padStart(2, '0')}.xlsx`
     );
+    setShowExcelMenu(false);
+  };
+
+  const handleExportFullYearExcel = async () => {
+    setIsExportingExcel(true);
+    try {
+      const fullYearMonths: AttendanceMonthSpec[] = Array.from({ length: 12 }, (_, idx) => ({
+        year: exportFullYear,
+        month: idx + 1,
+      }));
+      const allAss = await fetchAssignmentsForMonths(fullYearMonths);
+      exportMultiMonthAttendanceRegisterExcel(
+        airmen,
+        allAss,
+        fullYearMonths,
+        selectedFlight,
+        selectedRank,
+        `155_UASU_Attendance_Register_${exportFullYear}_Full_Year.xlsx`
+      );
+      setShowExcelMenu(false);
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+  const handleExportMonthRangeExcel = async () => {
+    if (computedRangeMonths.length === 0) return;
+    setIsExportingExcel(true);
+    try {
+      const allAss = await fetchAssignmentsForMonths(computedRangeMonths);
+      const first = computedRangeMonths[0];
+      const last = computedRangeMonths[computedRangeMonths.length - 1];
+      const fileName =
+        computedRangeMonths.length === 1
+          ? `155_UASU_Attendance_Register_${first.year}_${String(first.month).padStart(2, '0')}.xlsx`
+          : `155_UASU_Attendance_Register_${first.year}_${String(first.month).padStart(2, '0')}_to_${last.year}_${String(last.month).padStart(2, '0')}.xlsx`;
+      exportMultiMonthAttendanceRegisterExcel(
+        airmen,
+        allAss,
+        computedRangeMonths,
+        selectedFlight,
+        selectedRank,
+        fileName
+      );
+      setShowExcelMenu(false);
+    } finally {
+      setIsExportingExcel(false);
+    }
   };
 
   if (!isOpen) return null;
 
+  // Dedicated Full-Screen Excel Export Page (Mobile & Desktop optimized — nothing else visible behind it)
+  if (showExcelMenu) {
+    return createPortal(
+      <div className="fixed inset-0 z-50 bg-slate-950 text-white overflow-y-auto flex flex-col print:hidden">
+        {/* Sticky Top Bar */}
+        <div className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-3 sm:px-6 py-3 flex items-center justify-between gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowExcelMenu(false)}
+            disabled={isExportingExcel}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back</span>
+          </button>
+
+          <div className="flex items-center space-x-2 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center shrink-0">
+              <FileSpreadsheet className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-black text-white truncate">Excel Export (.xlsx)</h2>
+              <p className="text-[11px] text-slate-400 truncate">{getActiveOfficeIdentity().officeName} • Attendance Register</p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setShowExcelMenu(false);
+              onClose();
+            }}
+            disabled={isExportingExcel}
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+            title="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Centered Mobile-Optimized Content */}
+        <div className="w-full max-w-lg mx-auto px-3 sm:px-5 py-4 sm:py-6 space-y-4 flex-1">
+          {/* Active Export Filters (Editable right here on mobile) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-2.5">
+            <div className="flex items-center space-x-2 text-xs font-bold text-slate-300">
+              <Filter className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Export Scope Filters</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                  {officeHasFlights ? 'Flight' : 'Trade'}
+                </label>
+                <select
+                  value={selectedFlight}
+                  onChange={(e) => setSelectedFlight(e.target.value)}
+                  className="w-full bg-slate-950 text-xs font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="All">{officeHasFlights ? 'All Flights' : 'All Trades'}</option>
+                  {officeHasFlights ? (
+                    <>
+                      <option value="Admin">Admin</option>
+                      <option value="Mechanics">Mechanics</option>
+                      <option value="Avionics">Avionics</option>
+                      <option value="GCS">GCS</option>
+                    </>
+                  ) : (
+                    biodataTrades.map((tr) => (
+                      <option key={tr} value={tr}>
+                        {tr}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Rank</label>
+                <select
+                  value={selectedRank}
+                  onChange={(e) => setSelectedRank(e.target.value)}
+                  className="w-full bg-slate-950 text-xs font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="All">All Ranks</option>
+                  {availableRanks.map((rk) => (
+                    <option key={rk} value={rk}>
+                      {rk} & Below
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Option 1: Current Month Only */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
+                  <Calendar className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white">Current Month Only</h3>
+                  <p className="text-xs text-slate-400">Single sheet • {monthName}</p>
+                </div>
+              </div>
+              <span className="text-[11px] font-black px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
+                1 Sheet
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleExportCurrentMonthExcel}
+              disabled={isExportingExcel}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer shadow-md disabled:opacity-50"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Export {monthName}</span>
+            </button>
+          </div>
+
+          {/* Option 2: Full Year (12 Month-wise Sheets) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-400 flex items-center justify-center shrink-0">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white">Full Year (Month-wise Sheets)</h3>
+                  <p className="text-xs text-slate-400">Jan – Dec in 1 Excel file (12 separate sheets)</p>
+                </div>
+              </div>
+              <span className="text-[11px] font-black px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 shrink-0">
+                12 Sheets
+              </span>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+              <select
+                value={exportFullYear}
+                onChange={(e) => setExportFullYear(Number(e.target.value))}
+                className="sm:w-32 bg-slate-950 text-sm font-bold text-white border border-slate-700 rounded-xl px-3 py-2.5 outline-hidden focus:border-sky-500 cursor-pointer"
+              >
+                {yearOptions.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleExportFullYearExcel}
+                disabled={isExportingExcel}
+                className="flex-1 flex items-center justify-center space-x-2 px-4 py-3 bg-sky-600 hover:bg-sky-500 active:scale-[0.99] text-white rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer shadow-md disabled:opacity-50"
+              >
+                {isExportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4" />}
+                <span>Export Full Year ({exportFullYear})</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Option 3: From Month to Month (Separate Sheet per Month) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3.5">
+            <div className="flex items-center space-x-2.5">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                <Layers className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-white">From Month to Month</h3>
+                <p className="text-xs text-slate-400">Separate sheet for each month in 1 Excel file</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">From Month</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={rangeFromMonth}
+                    onChange={(e) => setRangeFromMonth(Number(e.target.value))}
+                    className="w-full bg-slate-950 text-xs sm:text-sm font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                  >
+                    {MONTH_LABELS.map((mName, idx) => (
+                      <option key={mName} value={idx + 1}>{mName}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={rangeFromYear}
+                    onChange={(e) => setRangeFromYear(Number(e.target.value))}
+                    className="w-full bg-slate-950 text-xs sm:text-sm font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                  >
+                    {yearOptions.map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">To Month</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={rangeToMonth}
+                    onChange={(e) => setRangeToMonth(Number(e.target.value))}
+                    className="w-full bg-slate-950 text-xs sm:text-sm font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                  >
+                    {MONTH_LABELS.map((mName, idx) => (
+                      <option key={mName} value={idx + 1}>{mName}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={rangeToYear}
+                    onChange={(e) => setRangeToYear(Number(e.target.value))}
+                    className="w-full bg-slate-950 text-xs sm:text-sm font-bold text-white border border-slate-700 rounded-xl px-2.5 py-2.5 outline-hidden focus:border-emerald-500 cursor-pointer"
+                  >
+                    {yearOptions.map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {computedRangeMonths.length === 0 ? (
+              <div className="text-xs font-bold text-rose-300 bg-rose-950/50 border border-rose-800/70 rounded-xl px-3 py-2">
+                "From Month" must be earlier than or equal to "To Month".
+              </div>
+            ) : (
+              <div className="text-xs font-semibold text-emerald-300 bg-emerald-950/40 border border-emerald-800/50 rounded-xl px-3 py-2 flex items-center justify-between">
+                <span>
+                  {SHORT_MONTH_LABELS[computedRangeMonths[0].month - 1]} {computedRangeMonths[0].year}
+                  {computedRangeMonths.length > 1
+                    ? ` → ${SHORT_MONTH_LABELS[computedRangeMonths[computedRangeMonths.length - 1].month - 1]} ${computedRangeMonths[computedRangeMonths.length - 1].year}`
+                    : ''}
+                </span>
+                <span className="font-black">
+                  {computedRangeMonths.length} {computedRangeMonths.length === 1 ? 'Sheet' : 'Sheets'}
+                </span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleExportMonthRangeExcel}
+              disabled={isExportingExcel || computedRangeMonths.length === 0}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isExportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4" />}
+              <span>
+                Export Month Range ({computedRangeMonths.length} {computedRangeMonths.length === 1 ? 'Sheet' : 'Sheets'})
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    );
+  }
+
   return createPortal(
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-start p-2 sm:p-5 print:p-0 print:bg-white print:overflow-visible">
       {/* Top action toolbar (hidden on print) */}
-      <div className="w-full max-w-[1350px] bg-slate-900 border border-slate-700/80 rounded-2xl px-4 py-3 mb-4 flex flex-wrap items-center justify-between gap-3 text-white shadow-2xl shrink-0 print:hidden">
+      <div className="w-full max-w-[1350px] bg-slate-900 border border-slate-700/80 rounded-2xl px-3 sm:px-4 py-3 mb-4 flex flex-wrap items-center justify-between gap-3 text-white shadow-2xl shrink-0 print:hidden">
         <div className="flex items-center space-x-3">
           <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center font-bold shrink-0">
             <Printer className="w-5 h-5" />
@@ -409,7 +813,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
         </div>
 
         {/* Filter Controls: Month Navigator with Left/Right Arrows (Pic 2 style) + Flight & Rank */}
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3 bg-slate-800/80 p-1.5 px-3 rounded-xl border border-slate-700">
+        <div className="w-full lg:w-auto flex flex-wrap items-center gap-2 sm:gap-3 bg-slate-800/80 p-2 px-3 rounded-xl border border-slate-700">
           <div className="flex items-center space-x-1.5 text-xs text-slate-300">
             <Filter className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
             <span className="font-semibold hidden lg:inline">Filters:</span>
@@ -483,11 +887,13 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center space-x-2">
+        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-2">
           <button
-            onClick={handleExportExcel}
-            className="flex items-center space-x-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/50 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md"
-            title="Export to Excel (.xlsx)"
+            type="button"
+            onClick={() => setShowExcelMenu(true)}
+            disabled={isExportingExcel}
+            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/50 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md disabled:opacity-60"
+            title="Open Excel Export Options (.xlsx)"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-200" />
             <span>Export Excel</span>
@@ -495,7 +901,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
 
           <button
             onClick={handlePrint}
-            className="flex items-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-black transition-all cursor-pointer shadow-md"
+            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-black transition-all cursor-pointer shadow-md"
             title="Print or Save as PDF"
           >
             <Printer className="w-4 h-4" />
@@ -504,7 +910,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
 
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer ml-1"
+            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer shrink-0"
             title="Close Preview"
           >
             <X className="w-5 h-5" />
@@ -513,7 +919,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       </div>
 
       {/* Printable Sheet (Standard clean white document landscape format, A4 fit) */}
-      <div className="attendance-register-print w-full max-w-[1400px] bg-white text-slate-900 rounded-xl shadow-2xl p-4 sm:p-6 print:p-0 print:shadow-none print:w-full print:max-w-none print:rounded-none">
+      <div className="attendance-register-print w-full max-w-[1400px] bg-white text-slate-900 rounded-xl shadow-2xl p-3 sm:p-6 print:p-0 print:shadow-none print:w-full print:max-w-none print:rounded-none">
         {/* Document Header as requested:
             Heading: 155 UASU, BAF (BOLD)
             Attendance Register
@@ -532,7 +938,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
 
         {/* Main Attendance Table (Clean styling: no alternating colors, black/gray borders, table-fixed for 1-page fit) */}
         <div className="overflow-x-auto print:overflow-visible">
-          <table className="w-full border-collapse border border-slate-900 table-fixed text-[9px] print:text-[6px] print:leading-[7px]">
+          <table className="w-full min-w-[960px] print:min-w-0 border-collapse border border-slate-900 table-fixed text-[9px] print:text-[6px] print:leading-[7px]">
             <colgroup>
               <col style={{ width: '2.2%' }} />
               <col style={{ width: '4.8%' }} />

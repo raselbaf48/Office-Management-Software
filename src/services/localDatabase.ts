@@ -14,7 +14,7 @@ import {
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
 import { DUTY_TYPES } from '../data/dutyTypes';
 import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from '../data/officialJulyAugustData';
-import { calculateDutyStats, detectConflicts, getDaysInMonth } from '../data/rosterGenerator';
+import { calculateDutyStats, detectConflicts, getDaysInMonth, isParadeOnlyDisposalRecord } from '../data/rosterGenerator';
 import { DutyRatioTable, INITIAL_OFFICIAL_DUTY_MATRIX, getInitialDutyMatrixForActiveOffice, getStoredDutyMatrix, getDefaultDutyShortName, saveDutyMatrix, resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
 import { findBestAirmanMatch as matchAirmanRankFirst, parseRosterTextHeuristically } from '../utils/airmanMatcher';
 import { sortAirmenBySeniority, normalizeAirmenSeniority, reorderAirmanSeniority } from '../utils/seniority';
@@ -3845,6 +3845,7 @@ export class LocalDatabaseEngine {
         if (!a || !a.date || (a as any).isDeleted) return;
         const scope = String(a.disposalScope || 'ALL').toUpperCase();
         if (scope !== 'ALL' && scope !== 'A') return;
+        if (isParadeOnlyDisposalRecord(a)) return;
         const dStr = String(a.date);
         if (filterPrefix && !dStr.startsWith(filterPrefix)) return;
         const key = `${a.airmanId}_${dStr}_${a.dutyCode}_${a.idaShift || ''}_ALL`;
@@ -3954,7 +3955,7 @@ export class LocalDatabaseEngine {
         const list = (this.db.assignments[mKey] || []).filter((a) => {
           if (!a || !a.date || (a as any).isDeleted) return false;
           const scope = String(a?.disposalScope || 'ALL').toUpperCase();
-          return scope === 'ALL' || scope === 'A';
+          return (scope === 'ALL' || scope === 'A') && !isParadeOnlyDisposalRecord(a);
         });
         list.forEach((a) => {
           const key = `${a.airmanId}_${a.date}_${a.dutyCode}_${a.idaShift || ''}_ALL`;
@@ -4616,9 +4617,16 @@ export class LocalDatabaseEngine {
       aliases.forEach((k) => map.set(k, a));
     };
 
-    const isScopeApplicable = (rawScope?: string): boolean => {
+    const isScopeApplicable = (rawScope?: string, rec?: Partial<DutyAssignment>): boolean => {
       const scope = String(rawScope || 'ALL').toUpperCase();
-      if (scope === 'ALL' || scope === 'A') return true;
+      if (scope === 'ALL' || scope === 'A') {
+        // Legacy Parade-State-only disposals saved under 'ALL' must ONLY appear in Parade State,
+        // never leaking into Dashboard, PT State, Night Count, or Attendance Register.
+        if (rec && isParadeOnlyDisposalRecord(rec) && stateType !== 'PARADE') {
+          return false;
+        }
+        return true;
+      }
       if (stateType === 'DASHBOARD' || stateType === 'ALL') return false;
       return scope === stateType;
     };
@@ -4657,7 +4665,7 @@ export class LocalDatabaseEngine {
     });
 
     dateAssignments.forEach((a) => {
-      if (isScopeApplicable(a.disposalScope)) {
+      if (isScopeApplicable(a.disposalScope, a)) {
         const existing = findInAssignmentMap(assignmentMap, a.airmanId);
         if (!existing) {
           putIntoAssignmentMap(assignmentMap, a);
@@ -4807,7 +4815,7 @@ export class LocalDatabaseEngine {
     const yestMap = new Map<string, DutyAssignment>();
     yestAssignments.forEach((a) => {
       const scope = String(a.disposalScope || 'ALL').toUpperCase();
-      if (scope === 'ALL' || scope === 'A') {
+      if ((scope === 'ALL' || scope === 'A') && !isParadeOnlyDisposalRecord(a)) {
         const existing = findInAssignmentMap(yestMap, a.airmanId);
         if (!existing) {
           putIntoAssignmentMap(yestMap, a);
@@ -5534,7 +5542,11 @@ export class LocalDatabaseEngine {
     const today = new Date();
     const defaultMonthKey = `${today.getFullYear()}-${(today.getMonth() + 1).toString().padStart(2, '0')}`;
     const targetMonth = monthKey || defaultMonthKey;
-    let assignments = this.db.assignments[targetMonth] || [];
+    let assignments = (this.db.assignments[targetMonth] || []).filter((a) => {
+      if (!a || (a as any).isDeleted) return false;
+      const scope = String(a.disposalScope || 'ALL').toUpperCase();
+      return (scope === 'ALL' || scope === 'A') && !isParadeOnlyDisposalRecord(a);
+    });
 
     // Deduplicate assignments
     const uniqueMap = new Map();

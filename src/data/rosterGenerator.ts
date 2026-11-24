@@ -13,9 +13,53 @@ INITIAL_AIRMEN.forEach((a) => {
   }
 });
 
+const PARADE_ONLY_DISPOSAL_CODES = new Set<string>([
+  'SICK_REPORT',
+  'SICK',
+  'EX_PPGF',
+  'ED',
+  'CMH',
+  'BNS',
+  'BSH',
+  'ESSN',
+  'OTHERS',
+  'OTHER',
+  'DISPOSAL',
+  'OFFICE',
+  'ORDERLY_ROOM',
+  'UWO',
+  'ADMIN_ORDER',
+  'CAT_C',
+  'DRILL_CAT_C',
+  'CLASS_TRG',
+  'GAMES',
+  'GH',
+  'GUARD_OF_HONOUR',
+  'RECEPTION',
+  'ABSENT',
+  'AWL',
+  'DETT',
+]);
+
+export function isParadeOnlyDisposalRecord(ass: Partial<DutyAssignment> | null | undefined): boolean {
+  if (!ass) return false;
+  const code = String(ass.dutyCode || '').trim().toUpperCase();
+  if (!code) return false;
+  if (PARADE_ONLY_DISPOSAL_CODES.has(code) || code.startsWith('OTHERS_')) {
+    return true;
+  }
+  // Standalone manual DUTY_OFF / OFF without a duty-off reason note (e.g. "SY Off", "NTF Off")
+  // comes from Parade State manual override; real post-duty Off is auto-computed from D-1 heavy duty.
+  if ((code === 'DUTY_OFF' || code === 'OFF') && !String(ass.notes || '').trim()) {
+    return true;
+  }
+  return false;
+}
+
 export function addAssignmentToMap(assignmentMap: Map<string, DutyAssignment>, ass: DutyAssignment) {
-  const scope = ass.disposalScope || 'ALL';
-  if (scope !== 'ALL') return; // We only build the map for the main roster
+  const scope = String(ass.disposalScope || 'ALL').toUpperCase();
+  if (scope !== 'ALL' && scope !== 'A') return; // We only build the map for the main roster
+  if (isParadeOnlyDisposalRecord(ass)) return; // Parade-State-only disposals never override global roster/attendance
   
   const rawId = ass.airmanId || '';
   const digits = SER_TO_DIGITS.get(rawId.toLowerCase()) || String(rawId).replace(/\D/g, '');
@@ -234,7 +278,9 @@ export function calculateDutyStats(
     
     // First, process all explicit assignments for the given month
     assignments.forEach((ass) => {
-      if ((ass.disposalScope || 'ALL') !== 'ALL') return;
+      const scope = String(ass.disposalScope || 'ALL').toUpperCase();
+      if (scope !== 'ALL' && scope !== 'A') return;
+      if (isParadeOnlyDisposalRecord(ass)) return;
       if (String(ass.date || '').startsWith(targetPrefix)) {
         const digits = SER_TO_DIGITS.get(String(ass.airmanId || '').toLowerCase()) || String(ass.airmanId || '').replace(/\D/g, '');
         const stat = map.get(ass.airmanId) || (digits ? map.get(digits) : undefined);
@@ -303,7 +349,9 @@ export function calculateDutyStats(
   } else {
     // Fallback if no specific year/month provided
     assignments.forEach((ass) => {
-      if ((ass.disposalScope || 'ALL') !== 'ALL') return;
+      const scope = String(ass.disposalScope || 'ALL').toUpperCase();
+      if (scope !== 'ALL' && scope !== 'A') return;
+      if (isParadeOnlyDisposalRecord(ass)) return;
       const stat = map.get(ass.airmanId);
       if (!stat) return;
 
@@ -379,8 +427,11 @@ export function detectConflicts(airmen: Airman[], assignments: DutyAssignment[])
     }
   });
 
-  // Only consider main roster (ALL) scope for conflicts
-  const mainAssignments = assignments.filter((a) => (a.disposalScope || 'ALL') === 'ALL');
+  // Only consider main roster (ALL) scope and non-Parade-only disposals for conflicts
+  const mainAssignments = assignments.filter((a) => {
+    const scope = String(a.disposalScope || 'ALL').toUpperCase();
+    return (scope === 'ALL' || scope === 'A') && !isParadeOnlyDisposalRecord(a);
+  });
 
   // Group assignments by canonical airman id
   const byAirman = new Map<string, DutyAssignment[]>();

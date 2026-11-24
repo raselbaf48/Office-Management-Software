@@ -1125,10 +1125,27 @@ async function startServer() {
     const stateType = String(req.query.stateType || req.query.documentType || 'PARADE').toUpperCase();
     const isPT = stateType === 'PT' || shift === 'PT';
     const isNightCount = stateType === 'NIGHT_COUNT' || shift === 'Night';
-    const isScopeApplicable = (scope?: string) => {
+    const PARADE_ONLY_DISPOSAL_CODES = new Set([
+      'SICK_REPORT', 'SICK', 'EX_PPGF', 'ED', 'CMH', 'BNS', 'BSH',
+      'ESSN', 'OTHERS', 'OTHER', 'DISPOSAL', 'OFFICE', 'ORDERLY_ROOM', 'UWO',
+      'ADMIN_ORDER', 'CAT_C', 'DRILL_CAT_C', 'CLASS_TRG', 'GAMES', 'GH',
+      'GUARD_OF_HONOUR', 'RECEPTION', 'ABSENT', 'AWL', 'DETT'
+    ]);
+    const isParadeOnlyDisposalRecord = (a: any) => {
+      if (!a) return false;
+      const code = String(a.dutyCode || '').trim().toUpperCase();
+      if (!code) return false;
+      if (PARADE_ONLY_DISPOSAL_CODES.has(code) || code.startsWith('OTHERS_')) return true;
+      if ((code === 'DUTY_OFF' || code === 'OFF') && !String(a.notes || '').trim()) return true;
+      return false;
+    };
+    const isScopeApplicable = (scope?: string, rec?: any) => {
       const s = (scope || 'ALL').toUpperCase();
-      if (stateType === 'DASHBOARD') return s === 'ALL' || s === 'A';
-      if (s === 'ALL' || s === 'A') return true;
+      if (stateType === 'DASHBOARD') return (s === 'ALL' || s === 'A') && !isParadeOnlyDisposalRecord(rec);
+      if (s === 'ALL' || s === 'A') {
+        if (rec && isParadeOnlyDisposalRecord(rec) && stateType !== 'PARADE') return false;
+        return true;
+      }
       return s === stateType;
     };
     const isExplicitStateScope = (scope?: string) => {
@@ -1139,7 +1156,7 @@ async function startServer() {
     const allAirmen = (db.airmen || []).filter((a: any) => a.active !== false);
     const targetAirmen = flight === 'Overall' ? allAirmen : allAirmen.filter((a: any) => a.flightName === flight);
     const monthKey = date.slice(0, 7);
-    const rawDateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date && isScopeApplicable(a.disposalScope));
+    const rawDateAssignments = (db.assignments?.[monthKey] || []).filter((a: any) => a.date === date && isScopeApplicable(a.disposalScope, a));
     const dateAssignments = appendHistoryLeaveTdyToList(db, rawDateAssignments, [date]);
 
     const [yr, mo, da] = date.split('-').map(Number);
@@ -1147,7 +1164,7 @@ async function startServer() {
     yestObj.setUTCDate(yestObj.getUTCDate() - 1);
     const yestStr = `${yestObj.getUTCFullYear()}-${String(yestObj.getUTCMonth() + 1).padStart(2, '0')}-${String(yestObj.getUTCDate()).padStart(2, '0')}`;
     const yestMonthKey = yestStr.slice(0, 7);
-    const yestAssignments = (db.assignments?.[yestMonthKey] || []).filter((a: any) => a.date === yestStr && (!a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'));
+    const yestAssignments = (db.assignments?.[yestMonthKey] || []).filter((a: any) => a.date === yestStr && (!a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A') && !isParadeOnlyDisposalRecord(a));
 
     let onParade = 0;
     let onDuty = 0;
@@ -1336,11 +1353,26 @@ async function startServer() {
   });
 
 
+  const PARADE_ONLY_ROSTER_CODES = new Set([
+    'SICK_REPORT', 'SICK', 'EX_PPGF', 'ED', 'CMH', 'BNS', 'BSH',
+    'ESSN', 'OTHERS', 'OTHER', 'DISPOSAL', 'OFFICE', 'ORDERLY_ROOM', 'UWO',
+    'ADMIN_ORDER', 'CAT_C', 'DRILL_CAT_C', 'CLASS_TRG', 'GAMES', 'GH',
+    'GUARD_OF_HONOUR', 'RECEPTION', 'ABSENT', 'AWL', 'DETT'
+  ]);
+  const isParadeOnlyRosterAssignment = (a: any) => {
+    if (!a) return false;
+    const code = String(a.dutyCode || '').trim().toUpperCase();
+    if (!code) return false;
+    if (PARADE_ONLY_ROSTER_CODES.has(code) || code.startsWith('OTHERS_')) return true;
+    if ((code === 'DUTY_OFF' || code === 'OFF') && !String(a.notes || '').trim()) return true;
+    return false;
+  };
+
   app.get('/api/roster', (req, res) => {
     const month = (req.query.month as string) || `${new Date().getFullYear()}-${(new Date().getMonth() + 1).toString().padStart(2, '0')}`;
     const db = loadDatabase();
     const rawAssignments = ((db.assignments && db.assignments[month]) || []).filter(
-      (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
+      (a: any) => (!a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A') && !isParadeOnlyRosterAssignment(a)
     );
     const assignments = appendHistoryLeaveTdyToList(db, rawAssignments, [month]);
     res.json({ monthKey: month, assignments });
@@ -1355,7 +1387,7 @@ async function startServer() {
       Object.keys(db.assignments).forEach((mKey) => {
         if (mKey.startsWith(prefix)) {
           const monthAss = (db.assignments[mKey] || []).filter(
-            (a: any) => !a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A'
+            (a: any) => (!a.disposalScope || a.disposalScope === 'ALL' || a.disposalScope === 'A') && !isParadeOnlyRosterAssignment(a)
           );
           rawAssignments.push(...monthAss);
         }

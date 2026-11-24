@@ -382,6 +382,7 @@ export default function App() {
     initialCategory?: string;
     historyOnly?: boolean;
     allowEditDelete?: boolean;
+    initialYear?: number;
   } | null>(null);
   const [isAddEditOpen, setIsAddEditOpen] = useState<boolean>(false);
   const [airmanToEdit, setAirmanToEdit] = useState<Airman | null>(null);
@@ -983,6 +984,7 @@ export default function App() {
           initialCategory={selectedAirmanProfile.initialCategory}
           historyOnly={selectedAirmanProfile.historyOnly}
           allowEditDelete={selectedAirmanProfile.allowEditDelete}
+          initialYear={selectedAirmanProfile.initialYear}
           onClose={() => setSelectedAirmanProfile(null)}
           onEditAirman={(a) => {
             setAirmanToEdit(a);
