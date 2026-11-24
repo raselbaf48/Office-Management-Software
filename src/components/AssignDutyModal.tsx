@@ -25,7 +25,9 @@ import {
   ChevronRight,
   ArrowLeft,
   Lock,
-  Unlock
+  Unlock,
+  Save,
+  RotateCcw
 } from 'lucide-react';
 import {
   Airman,
@@ -54,6 +56,25 @@ export const isSameAirman = (id1?: string, id2?: string): boolean => {
   return matchAirmanId(id1, id2);
 };
 
+
+interface PendingDutyOp {
+  id: string;
+  type: 'assign' | 'unassign';
+  airmanId: string;
+  airmanName: string;
+  dutyCode: DutyCategoryCode;
+  idaShift?: IDAShift;
+  fromDate: string;
+  toDate: string;
+  notes?: string;
+  proxyForFlight?: FlightName;
+  replacedAirmanId?: string;
+}
+
+type UnsavedLeaveAction =
+  | { type: 'close' }
+  | { type: 'switchTab'; tab: 'Duty' | 'Leave' | 'TDY' | 'Deployment' }
+  | { type: 'discardOnly' };
 
 interface AssignDutyModalProps {
   isOpen: boolean;
@@ -180,10 +201,20 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     const [activeModalTab, setActiveModalTab] = useState<'Duty' | 'Leave' | 'TDY' | 'Deployment'>('Duty');
   const [showRatioModal, setShowRatioModal] = useState<boolean>(false);
 
-  // Live assignments map for fromDate (airmanId -> DutyAssignment[])
-  const [assignmentsList, setAssignmentsList] = useState<DutyAssignment[]>([]);
-  // Previous day assignments to detect Night Off (IDAC Night or GD Night)
-  const [prevDayAssignmentsList, setPrevDayAssignmentsList] = useState<DutyAssignment[]>([]);
+  // Raw server assignments for fromDate and previous day (staged draft ops are layered on top)
+  const [rawServerAssignmentsList, setRawServerAssignmentsList] = useState<DutyAssignment[]>([]);
+  const [rawPrevDayAssignmentsList, setRawPrevDayAssignmentsList] = useState<DutyAssignment[]>([]);
+  const [pendingOps, setPendingOps] = useState<PendingDutyOp[]>([]);
+  const [isApplyingPending, setIsApplyingPending] = useState<boolean>(false);
+  const [unsavedPrompt, setUnsavedPrompt] = useState<{
+    open: boolean;
+    confirmDiscardStep: boolean;
+    pendingAction: UnsavedLeaveAction | null;
+  }>({
+    open: false,
+    confirmDiscardStep: false,
+    pendingAction: null,
+  });
   const [loadingInitial, setLoadingInitial] = useState<boolean>(false);
   const [loadedRosterDate, setLoadedRosterDate] = useState<string>('');
   const [processingAirmanId, setProcessingAirmanId] = useState<string | null>(null);
@@ -243,6 +274,105 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     return asgnCodeStr === codeStr;
   };
 
+  const applyPendingOpsToDateList = (
+    baseList: DutyAssignment[],
+    ops: PendingDutyOp[],
+    dateStr: string
+  ): DutyAssignment[] => {
+    if (!dateStr || ops.length === 0) return baseList;
+    const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
+    let result = [...baseList];
+
+    for (const op of ops) {
+      const endDate = op.toDate || op.fromDate;
+      if (dateStr < op.fromDate || dateStr > endDate) continue;
+      const opIsIdac = isIdacDutyCode(op.dutyCode);
+
+      if (op.type === 'unassign') {
+        result = result.filter((a) => {
+          if (!isSameAirman(a.airmanId, op.airmanId)) return true;
+          return !doesAssignmentMatchDuty(a, op.dutyCode, opIsIdac ? op.idaShift : undefined);
+        });
+      } else {
+        if (op.replacedAirmanId) {
+          result = result.filter((a) => {
+            if (!isSameAirman(a.airmanId, op.replacedAirmanId!)) return true;
+            if (isDepCode(a.dutyCode)) return true;
+            return !doesAssignmentMatchDuty(a, op.dutyCode, opIsIdac ? op.idaShift : undefined);
+          });
+        }
+        if (opIsIdac) {
+          const targetShift = op.idaShift || 'Morning';
+          result = result.filter((a) => {
+            if (!isSameAirman(a.airmanId, op.airmanId)) return true;
+            if (isDepCode(a.dutyCode)) return true;
+            if (['IDAC', 'IDA'].includes(String(a.dutyCode || ''))) {
+              const existingShift = resolveCanonicalIdacShift(a);
+              if (
+                (targetShift === 'Morning' && existingShift === 'Night') ||
+                (targetShift === 'Night' && existingShift === 'Morning')
+              ) {
+                return true;
+              }
+              return false;
+            }
+            if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
+              return true;
+            }
+            return false;
+          });
+        } else {
+          result = result.filter(
+            (a) =>
+              !isSameAirman(a.airmanId, op.airmanId) ||
+              isDepCode(a.dutyCode) ||
+              ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
+          );
+        }
+        result.push({
+          airmanId: op.airmanId,
+          date: dateStr,
+          dutyCode: op.dutyCode,
+          idaShift: op.idaShift,
+          notes: op.notes || '',
+          proxyForFlight: op.proxyForFlight,
+        });
+      }
+    }
+
+    return result;
+  };
+
+  const prevDateStr = useMemo(() => {
+    if (!fromDate) return '';
+    const [fy, fm, fd] = fromDate.split('-').map(Number);
+    if (!fy || !fm || !fd) return '';
+    const prevDateObj = new Date(Date.UTC(fy, fm - 1, fd - 1));
+    return prevDateObj.toISOString().split('T')[0];
+  }, [fromDate]);
+
+  // Effective live preview lists (server data + staged draft ops)
+  const assignmentsList = useMemo(
+    () => applyPendingOpsToDateList(rawServerAssignmentsList, pendingOps, fromDate),
+    [rawServerAssignmentsList, pendingOps, fromDate]
+  );
+
+  const prevDayAssignmentsList = useMemo(
+    () => applyPendingOpsToDateList(rawPrevDayAssignmentsList, pendingOps, prevDateStr),
+    [rawPrevDayAssignmentsList, pendingOps, prevDateStr]
+  );
+
+  const hasUnsavedChanges = pendingOps.length > 0;
+
+  const pendingAffectedDates = useMemo(() => {
+    const dateSet = new Set<string>();
+    pendingOps.forEach((op) => {
+      if (op.fromDate) dateSet.add(op.fromDate);
+      if (op.toDate && op.toDate !== op.fromDate) dateSet.add(op.toDate);
+    });
+    return Array.from(dateSet).sort();
+  }, [pendingOps]);
+
   // Update dates & duty code when isOpen changes
   useEffect(() => {
     if (isOpen) {
@@ -250,6 +380,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       userManuallySelectedFlightRef.current = false;
       userManuallySelectedShiftRef.current = false;
       lastAutoSelectedDateRef.current = '';
+      setPendingOps([]);
+      setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
       if (selectedDate) {
         const dateToSet = (isAdmin && selectedDate < todayStr) ? todayStr : selectedDate;
         setFromDate(dateToSet);
@@ -268,6 +400,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     } else {
       lastAutoSelectedDateRef.current = '';
       setLoadedRosterDate('');
+      setPendingOps([]);
+      setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
     }
   }, [isOpen, selectedDate, onlyIdac, initialDutyCode, isAdmin, adminFlight, todayStr]);
 
@@ -555,10 +689,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       };
 
       const dayAssignments = allAssignments.filter((a) => a.date === targetDate && isGlobalScope(a.disposalScope) && !isParadeOnlyDisposalRecord(a));
-      setAssignmentsList(dayAssignments);
+      setRawServerAssignmentsList(dayAssignments);
 
       const prevDayAssignments = prevMonthAssignments.filter((a) => a.date === prevDateStr && isGlobalScope(a.disposalScope) && !isParadeOnlyDisposalRecord(a));
-      setPrevDayAssignmentsList(prevDayAssignments);
+      setRawPrevDayAssignmentsList(prevDayAssignments);
       setLoadedRosterDate(targetDate);
 
     } catch (err) {
@@ -1184,20 +1318,91 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
   };
 
+  const executeLeaveAction = (action: UnsavedLeaveAction | null) => {
+    if (!action || action.type === 'discardOnly') return;
+    if (action.type === 'close') {
+      onClose();
+    } else if (action.type === 'switchTab') {
+      setActiveModalTab(action.tab);
+    }
+  };
+
+  const requestLeaveModal = (action: UnsavedLeaveAction) => {
+    if (isApplyingPending) return;
+    if (action.type === 'discardOnly') {
+      if (!hasUnsavedChanges) return;
+      setUnsavedPrompt({
+        open: true,
+        confirmDiscardStep: true,
+        pendingAction: action,
+      });
+      return;
+    }
+    if (hasUnsavedChanges) {
+      setUnsavedPrompt({
+        open: true,
+        confirmDiscardStep: false,
+        pendingAction: action,
+      });
+    } else {
+      executeLeaveAction(action);
+    }
+  };
+
+  const handleConfirmDiscardPending = () => {
+    const discardedCount = pendingOps.length;
+    const actionToRun = unsavedPrompt.pendingAction;
+    setPendingOps([]);
+    setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
+    if (actionToRun && actionToRun.type !== 'discardOnly') {
+      executeLeaveAction(actionToRun);
+    } else if (discardedCount > 0) {
+      setToastMessage(`🗑️ Discarded ${discardedCount} unsaved duty change${discardedCount > 1 ? 's' : ''}.`);
+      setTimeout(() => setToastMessage(''), 2500);
+    }
+  };
+
+  // Warn browser reload / tab close while unsaved duty changes exist
+  useEffect(() => {
+    if (!isOpen || !hasUnsavedChanges) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isOpen, hasUnsavedChanges]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (unsavedPrompt.open) {
+          e.preventDefault();
+          if (unsavedPrompt.confirmDiscardStep && unsavedPrompt.pendingAction?.type !== 'discardOnly') {
+            setUnsavedPrompt((prev) => ({ ...prev, confirmDiscardStep: false }));
+          } else {
+            setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
+          }
+          return;
+        }
+        if (showRatioModal) return;
+        e.preventDefault();
+        requestLeaveModal({ type: 'close' });
+        return;
+      }
+      if (unsavedPrompt.open) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === 'ArrowRight') {
-          handleShiftDate(1);
-        } else if (e.key === 'ArrowLeft') {
-          handleShiftDate(-1);
-        }
+        handleShiftDate(1);
+      } else if (e.key === 'ArrowLeft') {
+        handleShiftDate(-1);
+      }
     };
     if (isOpen) {
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, selectedPresetDays, fromDate]);
+  }, [isOpen, selectedPresetDays, fromDate, hasUnsavedChanges, unsavedPrompt, showRatioModal, isApplyingPending]);
 
   const getDatesInRange = (fromDateStr: string, toDateStr: string): string[] => {
     const dates: string[] = [];
@@ -1263,9 +1468,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     const proxy = isProxyEnabled && proxyForFlight ? proxyForFlight : undefined;
 
     setIsApplyingMultiDates(true);
-    let successOps = 0;
+    const newOps: PendingDutyOp[] = [];
     let skippedPerm = 0;
-    let failedOps = 0;
 
     try {
       for (const dStr of dates) {
@@ -1281,62 +1485,217 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
             continue;
           }
 
-          const res = await fetch('/api/roster/assign-range', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              airmanId: airman.id,
-              dutyCode: activeDutyCode,
-              idaShift: shiftToUse,
-              fromDate: dStr,
-              toDate: dStr,
-              notes,
-              proxyForFlight: proxy,
-            }),
+          newOps.push({
+            id: `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            type: 'assign',
+            airmanId: airman.id,
+            airmanName: `${formatAirmanName(airman.rank)} ${airman.name}`,
+            dutyCode: activeDutyCode,
+            idaShift: shiftToUse,
+            fromDate: dStr,
+            toDate: dStr,
+            notes,
+            proxyForFlight: proxy,
           });
-          if (res.ok) {
-            successOps++;
-          } else {
-            failedOps++;
-          }
         }
       }
 
-      if (successOps > 0) {
+      if (newOps.length > 0) {
+        setPendingOps((prev) => [...prev, ...newOps]);
         if (!dates.includes(fromDate) && dates.length > 0) {
           setFromDate(dates[0]);
           setToDate(dates[0]);
           setSelectedPresetDays(dates[0] === todayStr ? 1 : -1);
-        } else {
-          fetchCurrentRoster();
         }
-        window.dispatchEvent(new CustomEvent('baf_state_updated'));
-        if (onRefreshParadeData) onRefreshParadeData();
-        if (onSuccess) onSuccess();
       }
 
       const dtName = DUTY_TYPE_MAP.get(activeDutyCode as any)?.name || activeDutyCode;
       const shiftSuffix = isIdac && shiftToUse ? ` (${shiftToUse})` : '';
-      if (successOps > 0) {
+      if (newOps.length > 0) {
         setToastMessage(
-          `✅ Assigned ${targetAirmen.length} locked airman/airmen to ${dtName}${shiftSuffix} across ${dates.length} date(s)${skippedPerm > 0 ? ` (${skippedPerm} skipped due to permission)` : ''}!`
+          `📝 Staged ${targetAirmen.length} locked airman/airmen to ${dtName}${shiftSuffix} across ${dates.length} date(s)${skippedPerm > 0 ? ` (${skippedPerm} skipped)` : ''} — Click Apply to save`
         );
       } else if (skippedPerm > 0) {
         setToastMessage('⚠️ Permission denied for the selected dates or flight.');
-      } else {
-        setToastMessage(`❌ Failed to assign locked airmen (${failedOps} error).`);
       }
-      setTimeout(() => setToastMessage(''), 4000);
-    } catch (err: any) {
-      console.error('Multi-date locked airmen assign error:', err);
-      setToastMessage(`❌ Error: ${err?.message || 'Network error'}`);
       setTimeout(() => setToastMessage(''), 3500);
     } finally {
       setIsApplyingMultiDates(false);
     }
   };
 
-  // Direct Click Assignment Action (No Draft System)
+  // Commit all staged duty changes to server & localDb
+  const handleApplyPendingChanges = async (afterApplyAction?: UnsavedLeaveAction | null) => {
+    if (pendingOps.length === 0 || isApplyingPending) {
+      if (afterApplyAction) executeLeaveAction(afterApplyAction);
+      return;
+    }
+
+    setIsApplyingPending(true);
+    const opsToApply = [...pendingOps];
+    const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
+    let failedCount = 0;
+
+    try {
+      for (const op of opsToApply) {
+        const opIsIdac = isIdacDutyCode(op.dutyCode);
+        const endDate = op.toDate || op.fromDate;
+
+        if (op.type === 'unassign') {
+          const res = await fetch('/api/roster/delete-range', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              airmanId: op.airmanId,
+              fromDate: op.fromDate,
+              toDate: endDate,
+              dutyCode: op.dutyCode,
+              idaShift: opIsIdac ? op.idaShift : undefined,
+            }),
+          });
+
+          if (res.ok) {
+            try {
+              const dates = getDatesInRange(op.fromDate, endDate);
+              dates.forEach((dStr) => {
+                localDb.deleteAssignment(op.airmanId, dStr, op.dutyCode, opIsIdac ? op.idaShift : undefined);
+              });
+            } catch (syncErr) {
+              console.warn('localDb unassign sync warning:', syncErr);
+            }
+          } else {
+            failedCount++;
+          }
+        } else {
+          if (op.replacedAirmanId) {
+            try {
+              await fetch('/api/roster/delete-range', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  airmanId: op.replacedAirmanId,
+                  fromDate: op.fromDate,
+                  toDate: endDate,
+                  dutyCode: op.dutyCode,
+                  idaShift: opIsIdac ? op.idaShift : undefined,
+                }),
+              });
+            } catch (delErr) {
+              console.warn('Failed to unassign replaced airman on server:', delErr);
+            }
+          }
+
+          const res = await fetch('/api/roster/assign-range', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              airmanId: op.airmanId,
+              dutyCode: op.dutyCode,
+              idaShift: op.idaShift,
+              fromDate: op.fromDate,
+              toDate: endDate,
+              notes: op.notes || '',
+              proxyForFlight: op.proxyForFlight,
+            }),
+          });
+
+          if (res.ok) {
+            try {
+              const dates = getDatesInRange(op.fromDate, endDate);
+              dates.forEach((dStr) => {
+                const mKey = dStr.slice(0, 7);
+                if (!localDb.db.assignments[mKey]) localDb.db.assignments[mKey] = [];
+                let list = localDb.db.assignments[mKey];
+                if (op.replacedAirmanId) {
+                  list = list.filter((a) => {
+                    if (!isSameAirman(a.airmanId, op.replacedAirmanId!) || a.date !== dStr) return true;
+                    if (isDepCode(a.dutyCode)) return true;
+                    return !doesAssignmentMatchDuty(a, op.dutyCode, opIsIdac ? op.idaShift : undefined);
+                  });
+                }
+                if (opIsIdac) {
+                  const targetShift = op.idaShift || 'Morning';
+                  list = list.filter((a) => {
+                    if (!isSameAirman(a.airmanId, op.airmanId) || a.date !== dStr) return true;
+                    if (isDepCode(a.dutyCode)) return true;
+                    if (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') {
+                      const existingShift = resolveCanonicalIdacShift(a);
+                      if (
+                        (targetShift === 'Morning' && existingShift === 'Night') ||
+                        (targetShift === 'Night' && existingShift === 'Morning')
+                      ) {
+                        return true;
+                      }
+                      return false;
+                    }
+                    if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
+                      return true;
+                    }
+                    return false;
+                  });
+                } else {
+                  list = list.filter(
+                    (a) =>
+                      !(
+                        isSameAirman(a.airmanId, op.airmanId) &&
+                        a.date === dStr &&
+                        !isDepCode(a.dutyCode) &&
+                        !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
+                      )
+                  );
+                }
+                list.push({
+                  airmanId: op.airmanId,
+                  date: dStr,
+                  dutyCode: op.dutyCode,
+                  idaShift: op.idaShift,
+                  notes: op.notes || '',
+                  proxyForFlight: op.proxyForFlight,
+                });
+                localDb.db.assignments[mKey] = list;
+              });
+            } catch (syncErr) {
+              console.warn('localDb assign sync warning:', syncErr);
+            }
+          } else {
+            failedCount++;
+          }
+        }
+      }
+
+      try {
+        localDb.saveToStorage(localDb.db, false, false, false);
+      } catch (saveErr) {
+        console.warn('localDb save warning:', saveErr);
+      }
+
+      setPendingOps([]);
+      setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
+      window.dispatchEvent(new CustomEvent('baf_state_updated'));
+      if (onRefreshParadeData) onRefreshParadeData();
+      if (onSuccess) onSuccess();
+      await fetchCurrentRoster();
+
+      if (failedCount > 0) {
+        setToastMessage(`⚠️ Applied with ${failedCount} failed change(s). Please verify.`);
+      } else {
+        setToastMessage(`✅ Applied ${opsToApply.length} duty change${opsToApply.length > 1 ? 's' : ''} successfully!`);
+      }
+      setTimeout(() => setToastMessage(''), 3000);
+
+      if (afterApplyAction && afterApplyAction.type !== 'discardOnly') {
+        executeLeaveAction(afterApplyAction);
+      }
+    } catch (err: any) {
+      console.error('Apply pending duty changes error:', err);
+      setToastMessage(`❌ Failed to apply changes: ${err?.message || 'Network error'}`);
+      setTimeout(() => setToastMessage(''), 3500);
+    } finally {
+      setIsApplyingPending(false);
+    }
+  };
+
+  // Staged Click Assignment Action (Changes preview locally until Apply is clicked)
   const handleToggleAssignAirman = async (
     airman: Airman,
     forceAction?: 'assign' | 'unassign',
@@ -1345,13 +1704,15 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   ) => {
     const dutyCodeToUse = explicitDutyCode || activeDutyCode;
     if (!dutyCodeToUse) {
-      alert("Please select a duty first.");
+      setToastMessage('⚠️ Please select a duty first.');
+      setTimeout(() => setToastMessage(''), 2500);
       return;
     }
     const isIdac = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCodeToUse as string);
     const shiftToUse = isIdac ? (explicitShift || activeIdaShift) : undefined;
     if (isIdac && !shiftToUse && forceAction !== 'unassign') {
-      alert("Please select a shift first.");
+      setToastMessage('⚠️ Please select an IDAC Shift (Morning, Afternoon, or Night) first.');
+      setTimeout(() => setToastMessage(''), 2500);
       return;
     }
 
@@ -1367,481 +1728,356 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     );
     if (willUnassign) {
       if (!perm.canDelete) {
-        alert(perm.reason || "You do not have permission to remove duties.");
+        setToastMessage(`⚠️ ${perm.reason || 'You do not have permission to remove duties.'}`);
+        setTimeout(() => setToastMessage(''), 3000);
         return;
       }
     } else {
       if (!perm.canAssign) {
-        alert(perm.reason || "You do not have permission to assign duties.");
+        setToastMessage(`⚠️ ${perm.reason || 'You do not have permission to assign duties.'}`);
+        setTimeout(() => setToastMessage(''), 3000);
         return;
       }
     }
 
     setSearchQuery('');
-    setProcessingAirmanId(airman.id);
+    const effectiveToDate = toDate || fromDate;
 
-    try {
-      if (willUnassign) {
-        // Unassign airman
-        const res = await fetch('/api/roster/delete-range', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            airmanId: airman.id,
-            fromDate,
-            toDate,
-            dutyCode: dutyCodeToUse,
-            idaShift: isIdac ? shiftToUse : undefined,
-          }),
-        });
+    if (willUnassign) {
+      // If this exact non-replacing assign was staged locally and not on server, cleanly cancel that staged op
+      const isOnServer = rawServerAssignmentsList.some(
+        (a) =>
+          isSameAirman(a.airmanId, airman.id) &&
+          doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined)
+      );
+      const matchingAssignIdx = !isOnServer
+        ? [...pendingOps].reverse().findIndex(
+            (op) =>
+              op.type === 'assign' &&
+              !op.replacedAirmanId &&
+              isSameAirman(op.airmanId, airman.id) &&
+              op.dutyCode === dutyCodeToUse &&
+              (op.idaShift || '') === (shiftToUse || '') &&
+              op.fromDate === fromDate &&
+              (op.toDate || op.fromDate) === effectiveToDate
+          )
+        : -1;
 
-        if (res.ok) {
-          setAssignmentsList((prev) => {
-            return prev.filter((a) => {
-              if (!isSameAirman(a.airmanId, airman.id)) return true;
-              if (dutyCodeToUse === 'AIRPORT' || (dutyCodeToUse as string) === 'AIRFIELD_DUTY') {
-                return a.dutyCode !== 'AIRPORT' && (a.dutyCode as string) !== 'AIRFIELD_DUTY';
-              }
-              if (dutyCodeToUse === 'GD' || (dutyCodeToUse as string) === 'BASE_SECURITY') {
-                return a.dutyCode !== 'GD' && (a.dutyCode as string) !== 'BASE_SECURITY' && !(a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'));
-              }
-              if (isIdac) {
-                const aShift = resolveCanonicalIdacShift(a);
-                return !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (!shiftToUse || aShift.toLowerCase() === shiftToUse.toLowerCase()));
-              }
-              return a.dutyCode !== dutyCodeToUse;
-            });
-          });
-
-          // Sync unassign directly to localDb
-          try {
-            const dates = getDatesInRange(fromDate, toDate || fromDate);
-            dates.forEach((dStr) => {
-              localDb.deleteAssignment(airman.id, dStr, dutyCodeToUse, isIdac ? shiftToUse : undefined);
-            });
-          } catch (syncErr) {
-            console.warn('localDb unassign sync warning:', syncErr);
-          }
-
-          setToastMessage(`Removed ${formatAirmanName(airman.rank)} ${airman.name} from duty`);
-          setTimeout(() => setToastMessage(''), 2500);
-          window.dispatchEvent(new CustomEvent('baf_state_updated'));
-          if (onRefreshParadeData) onRefreshParadeData();
-          fetchCurrentRoster();
-        } else {
-          alert('Failed to remove assignment');
-        }
-        setProcessingAirmanId(null);
-        return;
+      if (matchingAssignIdx !== -1) {
+        const realIdx = pendingOps.length - 1 - matchingAssignIdx;
+        setPendingOps((prev) => prev.filter((_, idx) => idx !== realIdx));
+        setToastMessage(`📝 Reverted staged assignment for ${formatAirmanName(airman.rank)} ${airman.name}`);
       } else {
-        // Direct Assign Airman
-        if (isIdac && !shiftToUse) {
-          setToastMessage('⚠️ Please select an IDAC Shift (Morning, Afternoon, or Night) first.');
-          setTimeout(() => setToastMessage(''), 2500);
-          setProcessingAirmanId(null);
-          return;
-        }
+        const unassignOp: PendingDutyOp = {
+          id: `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          type: 'unassign',
+          airmanId: airman.id,
+          airmanName: `${formatAirmanName(airman.rank)} ${airman.name}`,
+          dutyCode: dutyCodeToUse,
+          idaShift: isIdac ? shiftToUse : undefined,
+          fromDate,
+          toDate: effectiveToDate,
+        };
+        setPendingOps((prev) => [...prev, unassignOp]);
+        setToastMessage(`📝 Staged removal: ${formatAirmanName(airman.rank)} ${airman.name} (Click Apply to save)`);
+      }
+      setTimeout(() => setToastMessage(''), 2500);
+      return;
+    }
 
-        const targetFlight = proxyForFlight && isProxyEnabled ? proxyForFlight : (activeFlight !== 'All' ? activeFlight : airman.flightName);
-        const flightQuota = getFlightDutyQuotaForDate(fromDate, targetFlight as FlightName, dutyCodeToUse, shiftToUse);
+    // Stage Assign Airman
+    const targetFlight =
+      proxyForFlight && isProxyEnabled
+        ? proxyForFlight
+        : activeFlight !== 'All'
+        ? activeFlight
+        : airman.flightName;
+    const flightQuota = getFlightDutyQuotaForDate(fromDate, targetFlight as FlightName, dutyCodeToUse, shiftToUse);
 
-        // Find airmen from this targetFlight who already have this duty on this date
-        const existingForFlight = assignmentsList.filter((a) => {
-          let aAirman = airmanMap.get(a.airmanId);
-          if (!aAirman) {
-            const d = String(a.airmanId).replace(/\D/g, '');
-            if (d) aAirman = airmanMap.get(d);
-          }
-          const aFlt = aAirman?.flightName || (a as any).proxyForFlight;
-          if (aFlt !== targetFlight) return false;
-          if (isSameAirman(a.airmanId, airman.id)) return false;
+    // Find airmen from this targetFlight who already have this duty on this date
+    const existingForFlight = assignmentsList.filter((a) => {
+      let aAirman = airmanMap.get(a.airmanId);
+      if (!aAirman) {
+        const d = String(a.airmanId).replace(/\D/g, '');
+        if (d) aAirman = airmanMap.get(d);
+      }
+      const aFlt = aAirman?.flightName || (a as any).proxyForFlight;
+      if (aFlt !== targetFlight) return false;
+      if (isSameAirman(a.airmanId, airman.id)) return false;
 
-          if (activeDutyCode === 'AIRPORT' || activeDutyCode === 'AIRFIELD_DUTY') {
-            return a.dutyCode === 'AIRPORT' || a.dutyCode === 'AIRFIELD_DUTY';
-          }
-          if (activeDutyCode === 'RECEPTION' || activeDutyCode === 'RECEIPTION') {
-            return a.dutyCode === 'RECEPTION' || a.dutyCode === 'RECEIPTION' || a.dutyCode === 'RECEPTION_DUTY' || a.dutyCode === 'KO' || a.dutyCode === 'K/O';
-          }
-          if (activeDutyCode === 'GD' || activeDutyCode === 'BASE_SECURITY') {
-            return a.dutyCode === 'GD' || a.dutyCode === 'BASE_SECURITY' || (a.dutyName && a.dutyName.toUpperCase().includes('SECURITY'));
-          }
-          if (isIdac) {
-            const aShift = resolveCanonicalIdacShift(a);
-            return (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && (!shiftToUse || aShift.toLowerCase() === shiftToUse.toLowerCase());
-          }
-          return a.dutyCode === activeDutyCode;
-        });
+      return doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
+    });
 
-        let replacedAirman: Airman | null = null;
-        // User rule: If flight ratio quota is 1 (or quota is reached), auto-deselect previous person so 2 people are not selected!
-        if ((flightQuota === 1 && existingForFlight.length >= 1) || (flightQuota > 0 && existingForFlight.length >= flightQuota)) {
-          const prevToReplace = existingForFlight[0];
-          let foundPrev = airmanMap.get(prevToReplace.airmanId);
-          if (!foundPrev) {
-            const d = String(prevToReplace.airmanId).replace(/\D/g, '');
-            if (d) foundPrev = airmanMap.get(d);
-          }
-          replacedAirman = foundPrev || null;
+    let replacedAirman: Airman | null = null;
+    let replacedAirmanId: string | undefined;
+    // User rule: If flight ratio quota is 1 (or quota is reached), auto-deselect previous person so 2 people are not selected!
+    if ((flightQuota === 1 && existingForFlight.length >= 1) || (flightQuota > 0 && existingForFlight.length >= flightQuota)) {
+      const prevToReplace = existingForFlight[0];
+      let foundPrev = airmanMap.get(prevToReplace.airmanId);
+      if (!foundPrev) {
+        const d = String(prevToReplace.airmanId).replace(/\D/g, '');
+        if (d) foundPrev = airmanMap.get(d);
+      }
+      replacedAirman = foundPrev || null;
+      replacedAirmanId = prevToReplace.airmanId;
+    }
 
-          try {
-            await fetch('/api/roster/delete-range', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                airmanId: prevToReplace.airmanId,
-                fromDate,
-                toDate,
-                dutyCode: activeDutyCode,
-                idaShift: shiftToUse,
-              }),
-            });
-          } catch (delErr) {
-            console.warn('Failed to unassign replaced airman on server:', delErr);
-          }
-        }
+    const notes = dutyCodeToUse === 'LEAVE' ? `${activeLeaveType} Leave` : '';
+    const proxyFltVal = isProxyEnabled && proxyForFlight ? proxyForFlight : undefined;
 
-        const notes = activeDutyCode === 'LEAVE' ? `${activeLeaveType} Leave` : '';
-        const res = await fetch('/api/roster/assign-range', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            airmanId: airman.id,
-            dutyCode: activeDutyCode,
-            idaShift: shiftToUse,
-            fromDate,
-            toDate,
-            notes,
-            proxyForFlight: isProxyEnabled && proxyForFlight ? proxyForFlight : undefined,
-          }),
-        });
+    // Check if this simply cancels an existing staged unassign for the same server assignment
+    const isOnServer = rawServerAssignmentsList.some(
+      (a) =>
+        isSameAirman(a.airmanId, airman.id) &&
+        doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined)
+    );
+    const matchingUnassignIdx =
+      isOnServer && !replacedAirmanId
+        ? [...pendingOps].reverse().findIndex(
+            (op) =>
+              op.type === 'unassign' &&
+              isSameAirman(op.airmanId, airman.id) &&
+              op.dutyCode === dutyCodeToUse &&
+              (op.idaShift || '') === (shiftToUse || '') &&
+              op.fromDate === fromDate &&
+              (op.toDate || op.fromDate) === effectiveToDate
+          )
+        : -1;
 
-        if (res.ok) {
-          const newAssignment: DutyAssignment = {
-            airmanId: airman.id,
-            date: fromDate,
-            dutyCode: activeDutyCode,
-            idaShift: shiftToUse,
-            notes,
-            proxyForFlight: isProxyEnabled && proxyForFlight ? proxyForFlight : undefined,
-          };
-          const isDepCode = (code: any) => ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(String(code || ''));
-          const computeUpdatedAssignments = (baseList: DutyAssignment[]): DutyAssignment[] => {
-            let filtered = baseList || [];
-            if (replacedAirman) {
-              filtered = filtered.filter((a) => {
-                if (!isSameAirman(a.airmanId, replacedAirman!.id)) return true;
-                if (isDepCode(a.dutyCode)) return true;
-                return !doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
-              });
-            }
-            if (isIdac) {
-              const targetShift = shiftToUse || 'Morning';
-              filtered = filtered.filter((a) => {
-                if (!isSameAirman(a.airmanId, airman.id)) return true;
-                if (isDepCode(a.dutyCode)) return true;
-                if (['IDAC', 'IDA'].includes(String(a.dutyCode || ''))) {
-                  const existingShift = resolveCanonicalIdacShift(a);
-                  if (
-                    (targetShift === 'Morning' && existingShift === 'Night') ||
-                    (targetShift === 'Night' && existingShift === 'Morning')
-                  ) {
-                    return true;
-                  }
-                  return false;
-                }
-                if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
-                  return true;
-                }
-                return false;
-              });
-            } else {
-              filtered = filtered.filter(
-                (a) =>
-                  !isSameAirman(a.airmanId, airman.id) ||
-                  isDepCode(a.dutyCode) ||
-                  ((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
-              );
-            }
-            return [...filtered, newAssignment];
-          };
+    let nextPendingOps: PendingDutyOp[];
+    if (matchingUnassignIdx !== -1) {
+      const realIdx = pendingOps.length - 1 - matchingUnassignIdx;
+      nextPendingOps = pendingOps.filter((_, idx) => idx !== realIdx);
+    } else {
+      const assignOp: PendingDutyOp = {
+        id: `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        type: 'assign',
+        airmanId: airman.id,
+        airmanName: `${formatAirmanName(airman.rank)} ${airman.name}`,
+        dutyCode: dutyCodeToUse,
+        idaShift: shiftToUse,
+        fromDate,
+        toDate: effectiveToDate,
+        notes,
+        proxyForFlight: proxyFltVal,
+        replacedAirmanId,
+      };
+      nextPendingOps = [...pendingOps, assignOp];
+    }
 
-          const nextAssignments = computeUpdatedAssignments(assignmentsList);
-          setAssignmentsList((prev) => computeUpdatedAssignments(prev));
+    const nextAssignments = applyPendingOpsToDateList(rawServerAssignmentsList, nextPendingOps, fromDate);
+    setPendingOps(nextPendingOps);
 
-          // Sync directly with localDb
-          try {
-            const dates = getDatesInRange(fromDate, toDate || fromDate);
-            dates.forEach((dStr) => {
-              const mKey = dStr.slice(0, 7);
-              if (!localDb.db.assignments[mKey]) localDb.db.assignments[mKey] = [];
-              let list = localDb.db.assignments[mKey];
-              if (replacedAirman) {
-                list = list.filter((a) => {
-                  if (!isSameAirman(a.airmanId, replacedAirman!.id) || a.date !== dStr) return true;
-                  if (isDepCode(a.dutyCode)) return true;
-                  return !doesAssignmentMatchDuty(a, dutyCodeToUse, isIdac ? shiftToUse : undefined);
-                });
-              }
-              if (isIdac) {
-                const targetShift = shiftToUse || 'Morning';
-                list = list.filter((a) => {
-                  if (!isSameAirman(a.airmanId, airman.id) || a.date !== dStr) return true;
-                  if (isDepCode(a.dutyCode)) return true;
-                  if (a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') {
-                    const existingShift = resolveCanonicalIdacShift(a);
-                    if (
-                      (targetShift === 'Morning' && existingShift === 'Night') ||
-                      (targetShift === 'Night' && existingShift === 'Morning')
-                    ) {
-                      return true;
-                    }
-                    return false;
-                  }
-                  if (targetShift === 'Night' && !['DUTY', 'DUTY_ON', 'ON_PARADE'].includes(String(a.dutyCode || ''))) {
-                    return true;
-                  }
-                  return false;
-                });
-              } else {
-                list = list.filter(
-                  (a) =>
-                    !(
-                      isSameAirman(a.airmanId, airman.id) &&
-                      a.date === dStr &&
-                      !isDepCode(a.dutyCode) &&
-                      !((a.dutyCode === 'IDAC' || a.dutyCode === 'IDA') && resolveCanonicalIdacShift(a) === 'Night')
-                    )
-                );
-              }
-              list.push({ ...newAssignment, date: dStr });
-              localDb.db.assignments[mKey] = list;
-            });
-            localDb.saveToStorage(localDb.db, false, false, false);
-          } catch (syncErr) {
-            console.warn('localDb assign sync warning:', syncErr);
-          }
+    const dtName = DUTY_TYPE_MAP.get(dutyCodeToUse as any)?.name || dutyCodeToUse;
+    const shiftSuffix = isIdac ? ` (${shiftToUse})` : '';
+    if (matchingUnassignIdx !== -1) {
+      setToastMessage(`📝 Restored ${formatAirmanName(airman.rank)} ${airman.name} to ${dtName}${shiftSuffix}`);
+    } else if (replacedAirman) {
+      setToastMessage(
+        `📝 Staged replace: ${formatAirmanName(replacedAirman.rank)} ${replacedAirman.name} ➔ ${formatAirmanName(airman.rank)} ${airman.name} (${dtName}${shiftSuffix}) — Click Apply`
+      );
+    } else {
+      setToastMessage(
+        `📝 Staged: ${formatAirmanName(airman.rank)} ${airman.name} ➔ ${dtName}${shiftSuffix} (Click Apply to save)`
+      );
+    }
+    setTimeout(() => setToastMessage(''), 2500);
 
-          const dtName = DUTY_TYPE_MAP.get(dutyCodeToUse as any)?.name || dutyCodeToUse;
-          const shiftSuffix = isIdac ? ` (${shiftToUse})` : '';
-          if (replacedAirman) {
-            setToastMessage(`🔄 Replaced ${formatAirmanName(replacedAirman.rank)} ${replacedAirman.name} ➔ Assigned ${formatAirmanName(airman.rank)} ${airman.name} to ${dtName}${shiftSuffix}`);
-          } else {
-            setToastMessage(`✅ ${formatAirmanName(airman.rank)} ${airman.name} assigned to ${dtName}${shiftSuffix}`);
-          }
-          setTimeout(() => setToastMessage(''), 2500);
-          window.dispatchEvent(new CustomEvent('baf_state_updated'));
-          if (onRefreshParadeData) onRefreshParadeData();
-          if (onSuccess) onSuccess();
-          fetchCurrentRoster();
+    // Unified Auto-Advance Workflow (uses staged nextAssignments):
+    // 1. Stay in current duty if it has another unfulfilled shift (IDAC) or ratio flight slot.
+    // 2. When current duty is completely filled, move to any other duty & ratio flight on fromDate that has unfulfilled quota (unless Duty is locked).
+    // 3. When all duties' quotas for the day just became completely filled, advance to the next day (staged changes stay queued across dates).
+    if (dutyCodeToUse) {
+      userManuallySelectedDutyRef.current = false;
+      userManuallySelectedShiftRef.current = false;
+      userManuallySelectedFlightRef.current = false;
 
-          // Unified Auto-Advance Workflow:
-          // 1. Stay in current duty if it has another unfulfilled shift (IDAC) or ratio flight slot.
-          // 2. When current duty is completely filled, move to any other duty & ratio flight on fromDate that has unfulfilled quota (unless Duty is locked).
-          // 3. When all duties' quotas for the day just became completely filled, advance to the next day.
-          if (dutyCodeToUse) {
-            userManuallySelectedDutyRef.current = false;
-            userManuallySelectedShiftRef.current = false;
-            userManuallySelectedFlightRef.current = false;
+      const lockedFlt: FlightName | undefined =
+        isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : undefined;
+      const allowedFlights: FlightName[] = lockedFlt ? [lockedFlt] : getOrderedFlights();
 
-            const lockedFlt: FlightName | undefined =
-              isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : undefined;
-            const allowedFlights: FlightName[] = lockedFlt ? [lockedFlt] : getOrderedFlights();
+      let advancedWithinCurrentDuty = false;
 
-            let advancedWithinCurrentDuty = false;
+      if (isIdac) {
+        const allShifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
+        const currentShift: IDAShift = shiftToUse || activeIdaShift || 'Morning';
 
-            if (isIdac) {
-              const allShifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
-              const currentShift: IDAShift = shiftToUse || activeIdaShift || 'Morning';
-
-              const pickFlightForShift = (sh: IDAShift, preferAfter?: FlightName | 'All'): FlightName | undefined => {
-                let ordered = allowedFlights;
-                if (preferAfter && preferAfter !== 'All' && allowedFlights.length > 1) {
-                  const idx = allowedFlights.indexOf(preferAfter as FlightName);
-                  if (idx >= 0) {
-                    ordered = [...allowedFlights.slice(idx + 1), ...allowedFlights.slice(0, idx + 1)];
-                  }
-                }
-                return (
-                  ordered.find((flt) => {
-                    const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
-                    return req > 0 && countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh) < req;
-                  }) || ordered.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh) > 0)
-                );
-              };
-
-              // 1) Check if the current shift's total quota is still unfilled
-              const curShiftStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', currentShift, lockedFlt);
-              if (curShiftStatus.unfulfilled) {
-                const nextFlt = pickFlightForShift(currentShift, targetFlight);
-                setActiveIdaShift(currentShift);
-                if (!isFlightLocked && !(isAdmin && adminFlight) && nextFlt) {
-                  setActiveFlight(nextFlt);
-                }
-                advancedWithinCurrentDuty = true;
-              } else {
-                const curShiftIdx = allShifts.indexOf(currentShift);
-                const orderedNextShifts: IDAShift[] =
-                  curShiftIdx >= 0
-                    ? [...allShifts.slice(curShiftIdx + 1), ...allShifts.slice(0, curShiftIdx)]
-                    : allShifts;
-
-                for (const sh of orderedNextShifts) {
-                  const shStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', sh, lockedFlt);
-                  if (shStatus.unfulfilled) {
-                    const nextFlt = pickFlightForShift(sh);
-                    setActiveIdaShift(sh);
-                    if (!isFlightLocked && !(isAdmin && adminFlight) && nextFlt) {
-                      setActiveFlight(nextFlt);
-                    }
-                    advancedWithinCurrentDuty = true;
-                    break;
-                  }
-                }
-              }
-            } else {
-              // Non-IDAC duty: only stay in this duty if its total quota is still unfilled
-              const curDutyStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, dutyCodeToUse, undefined, lockedFlt);
-              if (curDutyStatus.unfulfilled) {
-                let ordered = allowedFlights;
-                if (targetFlight && targetFlight !== 'All' && allowedFlights.length > 1) {
-                  const idx = allowedFlights.indexOf(targetFlight as FlightName);
-                  if (idx >= 0) {
-                    ordered = [...allowedFlights.slice(idx + 1), ...allowedFlights.slice(0, idx + 1)];
-                  }
-                }
-                const nextFlight =
-                  ordered.find((flt) => {
-                    const req = getFlightDutyQuotaForDate(fromDate, flt, dutyCodeToUse);
-                    return req > 0 && countAssignedForDutyFlightShift(nextAssignments, dutyCodeToUse, flt) < req;
-                  }) || ordered.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, dutyCodeToUse) > 0);
-
-                if (nextFlight && !isFlightLocked && !(isAdmin && adminFlight)) {
-                  setActiveFlight(nextFlight);
-                }
-                advancedWithinCurrentDuty = true;
-              }
-            }
-
-            if (!advancedWithinCurrentDuty) {
-              const allActiveDuties = getActiveCountedDuties();
-              const candidateDuties =
-                isDutyLocked || onlyIdac
-                  ? allActiveDuties.filter((d) =>
-                      onlyIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
-                    )
-                  : (() => {
-                      const curDutyIdx = allActiveDuties.findIndex((d) =>
-                        isIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
-                      );
-                      if (curDutyIdx >= 0) {
-                        return [
-                          ...allActiveDuties.slice(curDutyIdx + 1),
-                          ...allActiveDuties.slice(0, curDutyIdx + 1),
-                        ];
-                      }
-                      return allActiveDuties;
-                    })();
-
-              interface DayQuotaSlot {
-                dutyCode: DutyCategoryCode;
-                shift?: IDAShift;
-                flight: FlightName;
-                unfulfilled: boolean;
-                wasUnfulfilledBefore: boolean;
-              }
-              const allDaySlots: DayQuotaSlot[] = [];
-
-              candidateDuties.forEach((dt) => {
-                if (isIdacDutyCode(dt.code)) {
-                  const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
-                  shifts.forEach((sh) => {
-                    const shStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', sh, lockedFlt);
-                    const prevShStatus = getQuotaFulfillmentStatus(fromDate, assignmentsList, 'IDAC', sh, lockedFlt);
-                    if (shStatus.required > 0) {
-                      const targetFlt =
-                        allowedFlights.find((flt) => {
-                          const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
-                          return req > 0 && countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh) < req;
-                        }) ||
-                        allowedFlights.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh) > 0) ||
-                        allowedFlights[0];
-                      if (targetFlt) {
-                        allDaySlots.push({
-                          dutyCode: 'IDAC',
-                          shift: sh,
-                          flight: targetFlt,
-                          unfulfilled: shStatus.unfulfilled,
-                          wasUnfulfilledBefore: prevShStatus.unfulfilled,
-                        });
-                      }
-                    }
-                  });
-                } else {
-                  const dtStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, dt.code, undefined, lockedFlt);
-                  const prevDtStatus = getQuotaFulfillmentStatus(fromDate, assignmentsList, dt.code, undefined, lockedFlt);
-                  if (dtStatus.required > 0) {
-                    const targetFlt =
-                      allowedFlights.find((flt) => {
-                        const req = getFlightDutyQuotaForDate(fromDate, flt, dt.code);
-                        return req > 0 && countAssignedForDutyFlightShift(nextAssignments, dt.code, flt) < req;
-                      }) ||
-                      allowedFlights.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, dt.code) > 0) ||
-                      allowedFlights[0];
-                    if (targetFlt) {
-                      allDaySlots.push({
-                        dutyCode: dt.code,
-                        shift: undefined,
-                        flight: targetFlt,
-                        unfulfilled: dtStatus.unfulfilled,
-                        wasUnfulfilledBefore: prevDtStatus.unfulfilled,
-                      });
-                    }
-                  }
-                }
-              });
-
-              const nextUnfulfilledOtherDuty = allDaySlots.find((s) => s.unfulfilled);
-              const hadUnfulfilledBeforeThisAssign = allDaySlots.some((s) => s.wasUnfulfilledBefore);
-
-              if (nextUnfulfilledOtherDuty) {
-                setActiveDutyCode(nextUnfulfilledOtherDuty.dutyCode);
-                setActiveIdaShift(nextUnfulfilledOtherDuty.shift);
-                if (!isFlightLocked && !(isAdmin && adminFlight)) {
-                  setActiveFlight(nextUnfulfilledOtherDuty.flight);
-                }
-              } else if (allDaySlots.length > 0 && hadUnfulfilledBeforeThisAssign) {
-                const lockDutyFilter =
-                  isDutyLocked || onlyIdac ? (isIdac ? 'IDAC' : dutyCodeToUse) : '';
-                const lockFlightFilter = isFlightLocked ? activeFlight : 'All';
-                const nextDateStr = findNextDateWithDutyQuota(
-                  fromDate,
-                  lockFlightFilter,
-                  lockDutyFilter,
-                  1
-                );
-
-                pendingAutoSelectDateRef.current = nextDateStr;
-                setToastMessage(
-                  `🎉 All duty quotas completed for ${fromDate}! Advancing to ${nextDateStr}...`
-                );
-                setTimeout(() => {
-                  setFromDate(nextDateStr);
-                  setToDate(nextDateStr);
-                  setSelectedPresetDays(1);
-                }, 550);
-              }
+        const pickFlightForShift = (sh: IDAShift, preferAfter?: FlightName | 'All'): FlightName | undefined => {
+          let ordered = allowedFlights;
+          if (preferAfter && preferAfter !== 'All' && allowedFlights.length > 1) {
+            const idx = allowedFlights.indexOf(preferAfter as FlightName);
+            if (idx >= 0) {
+              ordered = [...allowedFlights.slice(idx + 1), ...allowedFlights.slice(0, idx + 1)];
             }
           }
+          return (
+            ordered.find((flt) => {
+              const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
+              return req > 0 && countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh) < req;
+            }) || ordered.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh) > 0)
+          );
+        };
+
+        const curShiftStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', currentShift, lockedFlt);
+        if (curShiftStatus.unfulfilled) {
+          const nextFlt = pickFlightForShift(currentShift, targetFlight);
+          setActiveIdaShift(currentShift);
+          if (!isFlightLocked && !(isAdmin && adminFlight) && nextFlt) {
+            setActiveFlight(nextFlt);
+          }
+          advancedWithinCurrentDuty = true;
         } else {
-          const data = await res.json().catch(() => ({}));
-          alert(data.error || 'Failed to assign duty');
+          const curShiftIdx = allShifts.indexOf(currentShift);
+          const orderedNextShifts: IDAShift[] =
+            curShiftIdx >= 0
+              ? [...allShifts.slice(curShiftIdx + 1), ...allShifts.slice(0, curShiftIdx)]
+              : allShifts;
+
+          for (const sh of orderedNextShifts) {
+            const shStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', sh, lockedFlt);
+            if (shStatus.unfulfilled) {
+              const nextFlt = pickFlightForShift(sh);
+              setActiveIdaShift(sh);
+              if (!isFlightLocked && !(isAdmin && adminFlight) && nextFlt) {
+                setActiveFlight(nextFlt);
+              }
+              advancedWithinCurrentDuty = true;
+              break;
+            }
+          }
+        }
+      } else {
+        const curDutyStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, dutyCodeToUse, undefined, lockedFlt);
+        if (curDutyStatus.unfulfilled) {
+          let ordered = allowedFlights;
+          if (targetFlight && targetFlight !== 'All' && allowedFlights.length > 1) {
+            const idx = allowedFlights.indexOf(targetFlight as FlightName);
+            if (idx >= 0) {
+              ordered = [...allowedFlights.slice(idx + 1), ...allowedFlights.slice(0, idx + 1)];
+            }
+          }
+          const nextFlight =
+            ordered.find((flt) => {
+              const req = getFlightDutyQuotaForDate(fromDate, flt, dutyCodeToUse);
+              return req > 0 && countAssignedForDutyFlightShift(nextAssignments, dutyCodeToUse, flt) < req;
+            }) || ordered.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, dutyCodeToUse) > 0);
+
+          if (nextFlight && !isFlightLocked && !(isAdmin && adminFlight)) {
+            setActiveFlight(nextFlight);
+          }
+          advancedWithinCurrentDuty = true;
         }
       }
-    } catch (err: any) {
-      console.error('Direct assignment error:', err);
-      alert(`Network error: ${err.message}`);
-    } finally {
-      setProcessingAirmanId(null);
+
+      if (!advancedWithinCurrentDuty) {
+        const allActiveDuties = getActiveCountedDuties();
+        const candidateDuties =
+          isDutyLocked || onlyIdac
+            ? allActiveDuties.filter((d) =>
+                onlyIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
+              )
+            : (() => {
+                const curDutyIdx = allActiveDuties.findIndex((d) =>
+                  isIdac ? isIdacDutyCode(d.code) : d.code === dutyCodeToUse
+                );
+                if (curDutyIdx >= 0) {
+                  return [
+                    ...allActiveDuties.slice(curDutyIdx + 1),
+                    ...allActiveDuties.slice(0, curDutyIdx + 1),
+                  ];
+                }
+                return allActiveDuties;
+              })();
+
+        interface DayQuotaSlot {
+          dutyCode: DutyCategoryCode;
+          shift?: IDAShift;
+          flight: FlightName;
+          unfulfilled: boolean;
+          wasUnfulfilledBefore: boolean;
+        }
+        const allDaySlots: DayQuotaSlot[] = [];
+
+        candidateDuties.forEach((dt) => {
+          if (isIdacDutyCode(dt.code)) {
+            const shifts: IDAShift[] = ['Morning', 'Afternoon', 'Night'];
+            shifts.forEach((sh) => {
+              const shStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, 'IDAC', sh, lockedFlt);
+              const prevShStatus = getQuotaFulfillmentStatus(fromDate, assignmentsList, 'IDAC', sh, lockedFlt);
+              if (shStatus.required > 0) {
+                const targetFlt =
+                  allowedFlights.find((flt) => {
+                    const req = getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh);
+                    return req > 0 && countAssignedForDutyFlightShift(nextAssignments, 'IDAC', flt, sh) < req;
+                  }) ||
+                  allowedFlights.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, 'IDAC', sh) > 0) ||
+                  allowedFlights[0];
+                if (targetFlt) {
+                  allDaySlots.push({
+                    dutyCode: 'IDAC',
+                    shift: sh,
+                    flight: targetFlt,
+                    unfulfilled: shStatus.unfulfilled,
+                    wasUnfulfilledBefore: prevShStatus.unfulfilled,
+                  });
+                }
+              }
+            });
+          } else {
+            const dtStatus = getQuotaFulfillmentStatus(fromDate, nextAssignments, dt.code, undefined, lockedFlt);
+            const prevDtStatus = getQuotaFulfillmentStatus(fromDate, assignmentsList, dt.code, undefined, lockedFlt);
+            if (dtStatus.required > 0) {
+              const targetFlt =
+                allowedFlights.find((flt) => {
+                  const req = getFlightDutyQuotaForDate(fromDate, flt, dt.code);
+                  return req > 0 && countAssignedForDutyFlightShift(nextAssignments, dt.code, flt) < req;
+                }) ||
+                allowedFlights.find((flt) => getFlightDutyQuotaForDate(fromDate, flt, dt.code) > 0) ||
+                allowedFlights[0];
+              if (targetFlt) {
+                allDaySlots.push({
+                  dutyCode: dt.code,
+                  shift: undefined,
+                  flight: targetFlt,
+                  unfulfilled: dtStatus.unfulfilled,
+                  wasUnfulfilledBefore: prevDtStatus.unfulfilled,
+                });
+              }
+            }
+          }
+        });
+
+        const nextUnfulfilledOtherDuty = allDaySlots.find((s) => s.unfulfilled);
+        const hadUnfulfilledBeforeThisAssign = allDaySlots.some((s) => s.wasUnfulfilledBefore);
+
+        if (nextUnfulfilledOtherDuty) {
+          setActiveDutyCode(nextUnfulfilledOtherDuty.dutyCode);
+          setActiveIdaShift(nextUnfulfilledOtherDuty.shift);
+          if (!isFlightLocked && !(isAdmin && adminFlight)) {
+            setActiveFlight(nextUnfulfilledOtherDuty.flight);
+          }
+        } else if (allDaySlots.length > 0 && hadUnfulfilledBeforeThisAssign) {
+          const lockDutyFilter =
+            isDutyLocked || onlyIdac ? (isIdac ? 'IDAC' : dutyCodeToUse) : '';
+          const lockFlightFilter = isFlightLocked ? activeFlight : 'All';
+          const nextDateStr = findNextDateWithDutyQuota(
+            fromDate,
+            lockFlightFilter,
+            lockDutyFilter,
+            1
+          );
+
+          pendingAutoSelectDateRef.current = nextDateStr;
+          setToastMessage(
+            `📝 All quotas staged for ${fromDate}! Moving to ${nextDateStr} (Click Apply to save)...`
+          );
+          setTimeout(() => {
+            setFromDate(nextDateStr);
+            setToDate(nextDateStr);
+            setSelectedPresetDays(1);
+          }, 550);
+        }
+      }
     }
   };
 
@@ -2202,7 +2438,14 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const weekdayFull = getWeekdayFull(activeDateStr);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-0 sm:pt-6 sm:pb-6 sm:px-5 overflow-y-auto bg-slate-950/75 backdrop-blur-xs animate-fadeIn">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget && hasUnsavedChanges) {
+          requestLeaveModal({ type: 'close' });
+        }
+      }}
+      className="fixed inset-0 z-50 flex items-start justify-center p-0 sm:pt-6 sm:pb-6 sm:px-5 overflow-y-auto bg-slate-950/75 backdrop-blur-xs animate-fadeIn"
+    >
       <div className="bg-white dark:bg-slate-900 rounded-none sm:rounded-2xl border-0 sm:border border-slate-200 dark:border-slate-800 shadow-2xl max-w-4xl w-full p-4 sm:p-5 space-y-3.5 relative overflow-hidden h-full sm:h-auto sm:max-h-[calc(100vh-3rem)] flex flex-col">
         {/* Floating Overlay Toast Notification (overlays box without altering modal shape or layout) */}
         {toastMessage && (
@@ -2213,6 +2456,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                   ? 'bg-rose-600/95'
                   : toastMessage.startsWith('⚠️')
                   ? 'bg-amber-600/95'
+                  : toastMessage.startsWith('📝')
+                  ? 'bg-sky-600/95'
+                  : toastMessage.startsWith('🗑️')
+                  ? 'bg-slate-700/95'
                   : 'bg-emerald-600/95'
               }`}
             >
@@ -2233,28 +2480,36 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                 <h2 className="text-base sm:text-lg font-black text-slate-900 dark:text-slate-100">
                   {onlyIdac ? 'IDA Center Duty Assignment' : 'Assign Duty / Activity'}
                 </h2>
-                <span className={`px-2 py-0.5 rounded-full text-[11px] font-black border ${
-                  onlyIdac 
-                    ? 'bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 border-teal-200 dark:border-teal-800'
-                    : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
-                }`}>
-                  Instant Auto-Save
-                </span>
+                {hasUnsavedChanges ? (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-black border bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                    Unsaved ({pendingOps.length})
+                  </span>
+                ) : (
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-black border ${
+                    onlyIdac 
+                      ? 'bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 border-teal-200 dark:border-teal-800'
+                      : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                  }`}>
+                    Apply to Save
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 {onlyIdac
-                  ? 'Click IDAC shift and airman below to assign directly. Synchronized with Dashboard & Matrix.'
-                  : 'Select a tab below to assign Duty, Leave, TDY, or Deployment.'}
+                  ? 'Click IDAC shift and airman below, then click Apply to save changes.'
+                  : 'Select a tab below to assign Duty, Leave, TDY, or Deployment. Click Apply to save duty changes.'}
               </p>
             </div>
           </div>
 
           <button
-            onClick={onClose}
+            type="button"
+            onClick={() => requestLeaveModal({ type: 'close' })}
             className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -2262,11 +2517,19 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         </div>
         
         <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
-          {['Duty', 'Leave', 'TDY', 'Deployment'].map(tab => (
+          {(['Duty', 'Leave', 'TDY', 'Deployment'] as const).map(tab => (
             <button
               key={tab}
-              onClick={() => setActiveModalTab(tab as any)}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-colors flex-1 text-center ${activeModalTab === tab ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+              type="button"
+              onClick={() => {
+                if (tab === activeModalTab) return;
+                if (activeModalTab === 'Duty' && hasUnsavedChanges) {
+                  requestLeaveModal({ type: 'switchTab', tab });
+                } else {
+                  setActiveModalTab(tab);
+                }
+              }}
+              className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-colors flex-1 text-center cursor-pointer ${activeModalTab === tab ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
             >
               {tab}
             </button>
@@ -3277,7 +3540,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                   }
 
                   const isDisabled = isReadOnly || !isEligible;
-                  const isProcessing = processingAirmanId === airman.id || isApplyingMultiDates;
+                  const isProcessing = processingAirmanId === airman.id || isApplyingMultiDates || isApplyingPending;
 
                   return (
                     <button
@@ -3401,26 +3664,185 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="flex items-center justify-between pt-2.5 border-t border-slate-200 dark:border-slate-800 shrink-0">
-          <div className="text-xs text-slate-500">
-            <span>
-              Date: <strong>{fromDate}</strong>
-              {selectedPresetDays !== 1 && fromDate !== toDate ? ` to ${toDate}` : ''} • Changes are applied directly.
-            </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-slate-200 dark:border-slate-800 shrink-0">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            {activeModalTab === 'Duty' && hasUnsavedChanges ? (
+              <span className="inline-flex items-center gap-1.5 font-bold text-amber-700 dark:text-amber-300">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {pendingOps.length} unsaved change{pendingOps.length > 1 ? 's' : ''}
+                  {pendingAffectedDates.length > 1 ? ` across ${pendingAffectedDates.length} dates` : ''} • Click Apply to save.
+                </span>
+              </span>
+            ) : (
+              <span>
+                Date: <strong>{fromDate}</strong>
+                {selectedPresetDays !== 1 && fromDate !== toDate ? ` to ${toDate}` : ''} • Click Apply after changes to save.
+              </span>
+            )}
           </div>
 
           <div className="flex items-center space-x-2">
+            {activeModalTab === 'Duty' && !isReadOnly && (
+              <>
+                {hasUnsavedChanges && (
+                  <button
+                    type="button"
+                    disabled={isApplyingPending}
+                    onClick={() => requestLeaveModal({ type: 'discardOnly' })}
+                    className="px-3.5 py-2 text-xs font-bold rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-all inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Discard</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={!hasUnsavedChanges || isApplyingPending}
+                  onClick={() => handleApplyPendingChanges()}
+                  className={`px-4 py-2 text-xs font-black rounded-xl shadow-xs transition-all inline-flex items-center gap-1.5 ${
+                    hasUnsavedChanges
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white ring-2 ring-emerald-500/30 cursor-pointer'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-500 cursor-not-allowed'
+                  }`}
+                >
+                  {isApplyingPending ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {isApplyingPending
+                      ? 'Applying...'
+                      : hasUnsavedChanges
+                      ? `Apply (${pendingOps.length})`
+                      : 'Apply'}
+                  </span>
+                </button>
+              </>
+            )}
+
             <button
               type="button"
-              onClick={onClose}
-              className="px-5 py-2 text-xs font-black bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 rounded-xl shadow-xs transition-all cursor-pointer"
+              disabled={isApplyingPending}
+              onClick={() => requestLeaveModal({ type: 'close' })}
+              className="px-4 py-2 text-xs font-black bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 rounded-xl shadow-xs transition-all cursor-pointer disabled:opacity-50"
             >
-              Done / Close
+              Close
             </button>
           </div>
         </div>
 
       </div>
+
+      {/* 2-Step Unsaved Changes & Confirm Discard Guard Popup */}
+      {unsavedPrompt.open && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-fadeIn"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl max-w-md w-full p-5 space-y-4">
+            {!unsavedPrompt.confirmDiscardStep ? (
+              <>
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-xl bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800 shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-base font-black text-slate-900 dark:text-slate-100">
+                      Unsaved Duty Changes
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                      You have <strong className="text-amber-600 dark:text-amber-400">{pendingOps.length} unsaved duty change{pendingOps.length > 1 ? 's' : ''}</strong>
+                      {pendingAffectedDates.length > 1
+                        ? ` across ${pendingAffectedDates.length} dates`
+                        : pendingAffectedDates.length === 1
+                        ? ` for ${pendingAffectedDates[0]}`
+                        : ''}.
+                      Changes will not take effect until you apply and save them.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    disabled={isApplyingPending}
+                    onClick={() =>
+                      setUnsavedPrompt((prev) => ({ ...prev, confirmDiscardStep: true }))
+                    }
+                    className="px-3.5 py-2 text-xs font-bold rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Don&apos;t Save / Discard
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isApplyingPending}
+                    onClick={() =>
+                      setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null })
+                    }
+                    className="px-3.5 py-2 text-xs font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Keep Editing
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isApplyingPending}
+                    onClick={() => handleApplyPendingChanges(unsavedPrompt.pendingAction)}
+                    className="px-4 py-2 text-xs font-black rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                  >
+                    {isApplyingPending ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Save className="w-3.5 h-3.5" />
+                    )}
+                    <span>{isApplyingPending ? 'Saving...' : 'Apply & Save'}</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-xl bg-rose-100 dark:bg-rose-950/70 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-base font-black text-rose-700 dark:text-rose-400">
+                      Confirm Discard Changes?
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                      Are you sure you want to permanently discard all <strong className="text-rose-600 dark:text-rose-400">{pendingOps.length} unsaved duty change{pendingOps.length > 1 ? 's' : ''}</strong>? None of these duty changes will be saved or applied.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (unsavedPrompt.pendingAction?.type === 'discardOnly') {
+                        setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
+                      } else {
+                        setUnsavedPrompt((prev) => ({ ...prev, confirmDiscardStep: false }));
+                      }
+                    }}
+                    className="px-4 py-2 text-xs font-bold rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                  >
+                    Go Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDiscardPending}
+                    className="px-4 py-2 text-xs font-black rounded-xl bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition-colors cursor-pointer"
+                  >
+                    Yes, Discard All
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Flight Duty Ratio Modal */}
       {showRatioModal && (
