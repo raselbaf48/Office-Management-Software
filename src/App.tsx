@@ -158,7 +158,7 @@ export default function App() {
     const adminOnlyTabs: SidebarTab[] = ['biodata-register', 'duty-ratio', 'analytics', 'conflicts'];
     if (role === 'USER' && adminOnlyTabs.includes(activeTab)) {
       setActiveTab('overview');
-    } else if (activeTab === 'ida-center' && !isDefault155UasuOffice()) {
+    } else if ((activeTab === 'ida-center' || activeTab === 'attachment-register') && !isDefault155UasuOffice()) {
       setActiveTab('overview');
     }
   }, [role, activeTab, officeIdentity]);
@@ -659,7 +659,7 @@ export default function App() {
     // If regular USER attempts to view admin-only tab, or non-155 office views ida-center, gracefully fallback to overview
     if (
       (role === 'USER' && (tab === 'biodata-register' || tab === 'duty-ratio' || tab === 'analytics' || tab === 'conflicts')) ||
-      (tab === 'ida-center' && !isDefault155UasuOffice())
+      ((tab === 'ida-center' || tab === 'attachment-register') && !isDefault155UasuOffice())
     ) {
       tab = 'overview';
     }

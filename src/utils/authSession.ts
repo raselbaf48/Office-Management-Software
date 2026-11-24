@@ -34,6 +34,7 @@ export interface UserLoginLog {
   timeFormatted: string;
   role?: string;
   deviceInfo: string;
+  officeCode?: string;
 }
 
 export interface UserSession {
@@ -131,12 +132,26 @@ export function buildMasterOwnerUserRecord(): DetailedUserLogin {
   };
 }
 
-// In-memory cache of login history
+// In-memory cache of login history (strictly scoped by active office)
 let cachedLoginHistory: UserLoginLog[] = [];
+let cachedLoginHistoryOfficeCode: string = '';
+
+const isLoginLogForActiveOffice = (log: Partial<UserLoginLog> | null | undefined): boolean => {
+  if (!log || !log.bdNo) return false;
+  if (isMasterProtectedUser(log.bdNo, log.role)) return false;
+  const activeCode = getActiveOfficeCode();
+  const isDefault155 = isDefault155UasuOffice();
+  const logOffice = String(log.officeCode || '').trim();
+  if (logOffice) {
+    return logOffice === activeCode;
+  }
+  return isDefault155;
+};
 
 if (typeof window !== 'undefined') {
   window.addEventListener('baf_office_config_changed', () => {
     cachedLoginHistory = [];
+    cachedLoginHistoryOfficeCode = '';
   });
 }
 
@@ -942,13 +957,20 @@ export const clearUserSession = (): void => {
  * Retrieve all login history entries
  */
 export const getLoginHistory = (): UserLoginLog[] => {
+  const activeCode = getActiveOfficeCode();
+  if (cachedLoginHistoryOfficeCode !== activeCode) {
+    cachedLoginHistory = [];
+    cachedLoginHistoryOfficeCode = activeCode;
+  }
   if (cachedLoginHistory.length > 0) {
-    return cachedLoginHistory;
+    return cachedLoginHistory.filter(isLoginLogForActiveOffice);
   }
   try {
     const raw = localStorage.getItem(getLoginHistoryStorageKey());
     if (raw) {
-      cachedLoginHistory = JSON.parse(raw) as UserLoginLog[];
+      const parsed = JSON.parse(raw) as UserLoginLog[];
+      cachedLoginHistory = (Array.isArray(parsed) ? parsed : []).filter(isLoginLogForActiveOffice);
+      cachedLoginHistoryOfficeCode = activeCode;
       return cachedLoginHistory;
     }
   } catch {
@@ -964,21 +986,27 @@ export const recordLoginLog = async (airman: Airman, role: string = 'USER'): Pro
   try {
     const nowIso = new Date().toISOString();
     const cleanBd = (airman.bdNo || "").replace(/^BD\/?/i, '').trim();
+    if (!cleanBd || isMasterProtectedUser(cleanBd, role, (airman as any)?.isProtected)) {
+      return;
+    }
+    const activeCode = getActiveOfficeCode();
     const newLog: UserLoginLog = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       bdNo: `BD/${cleanBd}`,
       rank: airman.rank,
       name: airman.name,
-      flightName: airman.flightName,
+      flightName: airman.flightName || 'Admin',
       role: role || 'USER',
       timestamp: nowIso,
       timeFormatted: formatLogTime(nowIso),
       deviceInfo: typeof navigator !== 'undefined' && navigator.userAgent.includes('Mobile') ? 'Mobile Device' : 'Desktop / Web Workstation',
+      officeCode: activeCode,
     };
 
     // Update in-memory & local cache immediately
     const existing = getLoginHistory();
-    cachedLoginHistory = [newLog, ...existing.filter(item => item.id !== newLog.id)];
+    cachedLoginHistory = [newLog, ...existing.filter(item => item.id !== newLog.id)].filter(isLoginLogForActiveOffice);
+    cachedLoginHistoryOfficeCode = activeCode;
     const histStorageKey = getLoginHistoryStorageKey();
     try {
       localStorage.setItem(histStorageKey, JSON.stringify(cachedLoginHistory));
@@ -989,7 +1017,7 @@ export const recordLoginLog = async (airman: Airman, role: string = 'USER'): Pro
       window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: cachedLoginHistory }));
     }
 
-    // Persist to Firebase app_settings/baf_user_login_history without an extra getDoc read on every login
+    // Persist to Firebase app_settings/${prefix}baf_user_login_history without an extra getDoc read on every login
     if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
       (async () => {
         try {

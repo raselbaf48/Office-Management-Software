@@ -11,7 +11,7 @@ import {
   saveDutyRatioVersion,
 } from '../data/officialDutyRatioMatrix';
 import { formatShortDate } from '../utils/csvExport';
-import { calculateBalancedAutoTargets, autoAllocateDutyMatrix, DEFAULT_MANPOWER, AllocationMode } from '../utils/dutyDistribution';
+import { calculateBalancedAutoTargets, autoAllocateDutyMatrix, getTableDayReqForIndex, DEFAULT_MANPOWER, AllocationMode } from '../utils/dutyDistribution';
 import { FlightName, UserRole } from '../types';
 import { pushDutyListToCloud } from '../utils/dutyCloudSync';
 import {
@@ -127,6 +127,21 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
       sessionStorage.setItem('baf_duty_ratio_period_mode', ratioPeriodMode);
     } catch {}
   }, [ratioPeriodMode]);
+
+  const [dutyCellInputMode, setDutyCellInputMode] = useState<'click' | 'stepper'>(() => {
+    try {
+      const saved = localStorage.getItem('baf_duty_matrix_cell_input_mode');
+      if (saved === 'click' || saved === 'stepper') return saved;
+    } catch {}
+    return 'click';
+  });
+
+  const handleDutyCellInputModeChange = (nextMode: 'click' | 'stepper') => {
+    setDutyCellInputMode(nextMode);
+    try {
+      localStorage.setItem('baf_duty_matrix_cell_input_mode', nextMode);
+    } catch {}
+  };
 
   const getRunningTodayISO = () => {
     const now = new Date();
@@ -267,10 +282,29 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
 
   const handleTriggerAutoAllocate = (allocMode: AllocationMode = 'SINGLE') => {
     const activeManpower = draftManpower || DEFAULT_MANPOWER;
-    const allocatedMatrix = autoAllocateDutyMatrix(matrix, activeManpower, allocMode);
+    const weeklyTargetsByTable: Record<string, Partial<Record<FlightName, number>>> = {};
+    if (ratioPeriodMode === 'WEEKLY') {
+      matrix.forEach((t) => {
+        if (t.isDisabled) return;
+        weeklyTargetsByTable[t.id] = {};
+        flights.forEach((fl) => {
+          weeklyTargetsByTable[t.id][fl] = getPeriodFlightTarget(t, fl);
+        });
+      });
+    }
+    const allocatedMatrix = autoAllocateDutyMatrix(matrix, activeManpower, allocMode, {
+      periodMode: ratioPeriodMode,
+      dayIndices: ratioPeriodMode === 'WEEKLY' ? activeColumns.map(c => c.dayIdx) : undefined,
+      weekRangeKey: weekRangeKey || undefined,
+      weeklyTargetsByTable: ratioPeriodMode === 'WEEKLY' ? weeklyTargetsByTable : undefined,
+      flightKeys: flights,
+    });
     handleRatioCalculated(allocatedMatrix);
+    const periodPrefix = ratioPeriodMode === 'WEEKLY'
+      ? `Weekly (${formatShortDate(weeklyStartDate)} – ${formatShortDate(weeklyEndDate)}) • `
+      : '';
     setAllocatedModeInfo({
-      mode: allocMode === 'PACKAGE' ? 'Package (2-3 Days Consecutive)' : 'Single (Gap System)',
+      mode: `${periodPrefix}${allocMode === 'PACKAGE' ? 'Package (2-3 Days Consecutive)' : 'Single (Gap System)'}`,
       desc: allocMode === 'PACKAGE'
         ? 'Duties grouped into 2 to 3 consecutive days per block. Click Save to apply.'
         : 'Duties spread out with optimal rest gaps between days. Click Save to apply.',
@@ -483,9 +517,19 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     const updated = [...matrix];
     const tableObj = { ...updated[resetConfirmTableIdx] };
     const flightData = { ...tableObj.data };
-    flights.forEach(f => {
-      flightData[f] = new Array(31).fill(0);
-    });
+    if (ratioPeriodMode === 'WEEKLY') {
+      flights.forEach(f => {
+        const arr = [...(flightData[f] || new Array(31).fill(0))];
+        activeColumns.forEach(col => {
+          arr[col.dayIdx] = 0;
+        });
+        flightData[f] = arr;
+      });
+    } else {
+      flights.forEach(f => {
+        flightData[f] = new Array(31).fill(0);
+      });
+    }
     tableObj.data = flightData;
     updated[resetConfirmTableIdx] = tableObj;
     setMatrix(updated);
@@ -558,19 +602,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const getTableDayRequirement = (table: DutyRatioTable, dayIdx: number): number => {
-    if (table.isDisabled) return 0;
-    if (table.dailyRequirements?.[dayIdx] !== undefined) {
-      return table.dailyRequirements[dayIdx];
-    }
-    if (table.totalRequiredDaily && (table.totalRequiredDaily * 31 === table.totalRequiredMonth)) {
-      return table.totalRequiredDaily;
-    }
-    if (table.totalRequiredMonth && table.totalRequiredMonth > 0) {
-      const base = Math.floor(table.totalRequiredMonth / 31);
-      const rem = table.totalRequiredMonth % 31;
-      return dayIdx < rem ? base + 1 : base;
-    }
-    return flights.reduce((acc, fl) => acc + (table.data?.[fl as FlightName]?.[dayIdx] || 0), 0);
+    return getTableDayReqForIndex(table, dayIdx);
   };
 
   const getPeriodTableTarget = (table: DutyRatioTable): number => {
@@ -581,9 +613,22 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     return activeColumns.reduce((sum, col) => sum + getTableDayRequirement(table, col.dayIdx), 0);
   };
 
+  const weekRangeKey = useMemo(() => {
+    if (ratioPeriodMode !== 'WEEKLY') return '';
+    return `${weeklyStartDate || targetDate || 'default'}_${weeklyEndDate || weeklyStartDate || targetDate || 'default'}`;
+  }, [ratioPeriodMode, weeklyStartDate, weeklyEndDate, targetDate]);
+
+  const periodDayIndices = useMemo(() => {
+    return ratioPeriodMode === 'WEEKLY' ? activeColumns.map(c => c.dayIdx) : undefined;
+  }, [ratioPeriodMode, activeColumns]);
+
   // Calculate Auto Targets with Cross-Duty Workload Balancing
   const currentManpower = draftManpower || DEFAULT_MANPOWER;
   const autoTargets = calculateBalancedAutoTargets(matrix, currentManpower, false);
+  const weeklyAutoTargets = useMemo(() => {
+    if (ratioPeriodMode !== 'WEEKLY') return null;
+    return calculateBalancedAutoTargets(matrix, currentManpower, false, periodDayIndices);
+  }, [ratioPeriodMode, matrix, currentManpower, periodDayIndices]);
 
   const getFlightTarget = (table: DutyRatioTable, fl: FlightName): number => {
     if (table.isDisabled) return 0;
@@ -603,31 +648,19 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     if (ratioPeriodMode === 'MONTHLY') {
       return getFlightTarget(table, fl);
     }
-    const weekTableTarget = getPeriodTableTarget(table);
-    if (weekTableTarget <= 0) return 0;
-    const eligible = flights.filter(
-      (f) => !officeHasFlights || !table.eligibleFlights || table.eligibleFlights.includes(f as any)
-    );
-    if (!eligible.includes(fl)) return 0;
-    const monthTargets = eligible.map((f) => ({ fl: f, tgt: Math.max(0, getFlightTarget(table, f)) }));
-    const totalMonthTgt = monthTargets.reduce((s, x) => s + x.tgt, 0);
-    if (totalMonthTgt <= 0) {
-      const base = Math.floor(weekTableTarget / Math.max(1, eligible.length));
-      const rem = weekTableTarget % Math.max(1, eligible.length);
-      const idx = eligible.indexOf(fl);
-      return idx >= 0 ? base + (idx < rem ? 1 : 0) : 0;
+    if (officeHasFlights && table.eligibleFlights && !table.eligibleFlights.includes(fl as any)) {
+      return 0;
     }
-    const exactShares = monthTargets.map((x, idx) => {
-      const exact = (weekTableTarget * x.tgt) / totalMonthTgt;
-      const floored = Math.floor(exact);
-      return { fl: x.fl, floored, rem: exact - floored, idx };
-    });
-    const remainder = weekTableTarget - exactShares.reduce((s, x) => s + x.floored, 0);
-    const sorted = [...exactShares].sort((a, b) => (b.rem !== a.rem ? b.rem - a.rem : a.idx - b.idx));
-    for (let i = 0; i < remainder && i < sorted.length; i++) {
-      sorted[i].floored += 1;
+    const weeklyManual = weekRangeKey ? table.weeklyFlightTargets?.[weekRangeKey]?.[fl] : undefined;
+    if (typeof weeklyManual === 'number') {
+      return weeklyManual;
     }
-    return exactShares.find((x) => x.fl === fl)?.floored ?? 0;
+    if (!officeHasFlights) {
+      const idx = flights.indexOf(fl);
+      const mappedKey: FlightName = idx === 0 ? 'Mechanics' : idx === 1 ? 'Avionics' : idx === 2 ? 'GCS' : 'Admin';
+      return weeklyAutoTargets?.[mappedKey]?.[table.id] ?? 0;
+    }
+    return weeklyAutoTargets?.[fl]?.[table.id] ?? 0;
   };
 
   // Grand totals calculation
@@ -955,6 +988,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             onDisposalsChange={setDraftDisposals}
             onManpowerChange={setDraftManpower}
             ratioPeriodMode={ratioPeriodMode}
+            weeklyStartDate={weeklyStartDate}
+            weeklyEndDate={weeklyEndDate}
             activeColumns={activeColumns}
           />
         )}
@@ -1004,15 +1039,53 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                 </button>
 
                 {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsAutoAllocateModalOpen(true)}
-                    className="flex items-center space-x-2 px-4 py-2 rounded-xl text-sm font-bold bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white shadow-sm hover:shadow-md transition-all cursor-pointer"
-                    title="Auto Allocate Daily Duties based on balanced manpower ratio"
-                  >
-                    <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
-                    <span>Auto Allocate</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setIsAutoAllocateModalOpen(true)}
+                      className="flex items-center space-x-2 px-4 py-2 rounded-xl text-sm font-bold bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white shadow-sm hover:shadow-md transition-all cursor-pointer"
+                      title="Auto Allocate Daily Duties based on balanced manpower ratio"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+                      <span>Auto Allocate</span>
+                    </button>
+
+                    {/* Manual Duty Cell Input Mode Toggle: Click System vs + / - System */}
+                    <div className="inline-flex items-center bg-slate-200/80 dark:bg-slate-800 p-1 rounded-xl border border-slate-300/80 dark:border-slate-700 shadow-xs">
+                      <button
+                        type="button"
+                        onClick={() => handleDutyCellInputModeChange('click')}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                          dutyCellInputMode === 'click'
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                        }`}
+                        title="Click cell for 1/0, right-click or double-click for 2"
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${dutyCellInputMode === 'click' ? 'bg-emerald-300' : 'bg-slate-400 dark:bg-slate-600'}`} />
+                        <span>Click System</span>
+                        <span className={`text-[10px] px-1 py-0.2 rounded font-extrabold ${dutyCellInputMode === 'click' ? 'bg-white/20 text-white' : 'bg-slate-300/60 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`}>
+                          {dutyCellInputMode === 'click' ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDutyCellInputModeChange('stepper')}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                          dutyCellInputMode === 'stepper'
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                        }`}
+                        title="Use + / - buttons inside each cell to adjust duty count"
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${dutyCellInputMode === 'stepper' ? 'bg-emerald-300' : 'bg-slate-400 dark:bg-slate-600'}`} />
+                        <span>+ / - System</span>
+                        <span className={`text-[10px] px-1 py-0.2 rounded font-extrabold ${dutyCellInputMode === 'stepper' ? 'bg-white/20 text-white' : 'bg-slate-300/60 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`}>
+                          {dutyCellInputMode === 'stepper' ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    </div>
+                  </>
                 ) : (
                   <button
                     type="button"
@@ -1147,13 +1220,17 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
               </div>
                 {/* Table Body (Monthly 31 Days or Weekly 7 Days with Date + Day) */}
                 <div className="w-full overflow-x-auto">
-                  <table className={`w-full text-xs text-center border-collapse table-auto md:table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[600px]' : 'min-w-[940px]'}`}>
+                  <table className={`w-full text-xs text-center border-collapse table-auto md:table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[660px]' : (dutyCellInputMode === 'stepper' ? 'min-w-[1860px]' : 'min-w-[940px]')}`}>
                     <colgroup>
                       <col className="w-24 sm:w-28 min-w-[90px]" />
                       {activeColumns.map((col) => (
                         <col
                           key={col.key}
-                          className={ratioPeriodMode === 'WEEKLY' ? 'w-[76px] sm:w-[96px] min-w-[72px]' : 'w-[26px] sm:w-[28px] min-w-[24px]'}
+                          className={
+                            ratioPeriodMode === 'WEEKLY'
+                              ? 'w-[84px] sm:w-[100px] min-w-[78px]'
+                              : (dutyCellInputMode === 'stepper' ? 'w-[56px] sm:w-[60px] min-w-[54px]' : 'w-[26px] sm:w-[28px] min-w-[24px]')
+                          }
                         />
                       ))}
                       <col className={(showAllTableInfo || ratioPeriodMode === 'WEEKLY') ? "w-[88px] sm:w-[96px] min-w-[84px]" : "w-[64px] sm:w-[72px] min-w-[58px]"} />
@@ -1270,19 +1347,19 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                 return (
                                   <td
                                     key={col.key}
-                                    onClick={() => handleToggleFlightDutyCell(table.id, flight, dayIdx)}
-                                    onContextMenu={(e) => {
+                                    onClick={dutyCellInputMode === 'click' ? () => handleToggleFlightDutyCell(table.id, flight, dayIdx) : undefined}
+                                    onContextMenu={dutyCellInputMode === 'click' ? (e) => {
                                       e.preventDefault();
                                       const cur = flightArr[dayIdx] || 0;
                                       handleToggleFlightDutyCell(table.id, flight, dayIdx, cur === 2 ? 0 : 2);
-                                    }}
-                                    onDoubleClick={(e) => {
+                                    } : undefined}
+                                    onDoubleClick={dutyCellInputMode === 'click' ? (e) => {
                                       e.preventDefault();
                                       const cur = flightArr[dayIdx] || 0;
                                       handleToggleFlightDutyCell(table.id, flight, dayIdx, cur === 2 ? 0 : 2);
-                                    }}
-                                    title={`${ratioPeriodMode === 'WEEKLY' ? `${col.dateLabel} (${col.dayShort})` : `Date ${dayNum}`}${col.isOffDay ? ' [OFFDAY]' : ''} (${flight} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
-                                    className={`p-0.5 border text-center align-middle cursor-pointer select-none transition-colors hover:bg-indigo-500/10 ${
+                                    } : undefined}
+                                    title={`${ratioPeriodMode === 'WEEKLY' ? `${col.dateLabel} (${col.dayShort})` : `Date ${dayNum}`}${col.isOffDay ? ' [OFFDAY]' : ''} (${flight} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. ${dutyCellInputMode === 'stepper' ? 'Use - / + buttons to adjust' : 'Click for 1/0, Right-click or Double-click for 2'}`}
+                                    className={`p-0.5 border text-center align-middle select-none transition-colors ${dutyCellInputMode === 'click' ? 'cursor-pointer hover:bg-indigo-500/10' : ''} ${
                                       col.isOffDay
                                         ? 'bg-rose-50/80 dark:bg-rose-950/35 border-rose-200/80 dark:border-rose-900/60'
                                         : isAltRow
@@ -1290,7 +1367,49 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                           : (isAltCol ? 'bg-slate-50/30 dark:bg-slate-900/40 border-slate-200/60 dark:border-slate-800/60' : 'bg-white dark:bg-slate-900/20 border-slate-200/60 dark:border-slate-800/60')
                                     }`}
                                   >
-                                    {isPositive ? (
+                                    {dutyCellInputMode === 'stepper' ? (
+                                      <div
+                                        className="inline-flex items-center justify-center gap-0.5 mx-auto select-none"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <button
+                                          type="button"
+                                          disabled={val <= 0}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleToggleFlightDutyCell(table.id, flight, dayIdx, Math.max(0, val - 1));
+                                          }}
+                                          className="w-4 h-5 rounded flex items-center justify-center text-[11px] font-black bg-slate-200/80 dark:bg-slate-700/80 hover:bg-rose-500/20 hover:text-rose-600 dark:hover:text-rose-400 text-slate-600 dark:text-slate-300 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed transition-colors"
+                                          title="Decrease (-1)"
+                                        >
+                                          -
+                                        </button>
+                                        <span
+                                          className={`min-w-[18px] h-5 px-0.5 rounded flex items-center justify-center font-mono text-[11px] font-bold transition-all ${
+                                            isDayExceeded
+                                              ? 'bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 font-black'
+                                              : isDayShortage
+                                                ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-400 font-bold'
+                                                : isPositive
+                                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                                                  : 'text-slate-400 dark:text-slate-600'
+                                          }`}
+                                        >
+                                          {val}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleToggleFlightDutyCell(table.id, flight, dayIdx, Math.min(9, val + 1));
+                                          }}
+                                          className="w-4 h-5 rounded flex items-center justify-center text-[11px] font-black bg-indigo-100 dark:bg-indigo-900/50 hover:bg-indigo-200 dark:hover:bg-indigo-800 text-indigo-700 dark:text-indigo-300 cursor-pointer transition-colors"
+                                          title="Increase (+1)"
+                                        >
+                                          +
+                                        </button>
+                                      </div>
+                                    ) : isPositive ? (
                                       <div
                                         className={`w-5.5 h-5.5 sm:w-6 sm:h-6 mx-auto rounded-md flex items-center justify-center font-mono text-[11px] font-bold transition-all shadow-2xs ${
                                           isDayExceeded
@@ -1592,11 +1711,18 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                 </div>
               </div>
               <div className="w-full overflow-x-auto">
-                <table className={`w-full text-xs text-center border-collapse table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[620px]' : 'min-w-[760px] sm:min-w-[960px]'}`}>
+                <table className={`w-full text-xs text-center border-collapse table-fixed ${ratioPeriodMode === 'WEEKLY' ? 'min-w-[660px]' : (dutyCellInputMode === 'stepper' ? 'min-w-[1860px]' : 'min-w-[760px] sm:min-w-[960px]')}`}>
                   <colgroup>
                     <col className="w-24 sm:w-40 max-w-[95px] sm:max-w-none" />
                     {activeColumns.map((col) => (
-                      <col key={col.key} className={ratioPeriodMode === 'WEEKLY' ? 'w-[76px] sm:w-[96px]' : 'w-[22px] sm:w-[26px]'} />
+                      <col
+                        key={col.key}
+                        className={
+                          ratioPeriodMode === 'WEEKLY'
+                            ? 'w-[84px] sm:w-[100px]'
+                            : (dutyCellInputMode === 'stepper' ? 'w-[56px] sm:w-[60px]' : 'w-[22px] sm:w-[26px]')
+                        }
+                      />
                     ))}
                     <col className={(showAllTableInfo || ratioPeriodMode === 'WEEKLY') ? "w-[76px] sm:w-[96px]" : "w-[56px] sm:w-[68px]"} />
                   </colgroup>
@@ -1733,19 +1859,19 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                             return (
                               <td
                                 key={col.key}
-                                onClick={() => handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx)}
-                                onContextMenu={(e) => {
+                                onClick={dutyCellInputMode === 'click' ? () => handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx) : undefined}
+                                onContextMenu={dutyCellInputMode === 'click' ? (e) => {
                                   e.preventDefault();
                                   const cur = rowData[dayIdx] || 0;
                                   handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx, cur === 2 ? 0 : 2);
-                                }}
-                                onDoubleClick={(e) => {
+                                } : undefined}
+                                onDoubleClick={dutyCellInputMode === 'click' ? (e) => {
                                   e.preventDefault();
                                   const cur = rowData[dayIdx] || 0;
                                   handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx, cur === 2 ? 0 : 2);
-                                }}
-                                title={`${ratioPeriodMode === 'WEEKLY' ? `${col.dateLabel} (${col.dayShort})` : `Date ${dayNum}`}${col.isOffDay ? ' [OFFDAY]' : ''} (${selectedFlightFilter} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. Click for 1/0, Right-click or Double-click for 2`}
-                                className={`p-0.5 border text-center align-middle cursor-pointer select-none transition-colors hover:bg-indigo-500/10 ${
+                                } : undefined}
+                                title={`${ratioPeriodMode === 'WEEKLY' ? `${col.dateLabel} (${col.dayShort})` : `Date ${dayNum}`}${col.isOffDay ? ' [OFFDAY]' : ''} (${selectedFlightFilter} - ${table.title}): Day Total ${dutyDaySum} / Required ${dutyDayReq}. ${dutyCellInputMode === 'stepper' ? 'Use - / + buttons to adjust' : 'Click for 1/0, Right-click or Double-click for 2'}`}
+                                className={`p-0.5 border text-center align-middle select-none transition-colors ${dutyCellInputMode === 'click' ? 'cursor-pointer hover:bg-indigo-500/10' : ''} ${
                                   col.isOffDay
                                     ? 'bg-rose-50/80 dark:bg-rose-950/35 border-rose-200/80 dark:border-rose-900/60'
                                     : isAltRow
@@ -1753,7 +1879,49 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                                       : (isAltCol ? 'bg-slate-50/30 dark:bg-slate-900/40 border-slate-200/60 dark:border-slate-800/60' : 'bg-white dark:bg-slate-900/20 border-slate-200/60 dark:border-slate-800/60')
                                 }`}
                               >
-                                {isPositive ? (
+                                {dutyCellInputMode === 'stepper' ? (
+                                  <div
+                                    className="inline-flex items-center justify-center gap-0.5 mx-auto select-none"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      type="button"
+                                      disabled={val <= 0}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx, Math.max(0, val - 1));
+                                      }}
+                                      className="w-4 h-5 rounded flex items-center justify-center text-[11px] font-black bg-slate-200/80 dark:bg-slate-700/80 hover:bg-rose-500/20 hover:text-rose-600 dark:hover:text-rose-400 text-slate-600 dark:text-slate-300 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed transition-colors"
+                                      title="Decrease (-1)"
+                                    >
+                                      -
+                                    </button>
+                                    <span
+                                      className={`min-w-[18px] h-5 px-0.5 rounded flex items-center justify-center font-mono text-[11px] font-bold transition-all ${
+                                        isDayExceeded
+                                          ? 'bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 font-black'
+                                          : isDayShortage
+                                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-400 font-bold'
+                                            : isPositive
+                                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                                              : 'text-slate-400 dark:text-slate-600'
+                                      }`}
+                                    >
+                                      {val}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleToggleFlightDutyCell(table.id, selectedFlightFilter as FlightName, dayIdx, Math.min(9, val + 1));
+                                      }}
+                                      className="w-4 h-5 rounded flex items-center justify-center text-[11px] font-black bg-indigo-100 dark:bg-indigo-900/50 hover:bg-indigo-200 dark:hover:bg-indigo-800 text-indigo-700 dark:text-indigo-300 cursor-pointer transition-colors"
+                                      title="Increase (+1)"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                ) : isPositive ? (
                                   <div
                                     className={`w-5.5 h-5.5 sm:w-6 sm:h-6 mx-auto rounded-md flex items-center justify-center font-mono text-[11px] font-bold transition-all shadow-2xs ${
                                       isDayExceeded
@@ -1823,8 +1991,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                       </td>
                       {(() => {
                         const activeDuties = matrix.filter(t => !t.isDisabled);
-                        const flightTotal = targetFlightTotal > 0 ? targetFlightTotal : (flightTotalsOverall[selectedFlightFilter as FlightName] || 0);
-                        const daysCount = 31;
+                        const flightTotal = ratioPeriodMode === 'WEEKLY'
+                          ? (periodTargetFlightTotal > 0 ? periodTargetFlightTotal : (periodFlightTotalsOverall[selectedFlightFilter as FlightName] || 0))
+                          : (targetFlightTotal > 0 ? targetFlightTotal : (flightTotalsOverall[selectedFlightFilter as FlightName] || 0));
+                        const daysCount = ratioPeriodMode === 'WEEKLY' ? Math.max(1, activeColumns.length) : 31;
                         const baseDaily = Math.floor(flightTotal / daysCount);
                         const extraDays = flightTotal % daysCount;
                         const minAllowed = baseDaily;
@@ -2114,6 +2284,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
         isOpen={isAutoAllocateModalOpen}
         onClose={() => setIsAutoAllocateModalOpen(false)}
         onSelectMode={(mode) => handleTriggerAutoAllocate(mode)}
+        ratioPeriodMode={ratioPeriodMode}
+        weeklyRangeLabel={`${formatShortDate(weeklyStartDate)} – ${formatShortDate(weeklyEndDate)}`}
       />
 
       {/* Ratio History & Versioning Modal */}

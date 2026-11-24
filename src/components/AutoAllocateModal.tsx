@@ -6,12 +6,16 @@ interface AutoAllocateModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectMode: (mode: AllocationMode) => void;
+  ratioPeriodMode?: 'MONTHLY' | 'WEEKLY';
+  weeklyRangeLabel?: string;
 }
 
 export const AutoAllocateModal: React.FC<AutoAllocateModalProps> = ({
   isOpen,
   onClose,
   onSelectMode,
+  ratioPeriodMode = 'MONTHLY',
+  weeklyRangeLabel,
 }) => {
   const [confirmingMode, setConfirmingMode] = useState<AllocationMode | null>(null);
 
@@ -171,7 +175,9 @@ export const AutoAllocateModal: React.FC<AutoAllocateModalProps> = ({
                 Are you sure you want to run auto allocation with this method?
               </p>
               <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed bg-amber-50 dark:bg-amber-950/30 p-3 rounded-xl border border-amber-200 dark:border-amber-800/60">
-                এটি নিশ্চিত করলে নির্বাচিত মাস জুড়ে সকল ফ্লাইটের দৈনিক ডিউটি রেশিও অনুযায়ী স্বয়ংক্রিয়ভাবে পুনর্নির্ধারণ করা হবে।
+                {ratioPeriodMode === 'WEEKLY'
+                  ? `এটি নিশ্চিত করলে নির্বাচিত সপ্তাহ (${weeklyRangeLabel || '৭ দিন'}) জুড়ে সকল ফ্লাইটের দৈনিক ডিউটি রেশিও অনুযায়ী স্বয়ংক্রিয়ভাবে বণ্টন করা হবে।`
+                  : 'এটি নিশ্চিত করলে নির্বাচিত মাস জুড়ে সকল ফ্লাইটের দৈনিক ডিউটি রেশিও অনুযায়ী স্বয়ংক্রিয়ভাবে পুনর্নির্ধারণ করা হবে।'}
               </div>
             </div>
 

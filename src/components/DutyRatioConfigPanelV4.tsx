@@ -5,7 +5,7 @@ import { localDb } from '../services/localDatabase';
 import { Airman, Rank, FlightName, DutyCategoryCode } from '../types';
 import { addCustomDuty, CustomDutyConfig, removeCustomDuty, getCustomDuties, saveCustomDuties } from '../utils/customDuties';
 import { getSavedCustomDisposals, saveCustomDisposal, removeSavedCustomDisposal } from '../utils/customDisposalStore';
-import { calculateBalancedAutoTargets, calculateExactDutyRatios, roundDutyByRule, isFixedEqualDuty, DEFAULT_MANPOWER } from '../utils/dutyDistribution';
+import { calculateBalancedAutoTargets, calculateExactDutyRatios, roundDutyByRule, isFixedEqualDuty, getTableDayReqForIndex, DEFAULT_MANPOWER } from '../utils/dutyDistribution';
 import { pushDutyListToCloud, pullDutyListFromCloud, DutySyncResult } from '../utils/dutyCloudSync';
 import { getAirmanJoinDateISO, getAirmanLeftDateISO, normalizeDateToISO, formatShortDate } from '../utils/csvExport';
 import { sortAirmenBySeniority } from '../utils/seniority';
@@ -152,6 +152,8 @@ export interface DutyRatioConfigPanelProps {
   onDisposalsChange?: (newDisposals: Record<string, string>) => void;
   onManpowerChange?: (mp: any) => void;
   ratioPeriodMode?: 'MONTHLY' | 'WEEKLY';
+  weeklyStartDate?: string;
+  weeklyEndDate?: string;
   activeColumns?: Array<{
     key: string;
     dayNum: number;
@@ -164,7 +166,7 @@ export interface DutyRatioConfigPanelProps {
   }>;
 }
 
-export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport, disposalsProp, onDisposalsChange, onManpowerChange, ratioPeriodMode = 'MONTHLY', activeColumns }) => {
+export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ activeTab, matrix, onMatrixChange, targetDate, onOpenManpowerExport, disposalsProp, onDisposalsChange, onManpowerChange, ratioPeriodMode = 'MONTHLY', weeklyStartDate, weeklyEndDate, activeColumns }) => {
   const [totalDuty, setTotalDuty] = useState(() => {
     const savedDuty = localStorage.getItem('baf_duty_distribution_total_duty');
     return savedDuty ? JSON.parse(savedDuty) : DEFAULT_TOTAL_DUTY;
@@ -198,12 +200,66 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     }
   };
 
+  const isWeeklyMode = ratioPeriodMode === 'WEEKLY';
+
+  const periodDayIndices = useMemo(() => {
+    if (!isWeeklyMode) return undefined;
+    if (activeColumns && activeColumns.length > 0) {
+      return activeColumns.map(c => c.dayIdx);
+    }
+    return [0, 1, 2, 3, 4, 5, 6];
+  }, [isWeeklyMode, activeColumns]);
+
+  const weekRangeKey = useMemo(() => {
+    if (!isWeeklyMode) return '';
+    return `${weeklyStartDate || targetDate || 'default'}_${weeklyEndDate || weeklyStartDate || targetDate || 'default'}`;
+  }, [isWeeklyMode, weeklyStartDate, weeklyEndDate, targetDate]);
+
+  const periodDateLabel = useMemo(() => {
+    if (!isWeeklyMode) return 'Monthly (31 Days)';
+    if (activeColumns && activeColumns.length > 0) {
+      const first = activeColumns[0];
+      const last = activeColumns[activeColumns.length - 1];
+      return `Weekly: ${first.dateLabel || formatShortDate(weeklyStartDate)} – ${last.dateLabel || formatShortDate(weeklyEndDate)} (${activeColumns.length} Days)`;
+    }
+    return `Weekly: ${formatShortDate(weeklyStartDate)} – ${formatShortDate(weeklyEndDate)}`;
+  }, [isWeeklyMode, activeColumns, weeklyStartDate, weeklyEndDate]);
+
+  const getPeriodTableTotal = (t: DutyRatioTable): number => {
+    if (t.isDisabled) return 0;
+    if (isWeeklyMode && periodDayIndices) {
+      return periodDayIndices.reduce((sum, dIdx) => sum + getTableDayReqForIndex(t, dIdx), 0);
+    }
+    return (t.dailyRequirements && t.dailyRequirements.length > 0)
+      ? t.dailyRequirements.reduce((sum, v) => sum + (Number(v) || 0), 0)
+      : (t.totalRequiredMonth || (t.totalRequiredDaily ? t.totalRequiredDaily * 31 : 0));
+  };
+
+  const getManualTarget = (t: DutyRatioTable, fl: string): number | undefined => {
+    if (isWeeklyMode && weekRangeKey) {
+      return t.weeklyFlightTargets?.[weekRangeKey]?.[fl as FlightName];
+    }
+    return t.flightTargets?.[fl as keyof typeof t.flightTargets];
+  };
+
   const handleResetSingleDuty = (dutyId: string) => {
     if (onMatrixChange && matrix) {
       const newMatrix = matrix.map((t) => {
         if (t.id === dutyId) {
           const copy = { ...t };
-          delete copy.flightTargets;
+          if (isWeeklyMode && weekRangeKey) {
+            if (copy.weeklyFlightTargets) {
+              const nextWeekly = { ...copy.weeklyFlightTargets };
+              delete nextWeekly[weekRangeKey];
+              if (Object.keys(nextWeekly).length > 0) {
+                copy.weeklyFlightTargets = nextWeekly;
+              } else {
+                delete copy.weeklyFlightTargets;
+              }
+            }
+          } else {
+            delete copy.flightTargets;
+          }
           return copy;
         }
         return t;
@@ -220,7 +276,19 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     if (onMatrixChange && matrix) {
       const newMatrix = matrix.map((t) => {
         const copy = { ...t };
-        delete copy.flightTargets;
+        if (isWeeklyMode && weekRangeKey) {
+          if (copy.weeklyFlightTargets) {
+            const nextWeekly = { ...copy.weeklyFlightTargets };
+            delete nextWeekly[weekRangeKey];
+            if (Object.keys(nextWeekly).length > 0) {
+              copy.weeklyFlightTargets = nextWeekly;
+            } else {
+              delete copy.weeklyFlightTargets;
+            }
+          }
+        } else {
+          delete copy.flightTargets;
+        }
         return copy;
       });
       onMatrixChange(newMatrix);
@@ -261,16 +329,25 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const saveAndSyncDisposals = (updatedDisposals: Record<string, string>) => {
     setDisposals(updatedDisposals);
 
+    const resetPeriodOverrides = (list: DutyRatioTable[]) =>
+      list.map(t => {
+        if (isWeeklyMode && weekRangeKey) {
+          if (!t.weeklyFlightTargets?.[weekRangeKey]) return t;
+          const copy = { ...t, weeklyFlightTargets: { ...t.weeklyFlightTargets } };
+          delete copy.weeklyFlightTargets[weekRangeKey];
+          if (Object.keys(copy.weeklyFlightTargets).length === 0) delete copy.weeklyFlightTargets;
+          return copy;
+        }
+        if (!t.flightTargets) return t;
+        const copy = { ...t };
+        delete copy.flightTargets;
+        return copy;
+      });
+
     // If managed by parent (DutyRatioMatrixViewV2), keep in draft until user clicks Save
     if (onDisposalsChange) {
       if (matrix && onMatrixChange) {
-        const resetMatrix = matrix.map(t => {
-          if (!t.flightTargets) return t;
-          const copy = { ...t };
-          delete copy.flightTargets;
-          return copy;
-        });
-        onMatrixChange(resetMatrix);
+        onMatrixChange(resetPeriodOverrides(matrix));
       }
       return;
     }
@@ -290,13 +367,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     localDb.syncSettingToCloud(storageKey, valStr);
 
     if (matrix && onMatrixChange) {
-      const resetMatrix = matrix.map(t => {
-        if (!t.flightTargets) return t;
-        const copy = { ...t };
-        delete copy.flightTargets;
-        return copy;
-      });
-      onMatrixChange(resetMatrix);
+      onMatrixChange(resetPeriodOverrides(matrix));
     }
 
     window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated'));
@@ -489,12 +560,13 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     return true;
   };
 
-  const targetISO = useMemo(() => normalizeDateToISO(targetDate), [targetDate]);
+  const effectiveDateStr = (isWeeklyMode && weeklyStartDate) ? weeklyStartDate : targetDate;
+  const targetISO = useMemo(() => normalizeDateToISO(effectiveDateStr), [effectiveDateStr]);
 
   const airmanDefaults = useMemo(() => {
     const map: Record<string, string> = {};
     let gcsTdyCount = 0;
-    const assignments = targetDate ? (localDb.getRoster(targetDate.substring(0, 7)).assignments || []).filter(a => a.date === targetDate) : [];
+    const assignments = effectiveDateStr ? (localDb.getRoster(effectiveDateStr.substring(0, 7)).assignments || []).filter(a => a.date === effectiveDateStr) : [];
 
     airmen.forEach(a => {
       if (targetISO && !isAirmanInUnitOnDate(a, targetISO)) return;
@@ -528,7 +600,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     });
 
     return map;
-  }, [airmen, targetDate, targetISO]);
+  }, [airmen, effectiveDateStr, targetISO]);
 
   const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
 
@@ -666,13 +738,30 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     const newMatrix = [...matrix];
     const tIdx = newMatrix.findIndex(x => x.id === tableId);
     if (tIdx >= 0) {
-      const newTargets = { ...(newMatrix[tIdx].flightTargets || {}) };
-      if (val !== undefined && !isNaN(val)) {
-        newTargets[fl] = val;
+      if (isWeeklyMode && weekRangeKey) {
+        const prevWeekly = newMatrix[tIdx].weeklyFlightTargets || {};
+        const nextRangeTargets: Partial<Record<FlightName, number>> = { ...(prevWeekly[weekRangeKey] || {}) };
+        if (val !== undefined && !isNaN(val)) {
+          nextRangeTargets[fl as FlightName] = val;
+        } else {
+          delete nextRangeTargets[fl as FlightName];
+        }
+        newMatrix[tIdx] = {
+          ...newMatrix[tIdx],
+          weeklyFlightTargets: {
+            ...prevWeekly,
+            [weekRangeKey]: nextRangeTargets,
+          },
+        };
       } else {
-        delete newTargets[fl];
+        const newTargets = { ...(newMatrix[tIdx].flightTargets || {}) };
+        if (val !== undefined && !isNaN(val)) {
+          newTargets[fl as keyof typeof newTargets] = val;
+        } else {
+          delete newTargets[fl as keyof typeof newTargets];
+        }
+        newMatrix[tIdx] = { ...newMatrix[tIdx], flightTargets: newTargets };
       }
-      newMatrix[tIdx] = { ...newMatrix[tIdx], flightTargets: newTargets };
       onMatrixChange(newMatrix);
     }
   };
@@ -680,7 +769,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const calculatedMatrixDistributions = useMemo(() => {
     if (!matrix) return {};
     if (officeHasFlights) {
-      const exactRatios = calculateExactDutyRatios(matrix, currentManpower);
+      const exactRatios = calculateExactDutyRatios(matrix, currentManpower, periodDayIndices);
       const result: Record<string, Record<string, { autoVal: number, exactVal: number }>> = {};
       matrix.forEach(t => {
         result[t.id] = {};
@@ -711,6 +800,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
         const cpl = tradeManpowerMap[grp]?.cpl || 0;
         poolSize += isSecurity ? cpl : sgt + cpl;
       });
+      const periodTotal = isWeeklyMode && periodDayIndices
+        ? periodDayIndices.reduce((sum, dIdx) => sum + getTableDayReqForIndex(t, dIdx), 0)
+        : ((t.dailyRequirements && t.dailyRequirements.length > 0)
+            ? t.dailyRequirements.reduce((sum, v) => sum + (Number(v) || 0), 0)
+            : (t.totalRequiredMonth || (t.totalRequiredDaily ? t.totalRequiredDaily * 31 : 0)));
 
       activeUnitGroups.forEach((grp) => {
         if (!eligGroups.includes(grp)) {
@@ -721,14 +815,14 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
         const cpl = tradeManpowerMap[grp]?.cpl || 0;
         const grpPool = isSecurity ? cpl : sgt + cpl;
         const exactVal = isEqual
-          ? (eligGroups.length > 0 ? (t.totalRequiredMonth || 0) / eligGroups.length : 0)
-          : (poolSize > 0 ? ((t.totalRequiredMonth || 0) * grpPool) / poolSize : 0);
+          ? (eligGroups.length > 0 ? periodTotal / eligGroups.length : 0)
+          : (poolSize > 0 ? (periodTotal * grpPool) / poolSize : 0);
         const autoVal = roundDutyByRule(exactVal);
         result[t.id][grp] = { autoVal, exactVal };
       });
     });
     return result;
-  }, [matrix, JSON.stringify(currentManpower), officeHasFlights, activeUnitGroups, tradeManpowerMap]);
+  }, [matrix, JSON.stringify(currentManpower), officeHasFlights, activeUnitGroups, tradeManpowerMap, isWeeklyMode, JSON.stringify(periodDayIndices)]);
 
   return (
     <div className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 p-4 md:p-8 min-h-max overflow-auto text-sm font-sans relative" style={{ fontFamily: 'Arial, sans-serif' }}>
@@ -1392,7 +1486,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                     <div className="px-4 py-2 bg-indigo-50/70 dark:bg-slate-800/80 border-b border-indigo-100 dark:border-slate-700 flex flex-wrap items-center justify-between text-xs">
                       <span className="text-slate-700 dark:text-slate-200 font-semibold flex items-center gap-1.5">
                         <Calendar className="w-3.5 h-3.5 text-indigo-500" />
-                        Effective Manpower & Nominal Roll for: <strong className="text-indigo-600 dark:text-indigo-400 font-black">{formatShortDate(targetDate)}</strong>
+                        Effective Manpower & Nominal Roll for: <strong className="text-indigo-600 dark:text-indigo-400 font-black">{formatShortDate(effectiveDateStr)}</strong>
+                        {isWeeklyMode && (
+                          <span className="ml-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300">
+                            {periodDateLabel}
+                          </span>
+                        )}
                       </span>
                       <span className="text-[11px] text-slate-500 dark:text-slate-400 italic">
                         (Airmen joining after or posted out before this date are excluded)
@@ -1498,7 +1597,16 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
           <div className="mb-8 overflow-x-auto">
             <div className="text-center mb-2">
               <div className="font-bold underline text-sm mb-0.5">DISTRIBUTION AS PER MANPOWER</div>
-              <div className="underline text-sm">FORMULA</div>
+              <div className="flex items-center justify-center gap-2">
+                <span className="underline text-sm">FORMULA</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                  isWeeklyMode
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-800'
+                }`}>
+                  {periodDateLabel}
+                </span>
+              </div>
             </div>
             <table className="border-collapse border border-slate-400 dark:border-slate-700 text-center w-full min-w-[900px] text-[13px] bg-white dark:bg-slate-900">
               <thead>
@@ -1526,9 +1634,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                              {(() => {
                                const ranksToUse = t.eligibleRanks || DUTY_TYPE_MAP.get(t.dutyCode as any)?.eligibleRanks;
                                if (ranksToUse && ranksToUse.length > 0) {
-                                  const RANK_ORDER = ['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2'];
-                                  const sorted = [...ranksToUse].sort((a, b) => RANK_ORDER.indexOf(a) - RANK_ORDER.indexOf(b));
-                                  return sorted[0] + ' & Below';
+                                 const RANK_ORDER = ['MWO', 'SWO', 'WO', 'Sgt', 'Cpl', 'LAC', 'AC-1', 'AC-2'];
+                                 const sorted = [...ranksToUse].sort((a, b) => RANK_ORDER.indexOf(a) - RANK_ORDER.indexOf(b));
+                                 return sorted[0] + ' & Below';
                                }
                                return isSecurity ? 'Cpl & Below' : 'Sgt & Below';
                              })()}
@@ -1551,11 +1659,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                        poolSize += isSecurity ? fltCpl : (fltCpl + fltSgt);
                      });
                      
+                     const periodTableTotal = getPeriodTableTotal(t);
                      const val = isEqual 
-                       ? (elig.length > 0 ? ((t.totalRequiredMonth || 0) / elig.length) : 0)
-                       : (poolSize > 0 ? ((t.totalRequiredMonth || 0) / poolSize) : 0);
+                       ? (elig.length > 0 ? (periodTableTotal / elig.length) : 0)
+                       : (poolSize > 0 ? (periodTableTotal / poolSize) : 0);
                      return (
-                       <td key={t.id} className="border border-slate-400 dark:border-slate-700 px-2 py-1 font-mono">
+                       <td key={t.id} className="border border-slate-400 dark:border-slate-700 px-2 py-1 font-mono" title={`Total for period: ${periodTableTotal}`}>
                          {val.toFixed(2)}
                        </td>
                      );
@@ -1568,8 +1677,17 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
           {/* DISTRIBUTION AS PER FLIGHT / TRADE */}
           <div className="overflow-x-auto pb-4">
             <div className="flex flex-col items-center justify-center mb-4 w-full gap-2">
-              <div className="font-bold underline text-sm text-center">
-                {officeHasFlights ? 'DISTRIBUTION AS PER FLIGHT' : 'DISTRIBUTION AS PER TRADE'}
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <div className="font-bold underline text-sm text-center">
+                  {officeHasFlights ? 'DISTRIBUTION AS PER FLIGHT' : 'DISTRIBUTION AS PER TRADE'}
+                </div>
+                <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                  isWeeklyMode
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-800'
+                }`}>
+                  {periodDateLabel}
+                </span>
               </div>
               <div className="flex justify-center items-center gap-2">
                 <button 
@@ -1595,7 +1713,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   {matrix && matrix.filter(t => !t.isDisabled).map(t => (
                     <th key={t.id} className="border border-slate-400 dark:border-slate-700 px-2 py-2 font-bold bg-slate-100 dark:bg-slate-800">{t.title}</th>
                   ))}
-                  <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-900 dark:text-indigo-200 text-center w-28">TOTAL DUTY</th>
+                  <th className="border border-slate-400 dark:border-slate-700 px-3 py-2 font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-900 dark:text-indigo-200 text-center w-28">
+                    {isWeeklyMode ? 'WEEKLY TOTAL' : 'TOTAL DUTY'}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1603,7 +1723,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   let flightTotalDuties = 0;
                   matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
                     if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
-                    const manualVal = t.flightTargets?.[fl as keyof typeof t.flightTargets];
+                    const manualVal = getManualTarget(t, fl);
                     const autoVal = calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0;
                     flightTotalDuties += (manualVal !== undefined ? manualVal : autoVal);
                   });
@@ -1620,7 +1740,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                         const exactVal = distribution?.exactVal || 0;
                         const autoVal = distribution?.autoVal || 0;
                         
-                        const manualVal = t.flightTargets?.[fl as keyof typeof t.flightTargets];
+                        const manualVal = getManualTarget(t, fl);
                         const isOverridden = manualVal !== undefined && manualVal !== autoVal;
                         const currentVal = manualVal !== undefined ? manualVal : autoVal;
                         const isActive = activeDistributionCell?.tableId === t.id && activeDistributionCell?.flight === fl;
@@ -1705,7 +1825,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   {matrix && matrix.filter(t => !t.isDisabled).map(t => {
                     let totalVal = 0;
                     activeUnitGroups.forEach(fl => {
-                       const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
+                       if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
+                       const manual = getManualTarget(t, fl);
                        if (manual !== undefined) {
                          totalVal += manual;
                        } else {
@@ -1713,7 +1834,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                        }
                     });
                     
-                    const warning = totalVal !== t.totalRequiredMonth;
+                    const periodReq = getPeriodTableTotal(t);
+                    const warning = totalVal !== periodReq;
                     return (
                       <td 
                         key={t.id} 
@@ -1722,9 +1844,9 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             ? 'text-red-600 dark:text-red-400 bg-red-100/60 dark:bg-red-950/50 font-black' 
                             : 'text-slate-800 dark:text-slate-200'
                         }`}
-                        title={warning ? `Current total: ${totalVal}, Target: ${t.totalRequiredMonth}` : `Matched: ${totalVal}`}
+                        title={warning ? `Current total: ${totalVal}, Target: ${periodReq}` : `Matched: ${totalVal}`}
                       >
-                        {showExactRatio ? `${totalVal}/${t.totalRequiredMonth}` : totalVal}
+                        {showExactRatio ? `${totalVal}/${periodReq}` : totalVal}
                       </td>
                     );
                   })}
@@ -1735,12 +1857,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       activeUnitGroups.forEach(fl => {
                         matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
                           if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
-                          const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
+                          const manual = getManualTarget(t, fl);
                           grandTotal += (manual !== undefined ? manual : (calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0));
                         });
                       });
                       matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
-                        grandRequired += (t.totalRequiredMonth || 0);
+                        grandRequired += getPeriodTableTotal(t);
                       });
                       return grandTotal !== grandRequired
                         ? 'text-red-600 dark:text-red-400 bg-red-100/80 dark:bg-red-950/60 font-black'
@@ -1753,12 +1875,12 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       activeUnitGroups.forEach(fl => {
                         matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
                           if (officeHasFlights && t.eligibleFlights && !t.eligibleFlights.includes(fl as any)) return;
-                          const manual = t.flightTargets?.[fl as keyof typeof t.flightTargets];
+                          const manual = getManualTarget(t, fl);
                           grandTotal += (manual !== undefined ? manual : (calculatedMatrixDistributions[t.id]?.[fl]?.autoVal || 0));
                         });
                       });
                       matrix && matrix.filter(t => !t.isDisabled).forEach(t => {
-                        grandRequired += (t.totalRequiredMonth || 0);
+                        grandRequired += getPeriodTableTotal(t);
                       });
                       return showExactRatio ? `${grandTotal}/${grandRequired}` : grandTotal;
                     })()}
@@ -1833,11 +1955,10 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   );
                 }
                 return activeDuties.map((t, idx) => {
-                  const hasManualTargets = !!t.flightTargets && Object.values(t.flightTargets).some((v) => (Number(v) || 0) > 0);
+                  const activeManualMap = (isWeeklyMode && weekRangeKey) ? t.weeklyFlightTargets?.[weekRangeKey] : t.flightTargets;
+                  const hasManualTargets = !!activeManualMap && Object.values(activeManualMap).some((v) => v !== undefined && v !== null);
                   const isRecentlyReset = recentlyResetDutyId === t.id;
-                  const monthTotal = (t.dailyRequirements && t.dailyRequirements.length > 0)
-                    ? t.dailyRequirements.reduce((sum, v) => sum + (Number(v) || 0), 0)
-                    : (t.totalRequiredMonth || (t.totalRequiredDaily ? t.totalRequiredDaily * 31 : 0));
+                  const periodReqTotal = getPeriodTableTotal(t);
                   const isSingleFlt = t.eligibleFlights && t.eligibleFlights.length === 1;
 
                   return (
@@ -1869,7 +1990,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                             )}
                           </div>
                           <div className="flex items-center space-x-2 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                            <span>Req: <strong className="font-mono text-slate-700 dark:text-slate-300">{monthTotal}</strong></span>
+                            <span>Req: <strong className="font-mono text-slate-700 dark:text-slate-300">{periodReqTotal}</strong></span>
                             <span>•</span>
                             <span className="truncate">
                               {(() => {

@@ -13,6 +13,10 @@ import {
   isQuotaExceededError,
   setFirestoreQuotaExceeded,
   CLIENT_SESSION_ID,
+  getActiveOfficeCode,
+  getOfficeScopedStorageKey,
+  getOfficeFirestoreDocPrefix,
+  isDefault155UasuOffice,
 } from '../firebase';
 import { Rank, FlightName } from '../types';
 
@@ -30,8 +34,16 @@ export interface UserPresence {
   currentActivity?: string;
 }
 
-const PRESENCE_STORAGE_KEY = 'baf_presence';
+const BASE_PRESENCE_STORAGE_KEY = 'baf_presence';
+const BASE_LOGIN_HISTORY_KEY = 'baf_user_login_history';
 const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes considered online
+
+const getPresenceStorageKey = (): string => getOfficeScopedStorageKey(BASE_PRESENCE_STORAGE_KEY);
+const getLoginHistoryStorageKey = (): string => getOfficeScopedStorageKey(BASE_LOGIN_HISTORY_KEY);
+const getLoginHistoryDocId = (): string => {
+  const prefix = getOfficeFirestoreDocPrefix();
+  return prefix ? `${prefix}${BASE_LOGIN_HISTORY_KEY}` : BASE_LOGIN_HISTORY_KEY;
+};
 
 const sanitizeDocId = (raw: string): string => {
   const cleaned = String(raw || 'unknown')
@@ -41,15 +53,52 @@ const sanitizeDocId = (raw: string): string => {
   return (cleaned || 'unknown').slice(0, 120);
 };
 
+const getPresenceDocId = (rawBdNo: string): string => {
+  const cleanBd = sanitizeDocId(rawBdNo);
+  const prefix = getOfficeFirestoreDocPrefix();
+  return prefix ? `${prefix}${cleanBd}` : cleanBd;
+};
+
+const isPresenceDocForActiveOffice = (docId: string): boolean => {
+  const prefix = getOfficeFirestoreDocPrefix();
+  if (prefix) {
+    return docId.startsWith(prefix);
+  }
+  return !docId.startsWith('off_');
+};
+
+const isMasterProtectedBdOrRole = (bdNo?: string | null, role?: string | null): boolean => {
+  if (role === 'master_owner') return true;
+  const digits = String(bdNo || '').replace(/\D/g, '');
+  return digits === '48456';
+};
+
+let cachedPresenceOfficeCode: string = getActiveOfficeCode();
 let cachedActiveUsers: UserPresence[] = (() => {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(PRESENCE_STORAGE_KEY);
+    const raw = window.localStorage.getItem(getPresenceStorageKey());
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 })();
+
+const syncCachedPresenceOffice = () => {
+  const currentCode = getActiveOfficeCode();
+  if (cachedPresenceOfficeCode !== currentCode) {
+    cachedPresenceOfficeCode = currentCode;
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem(getPresenceStorageKey()) : null;
+      cachedActiveUsers = raw ? JSON.parse(raw) : [];
+    } catch {
+      cachedActiveUsers = [];
+    }
+    lastBroadcastCount = -1;
+    lastPresencePollAt = 0;
+    lastLoginHistoryPollAt = 0;
+  }
+};
 
 let currentLoggedBdNo: string | null = null;
 let lastBroadcastCount: number = -1;
@@ -64,7 +113,8 @@ let cleanupTimer: any = null;
 
 const PRESENCE_HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const PRESENCE_WRITE_THROTTLE_MS = 12 * 60 * 1000; // 12 minutes min between passive heartbeat writes
-const PRESENCE_POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes between full presence collection polls
+const PRESENCE_POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes between background polls
+const REALTIME_HISTORY_POLL_MS = 4000; // 4 seconds realtime refresh while Login History view is open
 let lastPresencePollAt = 0;
 let lastLoginHistoryPollAt = 0;
 
@@ -72,6 +122,7 @@ function filterRecentlyOnlineUsers(list: UserPresence[]): UserPresence[] {
   const now = Date.now();
   return (list || []).filter((u) => {
     if (!u || !u.bdNo) return false;
+    if (isMasterProtectedBdOrRole(u.bdNo, u.role)) return false;
     if (u.status === 'offline') return false;
     const t = u.lastActive ? Date.parse(u.lastActive) : 0;
     if (!t || isNaN(t)) return false;
@@ -80,11 +131,12 @@ function filterRecentlyOnlineUsers(list: UserPresence[]): UserPresence[] {
 }
 
 function broadcastPresence(list: UserPresence[]) {
+  syncCachedPresenceOffice();
   const onlineList = filterRecentlyOnlineUsers(list);
   cachedActiveUsers = onlineList;
   if (typeof window !== 'undefined') {
     try {
-      window.localStorage.setItem(PRESENCE_STORAGE_KEY, JSON.stringify(onlineList));
+      window.localStorage.setItem(getPresenceStorageKey(), JSON.stringify(onlineList));
     } catch {}
     window.dispatchEvent(new CustomEvent('baf_presence_updated', { detail: onlineList }));
 
@@ -101,6 +153,7 @@ function broadcastPresence(list: UserPresence[]) {
 }
 
 export function getActiveUsersCount(): number {
+  syncCachedPresenceOffice();
   const online = filterRecentlyOnlineUsers(cachedActiveUsers);
   const uniqueIds = new Set(online.map((u) => sanitizeDocId(u.bdNo).toLowerCase()));
   return uniqueIds.size;
@@ -110,7 +163,8 @@ export function isMultiUserMode(): boolean {
   return getActiveUsersCount() >= 2;
 }
 
-async function pollPresenceFromCloudOnce(force: boolean = false) {
+export async function pollPresenceFromCloudOnce(force: boolean = false) {
+  syncCachedPresenceOffice();
   if (typeof window === 'undefined') return;
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
@@ -120,11 +174,14 @@ async function pollPresenceFromCloudOnce(force: boolean = false) {
 
   try {
     lastPresencePollAt = now;
+    const activeCodeBefore = getActiveOfficeCode();
     const snap = await getDocs(collection(dbLite, 'presence'));
+    if (getActiveOfficeCode() !== activeCodeBefore) return;
     const cloudUsers: UserPresence[] = [];
     snap.forEach((docSnap) => {
+      if (!isPresenceDocForActiveOffice(docSnap.id)) return;
       const d = docSnap.data() as any;
-      if (d && d.bdNo) {
+      if (d && d.bdNo && !isMasterProtectedBdOrRole(d.bdNo, d.role)) {
         cloudUsers.push({
           bdNo: String(d.bdNo),
           sessionId: d.sessionId ? String(d.sessionId) : undefined,
@@ -147,6 +204,11 @@ async function pollPresenceFromCloudOnce(force: boolean = false) {
     }
   }
 }
+
+export const refreshPresenceNow = async (): Promise<UserPresence[]> => {
+  await pollPresenceFromCloudOnce(true);
+  return filterRecentlyOnlineUsers(cachedActiveUsers);
+};
 
 function ensurePresenceRealtimeSubscription() {
   if (typeof window === 'undefined') return;
@@ -203,6 +265,8 @@ export const logUserLogin = async (
   user: Omit<UserPresence, 'lastActive' | 'status' | 'deviceInfo'>
 ) => {
   try {
+    syncCachedPresenceOffice();
+    if (isMasterProtectedBdOrRole(user.bdNo, user.role)) return;
     const isMobile = typeof navigator !== 'undefined' && navigator.userAgent.includes('Mobile');
     const cleanBd = sanitizeDocId(user.bdNo);
     currentLoggedBdNo = cleanBd;
@@ -231,7 +295,8 @@ export const logUserLogin = async (
 
     if (isFirebaseConfigured && dbLite && !isFirestoreQuotaExceeded()) {
       try {
-        await setDoc(doc(dbLite, 'presence', cleanBd), {
+        const presenceDocId = getPresenceDocId(cleanBd);
+        await setDoc(doc(dbLite, 'presence', presenceDocId), {
           bdNo: newPresence.bdNo,
           sessionId: CLIENT_SESSION_ID,
           name: newPresence.name,
@@ -261,8 +326,9 @@ export const updatePresence = async (
   activity: string = ''
 ) => {
   try {
+    syncCachedPresenceOffice();
     const cleanBd = sanitizeDocId(bdNo);
-    if (!cleanBd || cleanBd === 'unknown') return;
+    if (!cleanBd || cleanBd === 'unknown' || isMasterProtectedBdOrRole(cleanBd)) return;
     const nowIso = new Date().toISOString();
 
     const existing = [...cachedActiveUsers];
@@ -299,7 +365,8 @@ export const updatePresence = async (
         lastPresenceWriteAt = nowMs;
         lastPresencePage = nextPage;
         try {
-          await setDoc(doc(dbLite, 'presence', cleanBd), {
+          const presenceDocId = getPresenceDocId(cleanBd);
+          await setDoc(doc(dbLite, 'presence', presenceDocId), {
             bdNo: cleanBd,
             sessionId: CLIENT_SESSION_ID,
             name: String(targetRecord?.name || 'User').slice(0, 200),
@@ -324,8 +391,9 @@ export const updatePresence = async (
 };
 
 export const subscribeToActiveUsers = (callback: (users: any[]) => void) => {
+  syncCachedPresenceOffice();
   activePresenceSubscribers += 1;
-  const handleLocal = (e: any) => callback(e.detail || []);
+  const handleLocal = (e: any) => callback(filterRecentlyOnlineUsers(e.detail || cachedActiveUsers));
   window.addEventListener('baf_presence_updated', handleLocal);
 
   if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
@@ -343,12 +411,26 @@ export const subscribeToActiveUsers = (callback: (users: any[]) => void) => {
   };
 };
 
+const filterLogsForActiveOffice = (list: any[]): any[] => {
+  const activeCode = getActiveOfficeCode();
+  const isDefault155 = isDefault155UasuOffice();
+  return (list || []).filter((item: any) => {
+    if (!item || !item.bdNo) return false;
+    if (isMasterProtectedBdOrRole(item.bdNo, item.role)) return false;
+    const logOffice = String(item.officeCode || '').trim();
+    if (logOffice) {
+      return logOffice === activeCode;
+    }
+    return isDefault155;
+  });
+};
+
 const getLocalLoginLogs = (): any[] => {
   try {
-    const raw = localStorage.getItem('baf_user_login_history');
+    const raw = localStorage.getItem(getLoginHistoryStorageKey());
     if (raw) {
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? filterLogsForActiveOffice(parsed) : [];
     }
   } catch {}
   return [];
@@ -356,8 +438,9 @@ const getLocalLoginLogs = (): any[] => {
 
 const mergeCloudLoginLogs = (cloudLogs: any[]): any[] => {
   const local = getLocalLoginLogs();
+  const scopedCloud = filterLogsForActiveOffice(cloudLogs);
   const map = new Map<string, any>();
-  [...cloudLogs, ...local].forEach((item: any) => {
+  [...scopedCloud, ...local].forEach((item: any) => {
     if (item && item.id && !map.has(item.id)) {
       map.set(item.id, item);
     }
@@ -370,7 +453,7 @@ const mergeCloudLoginLogs = (cloudLogs: any[]): any[] => {
     })
     .slice(0, 100);
   try {
-    localStorage.setItem('baf_user_login_history', JSON.stringify(merged));
+    localStorage.setItem(getLoginHistoryStorageKey(), JSON.stringify(merged));
   } catch {}
   window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: merged }));
   return merged;
@@ -405,15 +488,19 @@ function ensureLoginHistoryRealtimeSubscription() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (firestoreLoginHistoryUnsub) return;
 
-  void refreshLoginHistoryFromCloud();
+  void refreshLoginHistoryFromCloud(true);
+  void pollPresenceFromCloudOnce(true);
+
   const pollInterval = setInterval(() => {
     if (isFirestoreQuotaExceeded()) {
       stopLoginHistoryRealtimeSubscription();
       return;
     }
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-    void refreshLoginHistoryFromCloud();
-  }, PRESENCE_POLL_INTERVAL_MS);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    void refreshLoginHistoryFromCloud(true);
+    void pollPresenceFromCloudOnce(true);
+  }, REALTIME_HISTORY_POLL_MS);
 
   firestoreLoginHistoryUnsub = () => {
     clearInterval(pollInterval);
@@ -433,14 +520,19 @@ export const refreshLoginHistoryFromCloud = async (force: boolean = false): Prom
     return local;
   }
   lastLoginHistoryPollAt = now;
+  const activeCodeBefore = getActiveOfficeCode();
+  const docId = getLoginHistoryDocId();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const snap = await Promise.race([
-      getDoc(doc(dbLite, 'app_settings', 'baf_user_login_history')),
+      getDoc(doc(dbLite, 'app_settings', docId)),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('Login history fetch timeout')), 6000);
       }),
     ]);
+    if (getActiveOfficeCode() !== activeCodeBefore) {
+      return getLocalLoginLogs();
+    }
     if (snap.exists()) {
       const d = snap.data();
       const cloudLogs = extractCloudLogsFromDocData(d);
@@ -449,7 +541,7 @@ export const refreshLoginHistoryFromCloud = async (force: boolean = false): Prom
         const newestLocalMs = local.reduce((mx: number, l: any) => Math.max(mx, Date.parse(String(l?.timestamp || 0)) || 0), 0);
         if (cloudLogs.length === 0 && (d?.clearedAt || cloudUpdatedMs >= newestLocalMs)) {
           try {
-            localStorage.removeItem('baf_user_login_history');
+            localStorage.removeItem(getLoginHistoryStorageKey());
           } catch {}
           window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: [] }));
           return [];
@@ -472,7 +564,7 @@ export const subscribeToLoginHistory = (callback: (logs: any[]) => void) => {
 
   const handleLocal = (e: any) => {
     if (e.detail && Array.isArray(e.detail)) {
-      callback(e.detail);
+      callback(filterLogsForActiveOffice(e.detail));
     } else {
       callback(getLocalLoginLogs());
     }
@@ -483,7 +575,7 @@ export const subscribeToLoginHistory = (callback: (logs: any[]) => void) => {
   const initialLogs = getLocalLoginLogs();
   callback(initialLogs);
 
-  // Attach real-time Firestore snapshot listener ONLY while UI subscriber is active
+  // Realtime cloud polling while Login History UI subscriber is active
   if (isFirebaseConfigured && db && !isFirestoreQuotaExceeded()) {
     ensureLoginHistoryRealtimeSubscription();
   }
@@ -505,6 +597,31 @@ if (typeof window !== 'undefined') {
     }
     if (activeHistorySubscribers > 0) {
       ensureLoginHistoryRealtimeSubscription();
+    }
+  });
+
+  window.addEventListener('baf_office_config_changed', () => {
+    syncCachedPresenceOffice();
+    broadcastPresence(cachedActiveUsers);
+    window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: getLocalLoginLogs() }));
+    if (activePresenceSubscribers > 0) {
+      void pollPresenceFromCloudOnce(true);
+    }
+    if (activeHistorySubscribers > 0) {
+      void refreshLoginHistoryFromCloud(true);
+    }
+  });
+
+  window.addEventListener('storage', (e: StorageEvent) => {
+    if (!e.key) return;
+    if (e.key === getPresenceStorageKey()) {
+      try {
+        const parsed = e.newValue ? JSON.parse(e.newValue) : [];
+        cachedActiveUsers = filterRecentlyOnlineUsers(Array.isArray(parsed) ? parsed : []);
+        window.dispatchEvent(new CustomEvent('baf_presence_updated', { detail: cachedActiveUsers }));
+      } catch {}
+    } else if (e.key === getLoginHistoryStorageKey()) {
+      window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: getLocalLoginLogs() }));
     }
   });
 

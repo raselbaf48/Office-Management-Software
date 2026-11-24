@@ -1,14 +1,9 @@
-import Papa from 'papaparse';
-import { getOfficeBackupFilePrefix, validateBackupMatchesActiveOffice } from '../utils/backupOfficeScope';
 import { getAppConfig, saveAppConfig, AppConfig, getAppConfigHistory, addAppConfigHistory, AppConfigHistoryItem, updateAppConfigHistoryItemActiveStatus, deleteAppConfigHistoryItem, clearAppConfigHistory } from '../utils/appConfig';
 import { Megaphone, Wrench, Clock, Trash2 as TrashIcon, Power, PowerOff } from 'lucide-react';
 
 import React, { useState, useEffect } from 'react';
 import {   
   X, 
-  Cloud,
-  Server,
-
   Settings, 
   KeyRound, 
   Download, 
@@ -16,7 +11,6 @@ import {
   CheckCircle2, 
   AlertTriangle, 
   RefreshCw, 
-  Database,
   Lock,
   ChevronRight,
   ArrowLeft,
@@ -35,7 +29,6 @@ import {
   Save,
   Activity,
   Flame,
-  Copy,
   Check,
   Link2,
   Building2,
@@ -49,15 +42,15 @@ import { PWAInstallButton } from './PWAInstallButton';
 import { syncDynamicOfficePwaManifest } from '../utils/dynamicPwaManifest';
 import { useGlobalTheme, THEME_STORAGE_KEY } from '../utils/themeManager';
 import { UserManagementTab } from './UserManagementTab';
-import { GoogleDriveBackupModal } from './GoogleDriveBackupModal';
 import { UserRole, DetailedUserLogin, UserLoginStatus, UserLoginRole, Rank, FlightName } from '../types';
 import { getCustomDuties, saveCustomDuties, addCustomDuty, removeCustomDuty, CustomDutyConfig } from '../utils/customDuties';
-import { subscribeToActiveUsers, subscribeToLoginHistory, refreshLoginHistoryFromCloud } from '../services/presenceService';
-import { getLoginHistory, clearLoginHistory, recordLoginLog, UserLoginLog, getDetailedUsers, toggleUserLoginStatus, saveDetailedUsers, changeUserPassword, changeAdminPassword, changeUserRole, getCurrentUserSession, isMasterPinMatch } from '../utils/authSession';
-import { localDb, getSyncLogs, SyncLog } from '../services/localDatabase';
+import { subscribeToActiveUsers, subscribeToLoginHistory, refreshLoginHistoryFromCloud, refreshPresenceNow } from '../services/presenceService';
+import { getLoginHistory, clearLoginHistory, recordLoginLog, UserLoginLog, getDetailedUsers, toggleUserLoginStatus, saveDetailedUsers, changeUserPassword, changeAdminPassword, changeUserRole, getCurrentUserSession, isMasterPinMatch, isMasterProtectedUser } from '../utils/authSession';
+import { localDb } from '../services/localDatabase';
 import {
-  encodeOfficeSetupLink,
   getActiveOfficeIdentity,
+  getActiveOfficeCode,
+  isDefault155UasuOffice,
   updateActiveOfficeProfile,
   OFFICE_PROFILE_STORAGE_KEY,
   getMasterCredentials,
@@ -93,10 +86,8 @@ type SettingSection =
   | 'officeProfile'
   | 'appTheme'
   | 'appUpdate'
-  | 'cloudsync'
   | 'users'
   | 'security'
-  | 'database'
   | 'history'
   | 'appManagement'
   | 'appNotice'
@@ -277,58 +268,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [passcodeSuccess, setPasscodeSuccess] = useState('');
   const [isUpdatingPasscode, setIsUpdatingPasscode] = useState(false);
 
-  
-  const [syncLogsState, setSyncLogsState] = useState<SyncLog[]>([]);
-  const [syncProgress, setSyncProgress] = useState(0);
-  const [syncMessage, setSyncMessage] = useState('');
-  const [inviteLinkCopied, setInviteLinkCopied] = useState(false);
-
   const isAdminRole =
     role === 'SUPER_ADMIN' ||
     role === 'OWNER' ||
     role === 'master_owner' ||
     role === 'ADMIN';
-
-  const handleCopyOfficeSetupLink = async () => {
-    const identity = getActiveOfficeIdentity();
-    const shareText = identity.joinPin
-      ? `Office Code: ${identity.officeCode} | Join PIN: ${identity.joinPin}`
-      : identity.officeCode;
-    try {
-      await navigator.clipboard.writeText(shareText);
-      setInviteLinkCopied(true);
-      setTimeout(() => setInviteLinkCopied(false), 2500);
-    } catch {
-      const input = document.createElement('input');
-      input.value = shareText;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
-      setInviteLinkCopied(true);
-      setTimeout(() => setInviteLinkCopied(false), 2500);
-    }
-  };
-  useEffect(() => {
-    if (isOpen) {
-      setSyncLogsState(getSyncLogs());
-    }
-  }, [isOpen]);
-  useEffect(() => {
-    const handleSyncLog = (e: any) => {
-      setSyncLogsState(e.detail);
-    };
-    const handleProgress = (e: any) => {
-      setSyncProgress(e.detail.percentage);
-      setSyncMessage(e.detail.message);
-    };
-    window.addEventListener('baf_sync_logs_updated', handleSyncLog);
-    window.addEventListener('baf_sync_progress', handleProgress);
-    return () => {
-       window.removeEventListener('baf_sync_logs_updated', handleSyncLog);
-       window.removeEventListener('baf_sync_progress', handleProgress);
-    };
-  }, []);
 
   // Login History State
   const [loginHistory, setLoginHistory] = useState<UserLoginLog[]>([]);
@@ -486,9 +430,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [editPassword, setEditPassword] = useState<string>('');
 
-  // Database Backup State
-  const [restoreStatus, setRestoreStatus] = useState<string>('');
-  const [isBackingUp, setIsBackingUp] = useState<boolean>(false);
+  // Security credential editing state
   const [editingPasswordType, setEditingPasswordType] = useState<'portal' | 'admin' | 'master' | null>(null);
   const [masterIdDraft, setMasterIdDraft] = useState<string>(() => getMasterUserId());
   const [masterCurrentPin, setMasterCurrentPin] = useState<string>('');
@@ -497,8 +439,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [masterCredError, setMasterCredError] = useState<string>('');
   const [masterCredSuccess, setMasterCredSuccess] = useState<string>('');
   const [isUpdatingMasterCreds, setIsUpdatingMasterCreds] = useState<boolean>(false);
-  const [pendingRestoreFile, setPendingRestoreFile] = useState<File | null>(null);
-  const [isDriveModalOpen, setIsDriveModalOpen] = useState<boolean>(false);
 
   const handleUpdateMasterCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -649,7 +589,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setRealtimeHistory(logs);
       setLoginHistory(logs);
     });
-    refreshLoginHistoryFromCloud().then((logs) => {
+    refreshPresenceNow().then((users) => {
+      setActiveUsers(users);
+    }).catch(() => {});
+    refreshLoginHistoryFromCloud(true).then((logs) => {
       setRealtimeHistory(logs);
       setLoginHistory(logs);
     }).catch(() => {});
@@ -665,12 +608,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setCurrentPasscode('');
       setNewPasscode('');
       setConfirmPasscode('');
-      setRestoreStatus('');
-      
+
       let logs = getLoginHistory();
       if (logs.length === 0) {
         const session = getCurrentUserSession();
-        if (session) {
+        if (session && !isMasterProtectedUser(session.bdNo, session.systemRole || session.assignedRole, session.isProtected)) {
           recordLoginLog({
             id: session.airmanId,
             bdNo: session.bdNo,
@@ -694,7 +636,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       let logs = getLoginHistory();
       if (logs.length === 0) {
         const session = getCurrentUserSession();
-        if (session) {
+        if (session && !isMasterProtectedUser(session.bdNo, session.systemRole || session.assignedRole, session.isProtected)) {
           recordLoginLog({
             id: session.airmanId,
             bdNo: session.bdNo,
@@ -804,201 +746,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
 
-  const handleDownloadCSV = async () => {
-    setIsBackingUp(true);
-    try {
-      const backupData = typeof localDb.exportDatabase === 'function' 
-        ? JSON.parse(localDb.exportDatabase()) 
-        : (localDb as any).db;
-
-      const downloadFile = (csvString: string, filename: string) => {
-         const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-         const url = URL.createObjectURL(blob);
-         const a = document.createElement('a');
-         a.href = url;
-         a.download = filename;
-         document.body.appendChild(a);
-         a.click();
-         document.body.removeChild(a);
-         URL.revokeObjectURL(url);
-      };
-
-      const officePrefix = getOfficeBackupFilePrefix();
-      // Export Airmen
-      if (backupData.airmen && backupData.airmen.length > 0) {
-         downloadFile(Papa.unparse(backupData.airmen), `${officePrefix}_Airmen_${new Date().toISOString().split('T')[0]}.csv`);
-      }
-      
-      // Export Users
-      const usersToExport = backupData.detailedUsers || (localDb as any).db.detailedUsers;
-      if (usersToExport && usersToExport.length > 0) {
-         downloadFile(Papa.unparse(usersToExport), `${officePrefix}_Users_${new Date().toISOString().split('T')[0]}.csv`);
-      }
-
-      // Export Assignments
-      const allAssignments: any[] = [];
-      const assignmentsObj = backupData.assignments || (localDb as any).db.assignments || {};
-      for (const month in assignmentsObj) {
-         assignmentsObj[month].forEach((a: any) => allAssignments.push({ month, ...a }));
-      }
-      if (allAssignments.length > 0) {
-         downloadFile(Papa.unparse(allAssignments), `${officePrefix}_Assignments_${new Date().toISOString().split('T')[0]}.csv`);
-      }
-      
-    } catch (err: any) {
-      console.error('CSV Backup failed:', err);
-      alert('Failed to generate CSV backup: ' + err.message);
-    } finally {
-      setIsBackingUp(false);
-    }
-  };
-
-  const handleDownloadBackup = async () => {
-    setIsBackingUp(true);
-    try {
-      const officePrefix = getOfficeBackupFilePrefix();
-      const backupData = await localDb.exportDatabase();
-      const backupJson = typeof backupData === 'string' ? backupData : JSON.stringify(backupData, null, 2);
-      const blob = new Blob([backupJson], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${officePrefix}_Backup_${new Date().toISOString().split('T')[0]}.json`;
-      document.body.appendChild(a);
-      a.click();
-      
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err: any) {
-      console.error('Backup failed:', err);
-      alert('Failed to generate backup: ' + err.message);
-    } finally {
-      setIsBackingUp(false);
-    }
-  };
-
-  const handleRestoreFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) {
-      alert("No file selected.");
-      return;
-    }
-
-    setPendingRestoreFile(file);
-    e.target.value = ''; // Reset input
-  };
-
-  const executeRestore = (file: File) => {
-    setPendingRestoreFile(null);
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        let rawText = event.target?.result as string;
-        
-        if (file.name.toLowerCase().endsWith('.csv')) {
-           setRestoreStatus('Importing CSV...');
-           Papa.parse(rawText, {
-             header: true,
-             skipEmptyLines: true,
-             complete: async (results) => {
-                let backupData: any = { database: {} };
-                const data = results.data as any[];
-                const fields = results.meta.fields || [];
-                
-                if (fields.includes('bdNo') && fields.includes('rank') && fields.includes('name')) {
-                   if (fields.includes('role') && fields.includes('password')) {
-                      backupData.database.detailedUsers = data;
-                   } else {
-                      const parsedAirmen = data.map((d: any) => ({
-                         ...d,
-                         active: d.active === 'true' || d.active === 'TRUE' || d.active === true,
-                         serNo: Number(d.serNo) || 0
-                      }));
-                      backupData.database.airmen = parsedAirmen;
-                   }
-                } else if (fields.includes('airmanId') && fields.includes('dutyCode')) {
-                   const assignmentsObj: any = {};
-                   data.forEach((d: any) => {
-                      const month = d.month || d.date.substring(0, 7);
-                      if (!assignmentsObj[month]) assignmentsObj[month] = [];
-                      assignmentsObj[month].push(d);
-                   });
-                   backupData.database.assignments = assignmentsObj;
-                } else {
-                   setRestoreStatus('❌ Unknown CSV format. Cannot identify data table.');
-                   return;
-                }
-                
-                const success = await localDb.restoreDatabase(backupData);
-                if (success) {
-                  setRestoreStatus(`✅ CSV Restore complete! Please refresh the page to apply changes.`);
-                  if (onRosterUpdated) onRosterUpdated();
-                } else {
-                  setRestoreStatus('❌ CSV Restore failed.');
-                }
-             }
-           });
-           return;
-        }
-
-        // Clean up markdown code blocks if any
-        rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
-        
-        let backupData;
-        try {
-          backupData = JSON.parse(rawText);
-          while (typeof backupData === 'string') {
-            backupData = JSON.parse(backupData);
-          }
-        } catch (err) {
-          // Fallback: If it's literally escaped characters pasted into a text file
-          let unescaped = rawText.replace(/\\n/g, '').replace(/\\"/g, '"').trim();
-          if (unescaped.startsWith('"') && unescaped.endsWith('"')) {
-            unescaped = unescaped.substring(1, unescaped.length - 1);
-          }
-          try {
-            backupData = JSON.parse(unescaped);
-          } catch(e2) {
-            throw new Error('Could not parse file content. Please ensure it is a valid JSON file.');
-          }
-        }
-
-        const officeValidation = validateBackupMatchesActiveOffice(backupData);
-        if (!officeValidation.ok) {
-          throw new Error(officeValidation.error || 'Office mismatch: cannot restore another office backup.');
-        }
-
-        setRestoreStatus('Importing backup to local database...');
-        
-        const success = await localDb.restoreDatabase(backupData);
-        if (success) {
-          setRestoreStatus('✅ Database restore complete! Please refresh the page to apply changes.');
-          if (onRosterUpdated) {
-            onRosterUpdated();
-          }
-        } else {
-          setRestoreStatus('❌ Invalid backup file format. Missing required data.');
-          alert('Invalid backup file format. Missing required data (e.g. airmen, assignments).');
-        }
-      } catch (err: any) {
-        console.error('Restore failed:', err);
-        setRestoreStatus(`❌ Error restoring database: ${err.message}`);
-        alert(`Restore Error: ${err.message}`);
-      }
-    };
-    reader.onerror = () => {
-      setRestoreStatus('❌ Error reading the file.');
-      alert('Error reading the file.');
-    };
-    reader.readAsText(file);
-  };
-
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (pendingRestoreFile || deleteConfirmId || clearAllConfirmType || isDriveModalOpen) return;
+      if (deleteConfirmId || clearAllConfirmType) return;
       if (activeSection) {
         setActiveSection(null);
       } else {
@@ -1007,7 +759,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, activeSection, pendingRestoreFile, deleteConfirmId, clearAllConfirmType, isDriveModalOpen, onClose]);
+  }, [isOpen, activeSection, deleteConfirmId, clearAllConfirmType, onClose]);
 
   if (!isOpen) return null;
 
@@ -1043,15 +795,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       : []),
     ...(isAdminRole
       ? [{
-          id: 'cloudsync' as SettingSection,
-          label: 'Database Cloud Sync & Invite',
-          description: 'Firebase sync status, cloud mirror & device invite link',
-          icon: <Cloud className="w-5 h-5" />,
-          color: 'text-blue-600 bg-blue-100 dark:bg-blue-950/80 dark:text-blue-400',
-        }]
-      : []),
-    ...(isAdminRole
-      ? [{
           id: 'appNotice' as SettingSection,
           label: 'App Notice',
           description: 'Publish live broadcast notices or maintenance alerts',
@@ -1077,15 +820,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     },
     ...(isAdminRole
       ? [{
-          id: 'database' as SettingSection,
-          label: 'Backup & Restore',
-          description: 'Office-isolated JSON/CSV backups & Google Drive sync',
-          icon: <Database className="w-5 h-5" />,
-          color: 'text-teal-600 bg-teal-100 dark:bg-teal-950/80 dark:text-teal-400',
-        }]
-      : []),
-    ...(isAdminRole
-      ? [{
           id: 'history' as SettingSection,
           label: 'Login History',
           description: 'Active sessions and recent user login activity logs',
@@ -1105,34 +839,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-0 sm:p-8">
-      {pendingRestoreFile && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-200 dark:border-slate-700 animate-fadeIn">
-            <h3 className="text-xl font-black text-red-600 dark:text-red-400 mb-2 flex items-center gap-2">
-              <AlertTriangle className="w-6 h-6" /> Warning: Data Overwrite
-            </h3>
-            <p className="text-sm text-slate-600 dark:text-slate-300 mb-6 font-medium leading-relaxed">
-              Restoring from this backup file will <strong>OVERWRITE</strong> the current database completely. All recent unsynced changes will be lost.
-              <br /><br />
-              Are you sure you want to proceed?
-            </p>
-            <div className="flex justify-end gap-3">
-              <button 
-                onClick={() => setPendingRestoreFile(null)}
-                className="px-5 py-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-200 rounded-xl font-bold text-sm transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={() => executeRestore(pendingRestoreFile)}
-                className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-sm transition-colors cursor-pointer shadow-md shadow-red-500/20"
-              >
-                Yes, Overwrite Data
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {/* Two-step Single-Surface Settings Container (Options Hub -> Dedicated Option Interface) */}
       <div className="w-full max-w-4xl h-full sm:h-[85vh] bg-white dark:bg-[#1e293b] border-0 sm:border border-slate-200 dark:border-slate-700 sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
         {!activeSection ? (
@@ -1744,211 +1450,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   )}
 
-                  {/* Cloud Sync & Share Office Invite Link */}
-                  {displayedSection === 'cloudsync' && isAdminRole && (
-                    <div className="space-y-6 animate-fadeIn max-w-xl mx-auto">
-                      {/* Share Office Workspace Code Section */}
-                      <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-50 via-white to-sky-50 dark:from-emerald-950/30 dark:via-slate-800/90 dark:to-sky-950/20 border border-emerald-200 dark:border-emerald-700/50 shadow-sm space-y-3">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                          <div className="flex items-start gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
-                              <KeyRound className="w-5 h-5" />
-                            </div>
-                            <div>
-                              <h4 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
-                                <span>Office Workspace Join Code</span>
-                                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
-                                  Easy Staff Connect
-                                </span>
-                              </h4>
-                              <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-                                Share this short <strong>Office Code</strong> with your staff. They can select <strong>{getActiveOfficeIdentity().officeName}</strong> from the Office Directory or enter this code to join immediately.
-                              </p>
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={handleCopyOfficeSetupLink}
-                            className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-md transition-all cursor-pointer shrink-0"
-                          >
-                            {inviteLinkCopied ? (
-                              <>
-                                <Check className="w-4 h-4" />
-                                <span>Copied Office Code!</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-4 h-4" />
-                                <span>Copy Office Code</span>
-                              </>
-                            )}
-                          </button>
-                        </div>
-
-                        <div className="p-3 rounded-xl bg-white/90 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-mono">
-                          <div>
-                            <span className="text-slate-400 uppercase text-[10px] font-bold mr-2">Office Code:</span>
-                            <span className="font-black text-emerald-600 dark:text-emerald-400 text-sm tracking-wider select-all">
-                              {getActiveOfficeIdentity().officeCode}
-                            </span>
-                          </div>
-                          {getActiveOfficeIdentity().joinPin && (
-                            <div>
-                              <span className="text-slate-400 uppercase text-[10px] font-bold mr-2">Join PIN:</span>
-                              <span className="font-black text-sky-600 dark:text-sky-400 text-sm tracking-wider select-all">
-                                {getActiveOfficeIdentity().joinPin}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col items-center justify-center p-8 text-center bg-transparent">
-                        <div className="w-16 h-16 rounded-full bg-blue-100 dark:bg-[#1e2b4d] flex items-center justify-center mb-6">
-                          <Cloud className="w-8 h-8 text-blue-600 dark:text-blue-400" />
-                        </div>
-                        <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-2">Database Cloud Sync</h3>
-                        <p className="text-sm text-slate-500 dark:text-slate-400 mb-8 max-w-sm">
-                          লোকাল ডাটাবেস পরিবর্তনসমূহ সংরক্ষণ করুন বা সার্ভার ফাইল থেকে ডাটা রিলোড করুন।
-                        </p>
-
-                        {(restoreStatus === 'Uploading...' || restoreStatus === 'Downloading...') && syncProgress >= 0 && syncProgress <= 100 && (
-                          <div className="w-full mb-6 max-w-sm mx-auto">
-                             <div className="flex justify-between items-center mb-2">
-                               <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">{syncMessage || 'Processing...'}</span>
-                               <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{syncProgress}%</span>
-                             </div>
-                             <div className="w-full bg-slate-200 dark:bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-300 dark:border-slate-700">
-                               <div className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all duration-300" style={{ width: `${syncProgress}%` }}></div>
-                             </div>
-                          </div>
-                        )}
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <button 
-                            onClick={async () => {
-                              setRestoreStatus('Uploading...');
-                              setSyncProgress(1);
-                              setSyncMessage('Preparing data...');
-                              
-                              const success = await localDb.saveToFirebase(localDb.getDb(), true);
-                              
-                              if (success) {
-                                setSyncProgress(100);
-                                setSyncMessage('Upload Completed!');
-                                setSyncLogsState(getSyncLogs());
-                                setTimeout(() => {
-                                   setRestoreStatus('');
-                                   setSyncProgress(0);
-                                   if (onRosterUpdated) onRosterUpdated();
-                                }, 1500);
-                              } else {
-                                const logs = getSyncLogs();
-                                const lastLog = logs.find(l => l.type === 'PUSH' && l.status === 'ERROR');
-                                alert('Upload Failed: ' + (lastLog?.message || 'Unknown error.'));
-                                setSyncMessage('Upload Failed!');
-                                setSyncLogsState(logs);
-                                setTimeout(() => {
-                                   setRestoreStatus('');
-                                   setSyncProgress(0);
-                                }, 2000);
-                              }
-                            }} 
-                            disabled={restoreStatus === 'Uploading...' || restoreStatus === 'Downloading...'}
-                            className="relative group w-full overflow-hidden rounded-xl p-[1px] transition-all hover:shadow-[0_0_15px_-5px_rgba(59,130,246,0.3)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none cursor-pointer"
-                          >
-                            <div className="absolute inset-0 bg-gradient-to-r from-blue-600/30 to-indigo-600/30 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                            <div className="relative flex flex-row items-center justify-center gap-2 w-full h-full bg-white dark:bg-[#1e293b] px-4 py-3.5 rounded-xl border border-slate-200 dark:border-slate-700/50 transition-colors group-hover:bg-blue-50/70 dark:group-hover:bg-[#1e293b]/80 shadow-xs">
-                               <Upload className={`w-4 h-4 text-blue-600 dark:text-blue-400 ${restoreStatus === 'Uploading...' ? 'animate-bounce' : ''}`} />
-                               <span className="text-sm font-medium tracking-wide text-slate-800 dark:text-slate-200 group-hover:text-slate-900 dark:group-hover:text-white transition-colors">
-                                  {restoreStatus === 'Uploading...' && syncProgress === 100 ? 'Success!' : restoreStatus === 'Uploading...' ? 'Uploading...' : 'Push to Cloud'}
-                               </span>
-                            </div>
-                          </button>
-                          <button 
-                            onClick={async () => {
-                              setRestoreStatus('Downloading...');
-                              setSyncProgress(10);
-                              setSyncMessage('Pulling updates from Cloud...');
-                              
-                              const success = await localDb.syncFromFirebase({ isLoginSync: true, forceFullPull: true });
-                              
-                              if (success) {
-                                setSyncProgress(100);
-                                setSyncMessage('Download Completed!');
-                                setSyncLogsState(getSyncLogs());
-                                setTimeout(() => {
-                                   setRestoreStatus('');
-                                   setSyncProgress(0);
-                                   if (onRosterUpdated) onRosterUpdated();
-                                   window.dispatchEvent(new CustomEvent('baf_state_updated'));
-                                }, 1500);
-                              } else {
-                                const logs = getSyncLogs();
-                                const lastLog = logs.find(l => l.type === 'PULL' && l.status === 'ERROR');
-                                setSyncMessage(lastLog?.message ? `Failed: ${lastLog.message}` : 'Download Failed!');
-                                setSyncLogsState(logs);
-                                setTimeout(() => {
-                                   setRestoreStatus('');
-                                   setSyncProgress(0);
-                                }, 3000);
-                              }
-                            }} 
-                            disabled={restoreStatus === 'Uploading...' || restoreStatus === 'Downloading...'}
-                            className="relative group w-full overflow-hidden rounded-xl p-[1px] transition-all hover:shadow-[0_0_15px_-5px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none cursor-pointer"
-                          >
-                            <div className="absolute inset-0 bg-gradient-to-r from-emerald-600/30 to-teal-600/30 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                            <div className="relative flex flex-row items-center justify-center gap-2 w-full h-full bg-white dark:bg-[#1e293b] px-4 py-3.5 rounded-xl border border-slate-200 dark:border-slate-700/50 transition-colors group-hover:bg-emerald-50/70 dark:group-hover:bg-[#1e293b]/80 shadow-xs">
-                               <Download className={`w-4 h-4 text-emerald-600 dark:text-emerald-400 ${restoreStatus === 'Downloading...' ? 'animate-bounce' : ''}`} />
-                               <span className="text-sm font-medium tracking-wide text-slate-800 dark:text-slate-200 group-hover:text-slate-900 dark:group-hover:text-white transition-colors">
-                                  {restoreStatus === 'Downloading...' && syncProgress === 100 ? 'Success!' : restoreStatus === 'Downloading...' ? 'Downloading...' : 'Pull from Cloud'}
-                               </span>
-                            </div>
-                          </button>
-                        </div>
-
-                      </div>
-
-                      <div className="mt-8">
-                        <h4 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 px-2">Recent Sync Logs</h4>
-                        {syncLogsState.length === 0 ? (
-                          <div className="text-center py-8 bg-slate-100 dark:bg-slate-800/30 rounded-2xl border border-slate-200 dark:border-slate-800">
-                            <p className="text-sm font-bold text-slate-500 dark:text-slate-400">No recent logs.</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-3">
-                            {syncLogsState.map((log: any) => (
-                              <div key={log.id} className="p-4 bg-white dark:bg-[#1b2234] border border-slate-200 dark:border-slate-700/50 rounded-xl flex justify-between items-start shadow-xs">
-                                <div className="flex gap-3">
-                                  <div className="pt-1.5 shrink-0">
-                                    <div className={`w-2.5 h-2.5 rounded-full ${log.status === 'SUCCESS' ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
-                                  </div>
-                                  <div>
-                                    <p className="text-sm font-bold text-slate-900 dark:text-white mb-1">
-                                      {log.type === 'PULL' ? 'Downloaded from Cloud' : 'Uploaded to Cloud'}
-                                    </p>
-                                    <p className="text-xs text-slate-600 dark:text-slate-400">{log.message}</p>
-                                  </div>
-                                </div>
-                                <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono text-right shrink-0 mt-1">
-                                  {new Date(log.timestamp).toLocaleDateString()}<br/>
-                                  {new Date(log.timestamp).toLocaleTimeString()}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-
-              
-              
-              
-              
-              {activeSection === 'appNotice' && isAdminRole && (
+                  {activeSection === 'appNotice' && isAdminRole && (
             <div className="space-y-6 animate-fadeIn max-w-2xl">
                     {appConfig.notice.isActive && (
                       <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm animate-fadeIn">
@@ -2200,104 +1702,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-{activeSection === 'database' && (
-            <div className="space-y-4">
-              
-              {restoreStatus && (
-                <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-sm font-bold text-emerald-900 dark:text-emerald-200 flex items-center gap-2 shadow-sm animate-fadeIn">
-                  <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  {restoreStatus}
-                </div>
-              )}
-
-              {/* Google Drive Personal Cloud Auto-Backup */}
-              <div className="p-5 bg-gradient-to-r from-emerald-50 via-white to-slate-50 dark:from-emerald-500/10 dark:via-slate-800 dark:to-slate-800 rounded-2xl border border-emerald-200 dark:border-emerald-500/30 shadow-sm space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2.5 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl">
-                      <Cloud className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                        Google Drive ক্লাউড অটো ব্যাকআপ ও রিস্টোর
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-500/30 font-medium">
-                          Active
-                        </span>
-                      </h3>
-                      <p className="text-xs text-slate-600 dark:text-slate-400">
-                        ব্যক্তিগত Gmail দিয়ে Google ড্রাইভে স্বয়ংক্রিয় রিয়েল-টাইম ব্যাকআপ ও এক ক্লিকে রিস্টোর
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setIsDriveModalOpen(true)}
-                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer whitespace-nowrap self-start sm:self-center"
-                  >
-                    ড্রাইভ ব্যাকআপ প্যানেল
-                  </button>
-                </div>
-              </div>
-
-              <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-bold flex items-center gap-2 text-slate-800 dark:text-slate-200">
-                    <Download className="w-4 h-4 text-amber-500" />
-                    Export Local Backup
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Download complete roster, TDY, and leave records as a JSON file.
-                  </p>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <button
-                    type="button"
-                    onClick={handleDownloadBackup}
-                    disabled={isBackingUp}
-                    className="w-full sm:flex-1 py-3 text-sm font-bold text-slate-800 bg-amber-400 hover:bg-amber-500 rounded-xl shadow-xs transition-colors flex justify-center items-center gap-2 cursor-pointer"
-                  >
-                    {isBackingUp ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    Download JSON Backup
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadCSV}
-                    disabled={isBackingUp}
-                    className="w-full sm:flex-1 py-3 text-sm font-bold text-slate-800 bg-emerald-400 hover:bg-emerald-500 rounded-xl shadow-xs transition-colors flex justify-center items-center gap-2 cursor-pointer"
-                  >
-                    {isBackingUp ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    Download CSV Backup
-                  </button>
-                </div>
-              </div>
-
-              <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-bold flex items-center gap-2 text-slate-800 dark:text-slate-200">
-                    <Upload className="w-4 h-4 text-indigo-500" />
-                    Restore Database
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Upload a JSON or CSV backup file. WARNING: This will overwrite current data.
-                  </p>
-                </div>
-                <label className="w-full py-3 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition-colors flex justify-center items-center gap-2 cursor-pointer">
-                  <Upload className="w-4 h-4" />
-                  Upload Backup (JSON/CSV)
-                  <input
-                    type="file"
-                    accept=".json,.csv"
-                    onClick={(e) => { (e.target as any).value = null; }}
-                    onChange={handleRestoreFile}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-            </div>
-          )}
-
-
-
 {activeSection === 'history' && isAdminRole && (
             <div className="space-y-6">
               
@@ -2361,17 +1765,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               ) : (
                 <>
-                  {/* Active Users Section */}
+                  {/* Active Users Section (Strictly Scoped to Current Office) */}
                   <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
-                    <h3 className="text-sm font-bold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-                      Currently Active ({activeUsers.filter(u => String(u.bdNo || '').replace(/\D/g, '') !== '48456').length})
-                    </h3>
+                    <div className="flex items-center justify-between mb-3 gap-2">
+                      <h3 className="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                        Currently Active ({activeUsers.filter(u => !isMasterProtectedUser(u.bdNo, u.role)).length})
+                      </h3>
+                      <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                        Realtime • {getActiveOfficeIdentity().officeName}
+                      </span>
+                    </div>
                     <div className="flex flex-wrap gap-2">
-                      {activeUsers.filter(u => String(u.bdNo || '').replace(/\D/g, '') !== '48456').length === 0 ? (
+                      {activeUsers.filter(u => !isMasterProtectedUser(u.bdNo, u.role)).length === 0 ? (
                         <span className="text-xs text-slate-500 italic">No other active users</span>
                       ) : (
-                        activeUsers.filter(u => String(u.bdNo || '').replace(/\D/g, '') !== '48456').map(u => (
+                        activeUsers.filter(u => !isMasterProtectedUser(u.bdNo, u.role)).map(u => (
                           <div key={u.bdNo} className="px-3 py-1.5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg flex items-center gap-2">
                             <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
                               {formatAirmanName(u.rank)} {u.name} - ({u.page || 'Dashboard'}) - {u.role === 'OWNER' ? 'Owner' : u.role === 'SUPER_ADMIN' ? 'Super Admin' : u.role === 'ADMIN' ? 'Admin' : 'User'}
@@ -2396,7 +1806,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     <button
                       onClick={() => {
-                        refreshLoginHistoryFromCloud()
+                        refreshPresenceNow()
+                          .then((users) => setActiveUsers(users))
+                          .catch(() => {});
+                        refreshLoginHistoryFromCloud(true)
                           .then((logs) => {
                             setLoginHistory(logs);
                             setRealtimeHistory(logs);
@@ -2430,12 +1843,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                   <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden divide-y divide-slate-100 dark:divide-slate-700 max-h-[60vh] overflow-y-auto shadow-sm">
                     {(() => {
+                      const activeCode = getActiveOfficeCode();
+                      const isDefault155 = isDefault155UasuOffice();
                       const sourceList = (realtimeHistory && realtimeHistory.length > 0)
                         ? realtimeHistory
                         : (loginHistory && loginHistory.length > 0 ? loginHistory : getLoginHistory());
 
                       const filtered = sourceList.filter(log => {
-                        if (String(log.bdNo || '').replace(/\D/g, '') === '48456') return false;
+                        if (isMasterProtectedUser(log.bdNo, log.role)) return false;
+                        const logOffice = String(log.officeCode || '').trim();
+                        if (logOffice ? logOffice !== activeCode : !isDefault155) return false;
                         if (!historySearch.trim()) return true;
                         const q = historySearch.toLowerCase();
                         return (
@@ -2582,10 +1999,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         )}
 
-        <GoogleDriveBackupModal
-          isOpen={isDriveModalOpen}
-          onClose={() => setIsDriveModalOpen(false)}
-        />
       </div>
     </div>
   );

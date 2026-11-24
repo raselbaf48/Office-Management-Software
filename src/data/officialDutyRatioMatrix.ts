@@ -28,6 +28,7 @@ export interface DutyRatioTable {
     GCS?: number;
     Admin?: number;
   };
+  weeklyFlightTargets?: Record<string, Partial<Record<FlightName, number>>>;
   data: {
     Mechanics: number[]; // Array of 31 numbers (index 0 = day 1, index 30 = day 31)
     Avionics: number[];
