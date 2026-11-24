@@ -3473,6 +3473,108 @@ export class LocalDatabaseEngine {
     return { count: createdAirmen.length, airmen: createdAirmen, batchId };
   }
 
+  public bulkUpdateExistingAirmen(
+    updates: Array<{
+      existingId: string;
+      bdNo: string;
+      patch: Partial<Airman>;
+    }>,
+    importMeta?: { fileName?: string; importedBy?: string }
+  ): { count: number; airmen: Airman[] } {
+    if (!updates || updates.length === 0) {
+      return { count: 0, airmen: [] };
+    }
+
+    const updatedAirmen: Airman[] = [];
+    const updatedByBd = new Map<string, Airman>();
+    const updatedById = new Map<string, Airman>();
+
+    for (const item of updates) {
+      const targetBd = String(item.bdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      const idx = this.db.airmen.findIndex((a) => {
+        if (a.id === item.existingId) return true;
+        const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        return Boolean(targetBd && aBd === targetBd);
+      });
+      if (idx === -1) continue;
+
+      const existing = this.db.airmen[idx];
+      const merged: Airman = {
+        ...existing,
+        ...item.patch,
+        id: existing.id,
+        serNo: existing.serNo,
+        bdNo: existing.bdNo,
+        isProtected: existing.isProtected,
+      };
+      this.db.airmen[idx] = merged;
+      updatedAirmen.push(merged);
+      updatedById.set(merged.id, merged);
+      const mergedBd = String(merged.bdNo || merged.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (mergedBd) updatedByBd.set(mergedBd, merged);
+    }
+
+    if (updatedAirmen.length === 0) {
+      return { count: 0, airmen: [] };
+    }
+
+    // Sync changed metadata into detailedUsers and scoped user cache
+    const syncUsers = (users: any[]): any[] => {
+      if (!Array.isArray(users)) return [];
+      return users.map((u) => {
+        if (!u) return u;
+        const uBd = String(u.bdNo || u.userId || u.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        const match = updatedById.get(u.airmanId) || (uBd ? updatedByBd.get(uBd) : undefined);
+        if (!match) return u;
+        return {
+          ...u,
+          rank: match.rank || u.rank,
+          name: match.name || u.name,
+          fullName: match.fullName || match.name || u.fullName,
+          surname: match.name || u.surname,
+          trade: match.trade || u.trade,
+          mobileNo: match.mobileNo || u.mobileNo,
+          flightName: match.flightName !== undefined ? match.flightName : u.flightName,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+    };
+
+    if (this.db.detailedUsers) {
+      this.db.detailedUsers = syncUsers(this.db.detailedUsers);
+    }
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const scopedUsersKey = getActiveDetailedUsersStorageKey();
+        const rawScoped = window.localStorage.getItem(scopedUsersKey);
+        if (rawScoped) {
+          const parsedScoped = JSON.parse(rawScoped);
+          if (Array.isArray(parsedScoped)) {
+            window.localStorage.setItem(scopedUsersKey, JSON.stringify(syncUsers(parsedScoped)));
+          }
+        }
+      } catch {}
+    }
+
+    this.db.airmen = normalizeAirmenSeniority(this.db.airmen);
+    this.saveToStorage();
+    registerUsersInGlobalOfficeDirectory(updatedAirmen as any[]);
+    updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
+
+    this.recordActivity({
+      actionType: 'BULK_IMPORT_AIRMEN' as any,
+      airmanId: 'BULK_UPDATE_AIRMEN',
+      airmanName: `${updatedAirmen.length} Airmen Updated`,
+      dutyCode: 'GD',
+      fromDate: '',
+      toDate: '',
+      notes: `Replaced changed info for ${updatedAirmen.length} existing airmen from ${importMeta?.fileName || 'Excel'}`,
+    });
+
+    return { count: updatedAirmen.length, airmen: updatedAirmen };
+  }
+
   private getBiodataImportHistoryStorageKey(): string {
     return getOfficeScopedStorageKey('baf_biodata_import_history_v1');
   }
@@ -3625,6 +3727,158 @@ export class LocalDatabaseEngine {
       success: true,
       removedCount: matchedTargets.length,
       skippedProtectedCount,
+    };
+  }
+
+  public removeSingleAirmanFromBiodataImportBatch(
+    batchId: string,
+    targetAirmanId: string,
+    targetBdNo?: string
+  ): {
+    success: boolean;
+    removedFromRegister: boolean;
+    remainingInBatch: number;
+    protectedSkipped?: boolean;
+  } {
+    const history = this.getBiodataImportHistory();
+    const batch = history.find((b) => b.id === batchId);
+    if (!batch) {
+      return { success: false, removedFromRegister: false, remainingInBatch: 0 };
+    }
+
+    const cleanTargetBd = String(targetBdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+
+    if (cleanTargetBd === '48456') {
+      return {
+        success: false,
+        removedFromRegister: false,
+        remainingInBatch: (batch.airmenSummary || []).length,
+        protectedSkipped: true,
+      };
+    }
+
+    const matchedAirman = this.db.airmen.find((a) => {
+      if (a.id === targetAirmanId) return true;
+      const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      return Boolean(cleanTargetBd && aBd === cleanTargetBd);
+    });
+
+    if (matchedAirman && (matchedAirman.isProtected || String(matchedAirman.bdNo || '').replace(/\D/g, '') === '48456')) {
+      return {
+        success: false,
+        removedFromRegister: false,
+        remainingInBatch: (batch.airmenSummary || []).length,
+        protectedSkipped: true,
+      };
+    }
+
+    let removedFromRegister = false;
+
+    if (matchedAirman) {
+      removedFromRegister = true;
+      const removeId = matchedAirman.id;
+      const removeBd = String(matchedAirman.bdNo || matchedAirman.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+
+      this.db.airmen = normalizeAirmenSeniority(
+        this.db.airmen.filter((a) => {
+          if (a.id === removeId) return false;
+          const aBd = String(a.bdNo || a.id || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+          if (removeBd && aBd === removeBd) return false;
+          return true;
+        })
+      );
+
+      // Clean assignments for removed airman
+      if (this.db.assignments) {
+        Object.keys(this.db.assignments).forEach((monthKey) => {
+          if (Array.isArray(this.db.assignments[monthKey])) {
+            this.db.assignments[monthKey] = this.db.assignments[monthKey].filter(
+              (ass) => ass.airmanId !== removeId
+            );
+          }
+        });
+      }
+
+      // Clean detailedUsers for removed airman (never delete 48456)
+      const deletedUsers: any[] = [];
+      const keepUser = (u: any) => {
+        const uBd = String(u?.bdNo || u?.userId || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+        if (uBd === '48456' || u?.isProtected === true) return true;
+        const isMatch = u?.airmanId === removeId || (removeBd && uBd === removeBd);
+        if (isMatch) {
+          deletedUsers.push(u);
+          return false;
+        }
+        return true;
+      };
+
+      if (this.db.detailedUsers) {
+        this.db.detailedUsers = this.db.detailedUsers.filter(keepUser);
+      }
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const scopedUsersKey = getActiveDetailedUsersStorageKey();
+          const rawScoped = window.localStorage.getItem(scopedUsersKey);
+          if (rawScoped) {
+            const parsedScoped = JSON.parse(rawScoped);
+            if (Array.isArray(parsedScoped)) {
+              window.localStorage.setItem(scopedUsersKey, JSON.stringify(parsedScoped.filter(keepUser)));
+            }
+          }
+        } catch {}
+      }
+
+      markUserPostedOutInGlobalDirectory(matchedAirman.bdNo || matchedAirman.id, true);
+      deleteAirmanFromFirebase(matchedAirman).catch(() => {});
+      if (deletedUsers.length > 0) {
+        deleteUserProfileFromFirebase(deletedUsers).catch(() => {});
+      }
+    }
+
+    const updatedSummary = (batch.airmenSummary || []).filter((s) => {
+      if (s.id === targetAirmanId) return false;
+      const sBd = String(s.bdNo || '').replace(/^BD\/?/i, '').replace(/\D/g, '').trim();
+      if (cleanTargetBd && sBd === cleanTargetBd) return false;
+      return true;
+    });
+
+    const updatedIds = (batch.airmenIds || []).filter((id) => id !== targetAirmanId && id !== matchedAirman?.id);
+
+    const updatedHistory =
+      updatedSummary.length === 0
+        ? history.filter((b) => b.id !== batchId)
+        : history.map((b) =>
+            b.id === batchId
+              ? {
+                  ...b,
+                  airmenIds: updatedIds,
+                  airmenSummary: updatedSummary,
+                  airmenCount: updatedSummary.length,
+                }
+              : b
+          );
+
+    this.db.biodataImportHistory = updatedHistory;
+    this.persistBiodataImportHistory(updatedHistory);
+
+    const labelName = matchedAirman
+      ? `${matchedAirman.rank} ${matchedAirman.name} (${matchedAirman.bdNo})`
+      : targetBdNo || targetAirmanId;
+
+    this.logSystemAction(
+      batchId,
+      `Biodata Import (${batch.fileName})`,
+      `Removed single imported airman ${labelName} from batch "${batch.fileName}"`
+    );
+
+    this.saveToStorage();
+    updateOfficeTelemetryUserCount(this.getAirmen().length).catch(() => {});
+
+    return {
+      success: true,
+      removedFromRegister,
+      remainingInBatch: updatedSummary.length,
     };
   }
 
