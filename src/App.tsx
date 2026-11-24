@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, Component, ReactNode } from 'react';
+import React, { useState, useEffect, useRef, Component, ReactNode } from 'react';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { AnimatePresence, motion } from 'motion/react';
 import type { SidebarTab } from './components/Sidebar';
 import { Sidebar } from './components/Sidebar';
@@ -93,6 +95,7 @@ import {
   updateOfficeTelemetryUserCount,
   syncBrowserTabIdentity,
   isDefault155UasuOffice,
+  isFirestoreQuotaExceeded,
 } from './firebase';
 import { setLastUsedPortal } from './services/portalPreferenceService';
 import { initGoogleDriveAuth } from './services/googleDriveService';
@@ -100,19 +103,13 @@ import { initGoogleDriveAuth } from './services/googleDriveService';
 export default function App() {
   const [activeTab, setActiveTab] = useState<SidebarTab>('overview');
   const [officeIdentity, setOfficeIdentity] = useState(() => getActiveOfficeIdentity());
-  const [role, setRole] = useState<UserRole>(() => {
-    try {
-      const saved = sessionStorage.getItem('baf_user_role');
-      if (saved === 'master_owner') return 'master_owner';
-      if (saved === 'OWNER') return 'OWNER';
-      if (saved === 'SUPER_ADMIN') return 'SUPER_ADMIN';
-      return saved === 'ADMIN' ? 'ADMIN' : 'USER';
-    } catch {
-      return 'USER';
-    }
+  const [userSession, setUserSession] = useState<UserSession | null>(() => {
+    clearUserSession();
+    return null;
   });
-  const [userSession, setUserSession] = useState<UserSession | null>(() => getCurrentUserSession());
+  const [role, setRole] = useState<UserRole>('USER');
   const [justLoggedIn, setJustLoggedIn] = useState<boolean>(false);
+  const [isQuotaPopupOpen, setIsQuotaPopupOpen] = useState<boolean>(false);
   const [standaloneView, setStandaloneView] = useState<'backup' | null>(null);
 
   // Sync Browser Tab Title & Favicon with logged-in Office Name & Logo (or Default App Identity when logged out)
@@ -282,6 +279,11 @@ export default function App() {
 
   const renderNoticeModal = () => {
     if (!userSession || !appConfig || hasSeenNotice) return null;
+    // Keep Quota Exceeded popup as the strict 1st popup after login/re-login
+    if (isQuotaPopupOpen) return null;
+    if (justLoggedIn && isFirestoreQuotaExceeded() && sessionStorage.getItem('baf_quota_popup_shown_in_session') !== 'true') {
+      return null;
+    }
     if (!isFeatureActive(appConfig.notice)) return null;
     if (!appConfig.notice.message || appConfig.notice.message.trim() === '' || appConfig.notice.message.trim() === 'Gg') return null;
 
@@ -343,10 +345,106 @@ export default function App() {
     clearUserSession();
     setUserSession(null);
     setJustLoggedIn(false);
+    setIsQuotaPopupOpen(false);
+    setHasSeenNotice(false);
     handleRoleChange('USER');
     setLastUsedPortal('Office');
     syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
   };
+
+  const logoutRef = useRef(handleUserLogout);
+  logoutRef.current = handleUserLogout;
+  const internalUiPauseUntilRef = useRef<number>(0);
+
+  // Require re-login whenever the user exits/closes/reloads the app (Web, Standalone PWA, or Capacitor APK)
+  useEffect(() => {
+    if (!userSession) return;
+
+    const markInternalUiPause = () => {
+      internalUiPauseUntilRef.current = Date.now() + 60_000;
+    };
+    const clearInternalUiPauseSoon = () => {
+      setTimeout(() => {
+        internalUiPauseUntilRef.current = 0;
+      }, 600);
+    };
+
+    const handleDocumentClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        (target.tagName === 'INPUT' && (target as HTMLInputElement).type === 'file') ||
+        target.closest('label')?.querySelector('input[type="file"]')
+      ) {
+        markInternalUiPause();
+      }
+    };
+
+    const handleBeforePrint = () => markInternalUiPause();
+    const handleAfterPrint = () => clearInternalUiPauseSoon();
+    const handleWindowFocus = () => clearInternalUiPauseSoon();
+
+    const handlePageExit = () => {
+      clearUserSession();
+    };
+
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted || !getCurrentUserSession()) {
+        logoutRef.current();
+      }
+    };
+
+    const isStandalonePwa =
+      typeof window !== 'undefined' &&
+      (window.matchMedia?.('(display-mode: standalone)')?.matches ||
+        (window.navigator as any)?.standalone === true);
+
+    const handleVisibilityChange = () => {
+      if (isStandalonePwa && document.visibilityState === 'hidden' && Date.now() > internalUiPauseUntilRef.current) {
+        logoutRef.current();
+      }
+    };
+
+    document.addEventListener('click', handleDocumentClick, true);
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('pagehide', handlePageExit);
+    window.addEventListener('beforeunload', handlePageExit);
+    window.addEventListener('pageshow', handlePageShow);
+    if (isStandalonePwa) {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    let capListenerHandle: { remove: () => Promise<void> } | null = null;
+    if (isRunningInApk() && Capacitor.isPluginAvailable('App')) {
+      CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        if (!isActive && Date.now() > internalUiPauseUntilRef.current) {
+          logoutRef.current();
+        }
+      })
+        .then((handle) => {
+          capListenerHandle = handle;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      document.removeEventListener('click', handleDocumentClick, true);
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('pagehide', handlePageExit);
+      window.removeEventListener('beforeunload', handlePageExit);
+      window.removeEventListener('pageshow', handlePageShow);
+      if (isStandalonePwa) {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+      if (capListenerHandle) {
+        capListenerHandle.remove().catch(() => {});
+      }
+    };
+  }, [userSession]);
 
   
 
@@ -887,7 +985,7 @@ export default function App() {
 
   return (
     <div className={`min-h-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
-      <FirebaseQuotaPopupModal checkOnMount={justLoggedIn} />
+      <FirebaseQuotaPopupModal checkOnMount={justLoggedIn} onOpenChange={setIsQuotaPopupOpen} />
       {renderNoticeModal()}
       {/* Left Sidebar Navigation */}
       <Sidebar

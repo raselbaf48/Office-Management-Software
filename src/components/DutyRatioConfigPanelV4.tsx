@@ -492,6 +492,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
   const [deletingCustomItem, setDeletingCustomItem] = useState<string | null>(null);
   const [customModalAirman, setCustomModalAirman] = useState<{ id: string; name: string; rank: string; flightName: string; currentValue: string } | null>(null);
   const [customInput, setCustomInput] = useState('');
+  const [isAddingInlineCustom, setIsAddingInlineCustom] = useState(false);
+  const [inlineCustomInput, setInlineCustomInput] = useState('');
 
   useEffect(() => {
     const handleCustomUpdate = () => {
@@ -505,13 +507,22 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
     if (!openDropdownAirmanId) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (isAddingInlineCustom) {
+          setIsAddingInlineCustom(false);
+          setInlineCustomInput('');
+          return;
+        }
         setOpenDropdownAirmanId(null);
         setDropdownAnchor(null);
+        setIsAddingInlineCustom(false);
+        setInlineCustomInput('');
       }
     };
     const handleScrollOrResize = () => {
       setOpenDropdownAirmanId(null);
       setDropdownAnchor(null);
+      setIsAddingInlineCustom(false);
+      setInlineCustomInput('');
     };
     window.addEventListener('keydown', handleKey);
     window.addEventListener('resize', handleScrollOrResize);
@@ -519,7 +530,28 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
       window.removeEventListener('keydown', handleKey);
       window.removeEventListener('resize', handleScrollOrResize);
     };
-  }, [openDropdownAirmanId]);
+  }, [openDropdownAirmanId, isAddingInlineCustom]);
+
+  const handleAddInlineCustomDisposal = () => {
+    if (!dropdownAnchor) return;
+    const trimmed = inlineCustomInput.trim();
+    if (!trimmed) return;
+
+    if (!STANDARD_DISPOSALS.includes(trimmed)) {
+      saveCustomDisposal(trimmed, true);
+      setSavedCustomList(getSavedCustomDisposals());
+    }
+
+    saveAndSyncDisposals({
+      ...disposals,
+      [dropdownAnchor.airmanId]: trimmed,
+    });
+
+    setOpenDropdownAirmanId(null);
+    setDropdownAnchor(null);
+    setIsAddingInlineCustom(false);
+    setInlineCustomInput('');
+  };
 
   const handleSaveCustomDisposal = () => {
     if (!customModalAirman) return;
@@ -1599,12 +1631,16 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                                       if (openDropdownAirmanId === a.id) {
                                         setOpenDropdownAirmanId(null);
                                         setDropdownAnchor(null);
+                                        setIsAddingInlineCustom(false);
+                                        setInlineCustomInput('');
                                         return;
                                       }
                                       const rect = e.currentTarget.getBoundingClientRect();
                                       const spaceBelow = window.innerHeight - rect.bottom;
-                                      const openUp = spaceBelow < 280 && rect.top > spaceBelow;
+                                      const openUp = spaceBelow < 340 && rect.top > spaceBelow;
                                       setSavedCustomList(getSavedCustomDisposals());
+                                      setIsAddingInlineCustom(false);
+                                      setInlineCustomInput('');
                                       setOpenDropdownAirmanId(a.id);
                                       setDropdownAnchor({
                                         airmanId: a.id,
@@ -2987,6 +3023,8 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
               e.stopPropagation();
               setOpenDropdownAirmanId(null);
               setDropdownAnchor(null);
+              setIsAddingInlineCustom(false);
+              setInlineCustomInput('');
             }}
           />
           <div
@@ -2996,11 +3034,11 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
               ...(dropdownAnchor.openUp
                 ? { bottom: Math.max(8, window.innerHeight - dropdownAnchor.top + 4) }
                 : { top: Math.min(window.innerHeight - 100, dropdownAnchor.bottom + 4) }),
-              minWidth: Math.max(190, dropdownAnchor.width),
+              minWidth: Math.max(isAddingInlineCustom ? 290 : 230, dropdownAnchor.width),
             }}
-            className="fixed z-[68] max-w-[240px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn"
+            className="fixed z-[68] max-w-[320px] bg-white dark:bg-[#131b2e] border border-slate-200 dark:border-slate-700/90 rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn"
           >
-            <div className="max-h-60 overflow-y-auto py-1">
+            <div className="max-h-64 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80">
               {STANDARD_DISPOSALS.map((opt) => {
                 const isActiveOpt = dropdownAnchor.currentVal === opt;
                 return (
@@ -3011,11 +3049,13 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       saveAndSyncDisposals({ ...disposals, [dropdownAnchor.airmanId]: opt });
                       setOpenDropdownAirmanId(null);
                       setDropdownAnchor(null);
+                      setIsAddingInlineCustom(false);
+                      setInlineCustomInput('');
                     }}
-                    className={`w-full text-left px-3 py-1.5 text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full text-left px-3 py-2 text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
                       isActiveOpt
                         ? 'bg-indigo-600 text-white'
-                        : 'text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/60'
+                        : 'text-slate-700 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/70'
                     }`}
                   >
                     <span className="truncate">{opt}</span>
@@ -3034,85 +3074,120 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                   ])
                 );
                 if (customItems.length === 0) return null;
-                return (
-                  <div className="border-t border-slate-100 dark:border-slate-700 mt-1 pt-1">
-                    <div className="px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Custom Disposals
-                    </div>
-                    {customItems.map((item) => {
-                      const isActiveCustom = dropdownAnchor.currentVal === item;
-                      return (
-                        <div
-                          key={`custom-opt-${item}`}
-                          className={`flex items-center justify-between gap-1 px-2 py-1 text-xs font-semibold transition-colors ${
-                            isActiveCustom
-                              ? 'bg-indigo-600 text-white'
-                              : 'text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/60'
-                          }`}
+                return customItems.map((item) => {
+                  const isActiveCustom = dropdownAnchor.currentVal === item;
+                  return (
+                    <div
+                      key={`custom-opt-${item}`}
+                      className={`flex items-center justify-between gap-2 px-3 py-2 text-xs font-semibold transition-colors ${
+                        isActiveCustom
+                          ? 'bg-amber-500/15 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                          : 'text-amber-600 dark:text-amber-400 hover:bg-amber-50/70 dark:hover:bg-slate-800/70'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            saveCustomDisposal(item);
+                            saveAndSyncDisposals({ ...disposals, [dropdownAnchor.airmanId]: item });
+                            setOpenDropdownAirmanId(null);
+                            setDropdownAnchor(null);
+                            setIsAddingInlineCustom(false);
+                            setInlineCustomInput('');
+                          }}
+                          className="text-left truncate cursor-pointer hover:underline"
                         >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              saveCustomDisposal(item);
-                              saveAndSyncDisposals({ ...disposals, [dropdownAnchor.airmanId]: item });
-                              setOpenDropdownAirmanId(null);
-                              setDropdownAnchor(null);
-                            }}
-                            className="flex-1 text-left px-1 py-0.5 truncate flex items-center justify-between gap-1 cursor-pointer"
-                          >
-                            <span className="truncate">{item}</span>
-                            {isActiveCustom && <Check className="w-3.5 h-3.5 shrink-0" />}
-                          </button>
-                          <button
-                            type="button"
-                            title={`Remove ${item}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setOpenDropdownAirmanId(null);
-                              setDropdownAnchor(null);
-                              setDeletingCustomItem(item);
-                            }}
-                            className={`p-1 rounded transition-colors shrink-0 cursor-pointer ${
-                              isActiveCustom
-                                ? 'text-indigo-100 hover:text-white hover:bg-red-500/80'
-                                : 'text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50'
-                            }`}
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
+                          {item}
+                        </button>
+                        <button
+                          type="button"
+                          title={`Remove ${item}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenDropdownAirmanId(null);
+                            setDropdownAnchor(null);
+                            setIsAddingInlineCustom(false);
+                            setInlineCustomInput('');
+                            setDeletingCustomItem(item);
+                          }}
+                          className="p-0.5 rounded text-slate-400 hover:text-rose-500 dark:text-slate-400 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors shrink-0 cursor-pointer"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                      {isActiveCustom && <Check className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />}
+                    </div>
+                  );
+                });
               })()}
             </div>
 
-            <div className="border-t border-slate-200 dark:border-slate-700 p-1.5 bg-slate-50 dark:bg-slate-900">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const anchor = dropdownAnchor;
-                  setOpenDropdownAirmanId(null);
-                  setDropdownAnchor(null);
-                  setCustomInput('');
-                  setCustomModalAirman({
-                    id: anchor.airmanId,
-                    name: anchor.airmanName,
-                    rank: anchor.airmanRank,
-                    flightName: anchor.airmanGroup,
-                    currentValue: anchor.currentVal,
-                  });
-                }}
-                className="w-full px-2.5 py-1.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100/70 dark:hover:bg-indigo-950/60 rounded-lg flex items-center justify-between transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-1.5">
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Custom...</span>
-                </span>
-                <span className="text-[10px] font-normal text-slate-400">New Disposal</span>
-              </button>
+            <div className="border-t border-slate-200 dark:border-slate-700/80 bg-slate-50/80 dark:bg-[#0f1628]">
+              {isAddingInlineCustom ? (
+                <div className="p-2 flex items-center gap-1.5">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={inlineCustomInput}
+                    onChange={(e) => setInlineCustomInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddInlineCustomDisposal();
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsAddingInlineCustom(false);
+                        setInlineCustomInput('');
+                      }
+                    }}
+                    placeholder="Custom disposal name..."
+                    className="flex-1 min-w-0 px-2.5 py-1.5 text-xs font-medium bg-white dark:bg-slate-800/90 border border-emerald-500/80 dark:border-emerald-500 rounded-lg text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                  <button
+                    type="button"
+                    disabled={!inlineCustomInput.trim()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleAddInlineCustomDisposal();
+                    }}
+                    className="px-2.5 py-1.5 text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 disabled:cursor-not-allowed text-white rounded-lg shadow-xs transition-colors cursor-pointer shrink-0"
+                  >
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    title="Cancel"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsAddingInlineCustom(false);
+                      setInlineCustomInput('');
+                    }}
+                    className="p-1.5 rounded-lg bg-slate-200 dark:bg-slate-700/80 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setInlineCustomInput('');
+                    setIsAddingInlineCustom(true);
+                  }}
+                  className="w-full px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-emerald-50/70 dark:hover:bg-slate-800/70 transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5 font-bold text-emerald-600 dark:text-emerald-400">
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Custom</span>
+                  </span>
+                  <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+                    + Add custom disposal
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         </>,

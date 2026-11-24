@@ -848,7 +848,10 @@ export function getStoredDutyMatrix(dateStr?: string): DutyRatioTable[] {
   return currentMatrix;
 }
 
-export function saveDutyMatrix(matrix: DutyRatioTable[]) {
+export function saveDutyMatrix(
+  matrix: DutyRatioTable[],
+  options?: { skipHistorySync?: boolean; targetDate?: string }
+) {
   try {
     const sanitizedMatrix = sanitizeDutyMatrix(matrix);
 
@@ -878,18 +881,23 @@ export function saveDutyMatrix(matrix: DutyRatioTable[]) {
     localStorage.setItem('baf_pending_sync', 'true');
     localStorage.setItem('baf_matrix_last_modified', String(Date.now()));
 
-    // Synchronize all versions in history so getDutyRatioVersionForDate does not revert to old matrix!
-    try {
-      const history = getDutyRatioHistory();
-      if (history.length > 0) {
-        const updatedHistory = history.map(v => ({
-          ...v,
-          matrix: sanitizedMatrix
-        }));
-        localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(updatedHistory));
+    // Synchronize only the active version in history (unless skipped) so past versions stay intact
+    if (!options?.skipHistorySync) {
+      try {
+        const history = getDutyRatioHistory();
+        if (history.length > 0) {
+          const activeVer = getDutyRatioVersionForDate(options?.targetDate);
+          const targetId = activeVer?.id || history[history.length - 1]?.id;
+          const updatedHistory = history.map(v =>
+            v.id === targetId
+              ? { ...v, matrix: sanitizedMatrix }
+              : v
+          );
+          localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(updatedHistory));
+        }
+      } catch (hErr) {
+        console.warn('Could not sync history versions:', hErr);
       }
-    } catch (hErr) {
-      console.warn('Could not sync history versions:', hErr);
     }
 
     // Persist to server app_settings only for default 155 UASU office so custom offices never overwrite 155 UASU server settings

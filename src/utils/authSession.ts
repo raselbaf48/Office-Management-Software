@@ -911,6 +911,7 @@ export const setUserSession = (airman: Airman, assignedRole: UserLoginRole = 'US
   };
 
   try {
+    sessionStorage.removeItem('baf_quota_popup_shown_in_session');
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
   } catch (e) {
     console.error('Failed to save user session:', e);
@@ -947,6 +948,7 @@ export const clearUserSession = (): void => {
     }
     sessionStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem('baf_user_role');
+    sessionStorage.removeItem('baf_quota_popup_shown_in_session');
   } catch (e) {
     console.error('Failed to clear user session:', e);
   }

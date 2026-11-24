@@ -1,66 +1,88 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CloudOff, Database, ExternalLink, X, CheckCircle2, Layers } from 'lucide-react';
-import { getQuotaConsoleUpgradeUrl, isFirestoreQuotaExceeded } from '../firebase';
+import { AlertTriangle, CloudOff, Database, X, CheckCircle2, Layers } from 'lucide-react';
+import { isFirestoreQuotaExceeded } from '../firebase';
 import { getPendingDeltaCount } from '../services/firebaseFirestoreService';
+
+const QUOTA_POPUP_SHOWN_SESSION_KEY = 'baf_quota_popup_shown_in_session';
+
+const hasShownQuotaPopupInSession = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.sessionStorage.getItem(QUOTA_POPUP_SHOWN_SESSION_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+const markQuotaPopupShownInSession = (): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(QUOTA_POPUP_SHOWN_SESSION_KEY, 'true');
+  } catch {}
+};
 
 interface QuotaPopupState {
   isOpen: boolean;
   source?: string;
   message?: string;
-  upgradeUrl?: string;
 }
 
 interface FirebaseQuotaPopupModalProps {
   /** Check immediately on mount if Firebase quota is already exceeded at login time */
   checkOnMount?: boolean;
+  onOpenChange?: (isOpen: boolean) => void;
 }
 
 export const FirebaseQuotaPopupModal: React.FC<FirebaseQuotaPopupModalProps> = ({
   checkOnMount = false,
+  onOpenChange,
 }) => {
   const [popup, setPopup] = useState<QuotaPopupState>({ isOpen: false });
   const [pendingCount, setPendingCount] = useState<number>(() => getPendingDeltaCount());
 
   useEffect(() => {
-    if (checkOnMount && isFirestoreQuotaExceeded()) {
+    onOpenChange?.(popup.isOpen);
+  }, [popup.isOpen, onOpenChange]);
+
+  useEffect(() => {
+    if (checkOnMount && isFirestoreQuotaExceeded() && !hasShownQuotaPopupInSession()) {
+      markQuotaPopupShownInSession();
       setPendingCount(getPendingDeltaCount());
       setPopup({
         isOpen: true,
         source: 'login',
         message: 'Firebase এর ফ্রি দৈনিক Quota শেষ হয়ে গেছে। অ্যাপ এখন Local Cloud Storage ব্যবহার করছে।',
-        upgradeUrl: getQuotaConsoleUpgradeUrl(),
       });
     }
   }, [checkOnMount]);
 
   useEffect(() => {
-    const handleLoginQuotaPopup = (e: Event) => {
-      const detail = (e as CustomEvent)?.detail || {};
+    const openOncePerLogin = (source: string, message: string) => {
+      if (hasShownQuotaPopupInSession()) return;
+      markQuotaPopupShownInSession();
       setPendingCount(getPendingDeltaCount());
       setPopup({
         isOpen: true,
-        source: detail.source || 'login',
-        message:
-          detail.message ||
-          'Firebase এর ফ্রি দৈনিক Quota শেষ হয়ে গেছে। এখন Local Cloud Storage ব্যবহার করা হচ্ছে।',
-        upgradeUrl: detail.upgradeUrl || getQuotaConsoleUpgradeUrl(),
+        source,
+        message,
       });
+    };
+
+    const handleLoginQuotaPopup = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail || {};
+      openOncePerLogin(
+        detail.source || 'login',
+        detail.message ||
+          'Firebase এর ফ্রি দৈনিক Quota শেষ হয়ে গেছে। এখন Local Cloud Storage ব্যবহার করা হচ্ছে।'
+      );
     };
 
     const handleRuntimeQuotaExceeded = (e: Event) => {
       const detail = (e as CustomEvent)?.detail || {};
-      setPendingCount(getPendingDeltaCount());
-      setPopup((prev) =>
-        prev.isOpen
-          ? prev
-          : {
-              isOpen: true,
-              source: 'runtime',
-              message:
-                detail.errorMsg ||
-                'Firebase ফ্রি Quota পূর্ণ হয়ে গেছে। আপনার পরিবর্তন Local Cloud Storage-এ সংরক্ষিত হচ্ছে।',
-              upgradeUrl: detail.upgradeUrl || getQuotaConsoleUpgradeUrl(),
-            }
+      openOncePerLogin(
+        'runtime',
+        detail.errorMsg ||
+          'Firebase ফ্রি Quota পূর্ণ হয়ে গেছে। আপনার পরিবর্তন Local Cloud Storage-এ সংরক্ষিত হচ্ছে।'
       );
     };
 
@@ -73,16 +95,25 @@ export const FirebaseQuotaPopupModal: React.FC<FirebaseQuotaPopupModalProps> = (
       setPendingCount(getPendingDeltaCount());
     };
 
+    const handleQuotaStatus = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail && detail.exceeded === false) {
+        setPopup({ isOpen: false });
+      }
+    };
+
     window.addEventListener('baf_login_quota_exceeded_popup', handleLoginQuotaPopup);
     window.addEventListener('baf_firebase_quota_exceeded', handleRuntimeQuotaExceeded);
     window.addEventListener('baf_pending_delta_updated', handleDeltaChange);
     window.addEventListener('baf_firebase_quota_recovered', handleQuotaRecovered);
+    window.addEventListener('baf_firebase_quota_status', handleQuotaStatus);
 
     return () => {
       window.removeEventListener('baf_login_quota_exceeded_popup', handleLoginQuotaPopup);
       window.removeEventListener('baf_firebase_quota_exceeded', handleRuntimeQuotaExceeded);
       window.removeEventListener('baf_pending_delta_updated', handleDeltaChange);
       window.removeEventListener('baf_firebase_quota_recovered', handleQuotaRecovered);
+      window.removeEventListener('baf_firebase_quota_status', handleQuotaStatus);
     };
   }, []);
 
@@ -166,25 +197,14 @@ export const FirebaseQuotaPopupModal: React.FC<FirebaseQuotaPopupModalProps> = (
           </div>
 
           {/* Actions */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-1">
+          <div className="pt-1">
             <button
               type="button"
               onClick={() => setPopup((p) => ({ ...p, isOpen: false }))}
-              className="flex-1 py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-sm transition-colors shadow-sm cursor-pointer"
+              className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-sm transition-colors shadow-sm cursor-pointer"
             >
               ঠিক আছে, Local Cloud ব্যবহার করুন
             </button>
-            {popup.upgradeUrl && (
-              <a
-                href={popup.upgradeUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3.5 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 font-bold text-xs transition-colors"
-              >
-                <span>Firebase Console</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
           </div>
         </div>
       </div>

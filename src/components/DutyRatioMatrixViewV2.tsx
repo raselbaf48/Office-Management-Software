@@ -7,6 +7,7 @@ import {
   saveDutyMatrix,
   resetDutyMatrixToDefault,
   getDutyRatioVersionForDate,
+  getDutyRatioHistory,
   DutyRatioVersion,
   saveDutyRatioVersion,
 } from '../data/officialDutyRatioMatrix';
@@ -71,17 +72,56 @@ const DAY_NAMES_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 
 const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+const hasDutyOrFlightRatioChanged = (prevMatrix: DutyRatioTable[], nextMatrix: DutyRatioTable[]): boolean => {
+  if (!Array.isArray(prevMatrix) || !Array.isArray(nextMatrix)) return true;
+  if (prevMatrix.length !== nextMatrix.length) return true;
+
+  const prevById = new Map(prevMatrix.map((t) => [t.id, t]));
+  for (let i = 0; i < nextMatrix.length; i++) {
+    const nextT = nextMatrix[i];
+    const prevT = prevById.get(nextT.id) || prevMatrix[i];
+    if (!prevT || prevT.id !== nextT.id) return true;
+    if (Boolean(prevT.isDisabled) !== Boolean(nextT.isDisabled)) return true;
+    if ((prevT.totalRequiredMonth || 0) !== (nextT.totalRequiredMonth || 0)) return true;
+    if ((prevT.totalRequiredDaily || 0) !== (nextT.totalRequiredDaily || 0)) return true;
+    if ((prevT.allotmentType || 'ratio') !== (nextT.allotmentType || 'ratio')) return true;
+    if (JSON.stringify(prevT.dailyRequirements || []) !== JSON.stringify(nextT.dailyRequirements || [])) return true;
+    if (JSON.stringify(prevT.eligibleFlights || []) !== JSON.stringify(nextT.eligibleFlights || [])) return true;
+    if (JSON.stringify(prevT.eligibleRanks || []) !== JSON.stringify(nextT.eligibleRanks || [])) return true;
+    if (JSON.stringify(prevT.flightTargets || {}) !== JSON.stringify(nextT.flightTargets || {})) return true;
+    if (JSON.stringify(prevT.weeklyFlightTargets || {}) !== JSON.stringify(nextT.weeklyFlightTargets || {})) return true;
+    if (JSON.stringify(prevT.data || {}) !== JSON.stringify(nextT.data || {})) return true;
+  }
+  return false;
+};
+
+const resolveInitialApplyDate = (): string => {
+  const history = getDutyRatioHistory();
+  const saved = localStorage.getItem('baf_duty_distribution_target_date');
+  if (saved) {
+    if (history.some((v) => v.applyFromDate === saved)) {
+      return saved;
+    }
+    const verForSaved = getDutyRatioVersionForDate(saved);
+    if (verForSaved?.applyFromDate) {
+      return verForSaved.applyFromDate;
+    }
+  }
+  if (history.length > 0) {
+    return history[history.length - 1].applyFromDate;
+  }
+  const now = new Date();
+  return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+};
+
 export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   role = 'ADMIN',
   onRequestAdminAccess,
   onConfirmNavigate,
 }) => {
-  const [targetDate, setTargetDate] = useState(() => {
-    const saved = localStorage.getItem('baf_duty_distribution_target_date');
-    if (saved) return saved;
-    const now = new Date();
-    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-  });
+  const [savedApplyDate, setSavedApplyDate] = useState<string>(() => resolveInitialApplyDate());
+  const [targetDate, setTargetDate] = useState<string>(() => resolveInitialApplyDate());
+  const [applyDateGuardMsg, setApplyDateGuardMsg] = useState<string | null>(null);
 
   const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => {
     const ver = getDutyRatioVersionForDate(targetDate);
@@ -195,11 +235,34 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     } catch {}
   }, [viewMode]);
 
-  useEffect(() => {
-    localStorage.setItem('baf_duty_distribution_target_date', targetDate);
-  }, [targetDate]);
-
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
+
+  // Track whether Duty / Flight / Trade-wise duties themselves changed
+  const hasDutyRatioChanges = useMemo(() => {
+    try {
+      const savedParsed: DutyRatioTable[] = JSON.parse(savedMatrixJson);
+      return hasDutyOrFlightRatioChanged(savedParsed, matrix);
+    } catch {
+      return JSON.stringify(matrix) !== savedMatrixJson;
+    }
+  }, [matrix, savedMatrixJson]);
+
+  // Keep localStorage aligned with persisted Apply Date (never write un-saved date changes)
+  useEffect(() => {
+    if (savedApplyDate) {
+      localStorage.setItem('baf_duty_distribution_target_date', savedApplyDate);
+    }
+  }, [savedApplyDate]);
+
+  // If user reverted Duty/Flt/Trade changes back to original, revert temporary new targetDate too
+  useEffect(() => {
+    if (!hasDutyRatioChanges && targetDate !== savedApplyDate) {
+      const history = getDutyRatioHistory();
+      if (!history.some((v) => v.applyFromDate === targetDate)) {
+        setTargetDate(savedApplyDate);
+      }
+    }
+  }, [hasDutyRatioChanges, targetDate, savedApplyDate]);
 
   // Unsaved changes tracking & navigation guard popup state
   const hasUnsavedChanges = useMemo(() => {
@@ -258,18 +321,39 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const handleRequestDateChange = (nextDate: string) => {
-    if (nextDate === targetDate) return;
+    if (!nextDate || nextDate === targetDate) return;
+    const history = getDutyRatioHistory();
+    const existingVersion = history.find((v) => v.applyFromDate === nextDate);
+
+    // If Duty / Flight / Trade-wise duty was NOT changed, do not allow setting a brand new Apply Date
+    if (!hasDutyRatioChanges && !existingVersion) {
+      setApplyDateGuardMsg(
+        `Duty / Flight / Trade-wise duty change না করলে নতুন Apply Date সেট হবে না — আগের Apply Date (${formatShortDate(savedApplyDate)})-ই কার্যকর থাকবে।`
+      );
+      setTimeout(() => setApplyDateGuardMsg(null), 4500);
+      return;
+    }
+
+    // When Duty / Flight / Trade-wise duty HAS changed, allow setting the new Apply Date without losing pending edits
+    if (hasDutyRatioChanges) {
+      setApplyDateGuardMsg(null);
+      setTargetDate(nextDate);
+      return;
+    }
+
+    // Switching to an existing saved ratio version when no duty ratio changes are pending
     if (hasUnsavedChanges) {
       setUnsavedPromptAction({ type: 'CHANGE_DATE', nextDate });
       return;
     }
     setTargetDate(nextDate);
+    setSavedApplyDate(nextDate);
     loadMatrixForDate(nextDate);
   };
 
   const activeVersion = useMemo(() => {
-    return getDutyRatioVersionForDate(targetDate);
-  }, [targetDate, savedMatrixJson]);
+    return getDutyRatioVersionForDate(savedApplyDate || targetDate);
+  }, [savedApplyDate, targetDate, savedMatrixJson]);
 
   const [settingsTab, setSettingsTab] = useState<'Overall' | 'Mechanics' | 'Avionics' | 'GCS' | null>(null);
   const [editingCalendar, setEditingCalendar] = useState<{tableIdx: number, flight: FlightName} | null>(null);
@@ -537,10 +621,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   };
 
   const handleSave = () => {
+    const effectiveApplyDate = hasDutyRatioChanges ? targetDate : savedApplyDate;
+
     // 1. Persist disposals & manpower if edited
     const valStr = JSON.stringify(draftDisposals);
     localStorage.setItem('baf_duty_distribution_disposals_master', valStr);
-    const dateKey = targetDate || 'default';
+    const dateKey = effectiveApplyDate || 'default';
     const storageKey = 'baf_duty_distribution_disposals_' + dateKey;
     localStorage.setItem(storageKey, valStr);
     const pendingKey = 'baf_pending_disposals_sync_baf_duty_distribution_disposals_master';
@@ -556,19 +642,31 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
       localStorage.setItem('baf_duty_distribution_manpower', JSON.stringify(draftManpower));
     }
 
-    // 2. Persist matrix & version history
-    saveDutyMatrix(matrix);
-    const formatted = formatShortDate(targetDate);
-    const title = `All Duty Ratio (${formatted})`;
-    saveDutyRatioVersion({
-      applyFromDate: targetDate,
-      title,
-      matrix,
-      notes: `Saved for Apply From: ${targetDate}`,
-    });
-
-    // 3. Push to cloud
-    pushDutyListToCloud(matrix).catch(err => console.warn('[DutyRatioMatrixViewV2] Cloud sync error:', err));
+    // 2. Only create/update an Apply Date ratio version if Duty / Flight / Trade-wise duty actually changed
+    if (hasDutyRatioChanges) {
+      saveDutyMatrix(matrix, { skipHistorySync: true, targetDate: effectiveApplyDate });
+      const formatted = formatShortDate(effectiveApplyDate);
+      const title = `All Duty Ratio (${formatted})`;
+      saveDutyRatioVersion({
+        applyFromDate: effectiveApplyDate,
+        title,
+        matrix,
+        notes: `Saved for Apply From: ${effectiveApplyDate}`,
+      });
+      setSavedApplyDate(effectiveApplyDate);
+      localStorage.setItem('baf_duty_distribution_target_date', effectiveApplyDate);
+      pushDutyListToCloud(matrix).catch(err => console.warn('[DutyRatioMatrixViewV2] Cloud sync error:', err));
+    } else {
+      // Continue with previous Apply Date — do NOT advance Apply Date or create a new version
+      if (targetDate !== savedApplyDate) {
+        setTargetDate(savedApplyDate);
+      }
+      localStorage.setItem('baf_duty_distribution_target_date', savedApplyDate);
+      if (JSON.stringify(matrix) !== savedMatrixJson) {
+        saveDutyMatrix(matrix, { targetDate: savedApplyDate });
+        pushDutyListToCloud(matrix).catch(err => console.warn('[DutyRatioMatrixViewV2] Cloud sync error:', err));
+      }
+    }
 
     // 4. Mark clean
     setSavedMatrixJson(JSON.stringify(matrix));
@@ -584,6 +682,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     try {
       setMatrix(JSON.parse(savedMatrixJson));
       setDraftDisposals(JSON.parse(savedDisposalsJson));
+      setTargetDate(savedApplyDate);
+      setApplyDateGuardMsg(null);
       if (typeof window !== 'undefined') {
         (window as any).__bafDutyRatioHasUnsavedChanges = false;
       }
@@ -847,6 +947,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             </button>
           )}
         </div>
+        {applyDateGuardMsg && (
+          <div className="mt-2 px-3 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-amber-800 dark:text-amber-300 text-[11px] font-semibold flex items-center gap-1.5 shadow-xs animate-fadeIn">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+            <span>{applyDateGuardMsg}</span>
+          </div>
+        )}
       </div>
 
       {/* MONTHLY (31 DAYS) vs WEEKLY (7 DAYS) TOP OPTION */}
@@ -2296,6 +2402,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
         currentMatrix={matrix}
         onSelectVersion={(selected) => {
           setTargetDate(selected.applyFromDate);
+          setSavedApplyDate(selected.applyFromDate);
+          localStorage.setItem('baf_duty_distribution_target_date', selected.applyFromDate);
           if (selected.matrix && selected.matrix.length > 0) {
             setMatrix(selected.matrix);
             setSavedMatrixJson(JSON.stringify(selected.matrix));
@@ -2348,6 +2456,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     onConfirmNavigate?.(action.targetTab);
                   } else if (action.type === 'CHANGE_DATE') {
                     setTargetDate(action.nextDate);
+                    setSavedApplyDate(action.nextDate);
                     loadMatrixForDate(action.nextDate);
                   }
                 }}
@@ -2365,6 +2474,7 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
                     onConfirmNavigate?.(action.targetTab);
                   } else if (action.type === 'CHANGE_DATE') {
                     setTargetDate(action.nextDate);
+                    setSavedApplyDate(action.nextDate);
                     loadMatrixForDate(action.nextDate);
                   }
                 }}
