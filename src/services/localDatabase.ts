@@ -371,6 +371,9 @@ const IGNORED_SETTING_KEYS = new Set<string>([
   'baf_last_synced_data_hash',
   'baf_pwa_active_office_meta',
   'baf_linked_firebase_target',
+  'baf_assign_duty_pending_draft_v1',
+  'baf_duty_ratio_unsaved_draft_v1',
+  'baf_auto_logout_resume_ctx_v1',
 ]);
 
 function isSyncableSettingKey(key: string): boolean {
@@ -502,6 +505,7 @@ export class LocalDatabaseEngine {
   private activeSyncPromise: Promise<boolean> | null = null;
   public isInitialPullDone: boolean = false;
   private isPushing: boolean = false;
+  private activePushPromise: Promise<boolean> | null = null;
   private saveTimeout: any = null;
   private scheduledMode: 'single' | 'multi' | null = null;
   private lastSyncedDbStr: string = '';
@@ -517,6 +521,7 @@ export class LocalDatabaseEngine {
     this.detachManifestListener();
     this.isInitialPullDone = false;
     this.activeSyncPromise = null;
+    this.activePushPromise = null;
     this.isFirebaseSyncing = false;
     lastSyncedSettingsMap.clear();
     lastSyncedMatrixRaw = '';
@@ -636,10 +641,17 @@ export class LocalDatabaseEngine {
         }
       });
 
-      // Flush pending changes to Firebase right before app hides/closes or logs out
+      // Flush pending changes to local storage & Firebase right before app hides/closes or logs out
       const flushBeforeClose = () => {
-        if (this.saveTimeout || this.hasUnsyncedDifferences(this.db)) {
-          this.saveToFirebase(this.db, true);
+        if (this.saveTimeout) {
+          clearTimeout(this.saveTimeout);
+          this.saveTimeout = null;
+          this.scheduledMode = null;
+        }
+        const captured = this.captureCurrentDiffIntoPendingQueue();
+        if (captured || this.hasUnsyncedDifferences(this.db)) {
+          this.saveToStorage(this.db, false, false, false);
+          void this.saveToFirebase(this.db, true);
         }
       };
       window.addEventListener('visibilitychange', () => {
@@ -2427,6 +2439,9 @@ export class LocalDatabaseEngine {
    */
   public async flushPendingDeltasOnlyToFirebase(reason: string = 'delta_sync'): Promise<boolean> {
     if (typeof window === 'undefined') return false;
+    if (this.activePushPromise) {
+      await this.activePushPromise.catch(() => false);
+    }
     if (this.isPushing) return false;
 
     this.captureCurrentDiffIntoPendingQueue();
@@ -2511,93 +2526,133 @@ export class LocalDatabaseEngine {
     broadcastSyncState();
     emitSyncProgress(15, 'Backing up changed items to Firebase...');
 
-    try {
-      const changedCollections: string[] = [];
+    const pushPromise = (async (): Promise<boolean> => {
+      try {
+        const changedCollections: string[] = [];
 
-      if (airmenList.length > 0) {
-        await pushAirmenToFirebase(airmenList);
-        changedCollections.push('airmen');
-      }
-      emitSyncProgress(40, 'Backing up changed duty assignments...');
-      if (assignDelList.length > 0) {
-        await softDeleteDutyAssignmentsInFirebase(assignDelList);
-        changedCollections.push('duty_assignments');
-      }
-      if (assignUpsertList.length > 0) {
-        await pushDutyAssignmentsToFirebase(assignUpsertList);
-        changedCollections.push('duty_assignments');
-      }
-      emitSyncProgress(65, 'Backing up changed history & user profiles...');
-      if (histList.length > 0) {
-        await pushParadeStatesToFirebase(histList);
-        changedCollections.push('parade_states');
-      }
-      if (userList.length > 0) {
-        await pushUserProfilesToFirebase(userList);
-        changedCollections.push('user_profiles');
-      }
-      emitSyncProgress(85, 'Backing up changed settings...');
-      if (settingsList.length > 0) {
-        await pushAppSettingsToFirebase(settingsList);
-        settingsList.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, s.value));
-        changedCollections.push('app_settings');
-      }
+        if (airmenList.length > 0) {
+          await pushAirmenToFirebase(airmenList);
+          changedCollections.push('airmen');
+        }
+        emitSyncProgress(40, 'Backing up changed duty assignments...');
+        if (assignDelList.length > 0) {
+          await softDeleteDutyAssignmentsInFirebase(assignDelList);
+          changedCollections.push('duty_assignments');
+        }
+        if (assignUpsertList.length > 0) {
+          await pushDutyAssignmentsToFirebase(assignUpsertList);
+          changedCollections.push('duty_assignments');
+        }
+        emitSyncProgress(65, 'Backing up changed history & user profiles...');
+        if (histList.length > 0) {
+          await pushParadeStatesToFirebase(histList);
+          changedCollections.push('parade_states');
+        }
+        if (userList.length > 0) {
+          await pushUserProfilesToFirebase(userList);
+          changedCollections.push('user_profiles');
+        }
+        emitSyncProgress(85, 'Backing up changed settings...');
+        if (settingsList.length > 0) {
+          await pushAppSettingsToFirebase(settingsList);
+          settingsList.forEach((s) => lastSyncedSettingsMap.set(s.settingKey, s.value));
+          changedCollections.push('app_settings');
+        }
 
-      const extraMeta = this.getManifestExtraMeta(this.db);
-      if (changedCollections.length > 0) {
-        await publishSyncManifest(Array.from(new Set(changedCollections)), reason, extraMeta);
+        const extraMeta = this.getManifestExtraMeta(this.db);
+        if (changedCollections.length > 0) {
+          await publishSyncManifest(Array.from(new Set(changedCollections)), reason, extraMeta);
+        }
+
+        clearPendingDeltas({
+          airmenIds: Object.keys(pending.airmen || {}),
+          assignmentDocIds: [...Array.from(assignToPushMap.keys()), ...Array.from(assignToDelMap.keys())],
+          historyIds: Object.keys(pending.history || {}),
+          userIds: userDocIdsToClear,
+          settingKeys: Object.keys(pending.settings || {}),
+        });
+
+        this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
+        const curMatrix = window.localStorage.getItem('baf_official_duty_matrix_v4');
+        if (curMatrix) lastSyncedMatrixRaw = curMatrix;
+
+        const nowIso = new Date().toISOString();
+        this.lastPullAt = nowIso;
+        window.localStorage.setItem(getActiveLastPullKey(), nowIso);
+        window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
+        window.localStorage.removeItem('baf_pending_sync');
+        firebaseConnected = true;
+        firebaseLastSyncTime = nowIso;
+        window.localStorage.setItem('baf_cloud_connected', 'true');
+        window.localStorage.setItem('baf_cloud_last_sync', nowIso);
+
+        emitSyncProgress(100, 'Backed up changed items to Firebase!');
+        addSyncLog({
+          timestamp: nowIso,
+          type: 'PUSH',
+          status: 'SUCCESS',
+          message: `Backed up ONLY changed items (${airmenList.length} airmen, ${
+            assignUpsertList.length + assignDelList.length
+          } duties, ${histList.length} logs, ${settingsList.length} settings).`,
+        });
+        return true;
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        const isQuota = isQuotaExceededError(err) || isFirestoreQuotaExceeded();
+        addSyncLog({
+          timestamp: new Date().toISOString(),
+          type: 'PUSH',
+          status: 'ERROR',
+          message: isQuota
+            ? 'Firebase quota exceeded — changes safely saved in Local Cloud queue.'
+            : `Firebase push error: ${msg}`,
+        });
+        window.localStorage.setItem('baf_pending_sync', 'true');
+        return false;
+      } finally {
+        this.isPushing = false;
+        this.activePushPromise = null;
+        isSyncingActive = false;
+        broadcastSyncState();
       }
+    })();
 
-      clearPendingDeltas({
-        airmenIds: Object.keys(pending.airmen || {}),
-        assignmentDocIds: [...Array.from(assignToPushMap.keys()), ...Array.from(assignToDelMap.keys())],
-        historyIds: Object.keys(pending.history || {}),
-        userIds: userDocIdsToClear,
-        settingKeys: Object.keys(pending.settings || {}),
-      });
+    this.activePushPromise = pushPromise;
+    return pushPromise;
+  }
 
-      this.lastSyncedDbStr = this.stripTimestampForCompare(this.db);
-      const curMatrix = window.localStorage.getItem('baf_official_duty_matrix_v4');
-      if (curMatrix) lastSyncedMatrixRaw = curMatrix;
-
-      const nowIso = new Date().toISOString();
-      this.lastPullAt = nowIso;
-      window.localStorage.setItem(getActiveLastPullKey(), nowIso);
-      window.localStorage.setItem(LAST_FIREBASE_PULL_KEY, nowIso);
-      window.localStorage.removeItem('baf_pending_sync');
-      firebaseConnected = true;
-      firebaseLastSyncTime = nowIso;
-      window.localStorage.setItem('baf_cloud_connected', 'true');
-      window.localStorage.setItem('baf_cloud_last_sync', nowIso);
-
-      emitSyncProgress(100, 'Backed up changed items to Firebase!');
-      addSyncLog({
-        timestamp: nowIso,
-        type: 'PUSH',
-        status: 'SUCCESS',
-        message: `Backed up ONLY changed items (${airmenList.length} airmen, ${
-          assignUpsertList.length + assignDelList.length
-        } duties, ${histList.length} logs, ${settingsList.length} settings).`,
-      });
-      return true;
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      const isQuota = isQuotaExceededError(err) || isFirestoreQuotaExceeded();
-      addSyncLog({
-        timestamp: new Date().toISOString(),
-        type: 'PUSH',
-        status: 'ERROR',
-        message: isQuota
-          ? 'Firebase quota exceeded — changes safely saved in Local Cloud queue.'
-          : `Firebase push error: ${msg}`,
-      });
-      window.localStorage.setItem('baf_pending_sync', 'true');
-      return false;
-    } finally {
-      this.isPushing = false;
-      isSyncingActive = false;
-      broadcastSyncState();
+  /**
+   * Synchronously captures all in-memory & localStorage changes before logout/minimize
+   * and flushes deltas to Firebase & Local Cloud server within a bounded timeout.
+   */
+  public async flushBeforeLogout(timeoutMs: number = 1800): Promise<void> {
+    if (typeof window === 'undefined') return;
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+      this.scheduledMode = null;
     }
+
+    const hadDiff = this.captureCurrentDiffIntoPendingQueue();
+    if (hadDiff) {
+      try {
+        window.localStorage.setItem(getActiveDbStorageKey(), JSON.stringify(this.db));
+      } catch {}
+    }
+
+    const tasks: Promise<any>[] = [];
+    if (hasPendingDeltas()) {
+      tasks.push(this.flushPendingDeltasOnlyToFirebase('logout_flush').catch(() => false));
+    } else if (this.activePushPromise) {
+      tasks.push(this.activePushPromise.catch(() => false));
+    }
+
+    if (hadDiff && isDefault155UasuOffice()) {
+      tasks.push(this.pushAllToLocalServer().catch(() => false));
+    }
+
+    if (tasks.length === 0) return;
+    await Promise.race([Promise.allSettled(tasks), delay(timeoutMs)]);
   }
 
   /**

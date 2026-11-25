@@ -14,8 +14,20 @@ import { FlightDutyRatioModal } from './FlightDutyRatioModal';
 import { EntryHistoryModal } from './EntryHistoryModal';
 import { AssignDutyModal } from './AssignDutyModal';
 import { SignatureConfigModal } from './SignatureConfigModal';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice, getOfficeScopedStorageKey } from '../firebase';
 import { getBiodataTrades } from '../utils/tradeList';
+
+const getSavedAssignDraftCount = (): number => {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = window.localStorage.getItem(getOfficeScopedStorageKey('baf_assign_duty_pending_draft_v1'));
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.pendingOps) ? parsed.pendingOps.length : 0;
+  } catch {
+    return 0;
+  }
+};
 
 interface DashboardParadeStateProps {
   role?: UserRole;
@@ -90,10 +102,32 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
 
   // Interactive Batch Assign Duty Modal State
   const [showAssignModal, setShowAssignModal] = useState<boolean>(false);
+  const [assignDraftCount, setAssignDraftCount] = useState<number>(() => getSavedAssignDraftCount());
 
   // Flight Duty Ratio / Quota States
   const [showRatioModal, setShowRatioModal] = useState<boolean>(false);
   const [ratioRefreshTrigger, setRatioRefreshTrigger] = useState<number>(0);
+
+  useEffect(() => {
+    const refreshDraft = () => setAssignDraftCount(getSavedAssignDraftCount());
+    const handleReopenAssign = () => {
+      refreshDraft();
+      setShowAssignModal(true);
+    };
+    window.addEventListener('baf_assign_draft_changed', refreshDraft);
+    window.addEventListener('baf_reopen_assign_duty_modal', handleReopenAssign);
+    // Check if App flagged an auto-logout reopen before DashboardParadeState mounted
+    try {
+      if (window.sessionStorage.getItem('baf_reopen_assign_after_login') === 'true') {
+        window.sessionStorage.removeItem('baf_reopen_assign_after_login');
+        setShowAssignModal(true);
+      }
+    } catch {}
+    return () => {
+      window.removeEventListener('baf_assign_draft_changed', refreshDraft);
+      window.removeEventListener('baf_reopen_assign_duty_modal', handleReopenAssign);
+    };
+  }, []);
 
   // Listen to global duty ratio updates across modals and views
   useEffect(() => {
@@ -217,11 +251,20 @@ export const DashboardParadeState: React.FC<DashboardParadeStateProps> = ({
           {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && (
             <button
               onClick={() => setShowAssignModal(true)}
-              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs px-3.5 py-2 rounded-lg shadow-xs transition-all"
+              className={`flex items-center space-x-1.5 font-black text-xs px-3.5 py-2 rounded-lg shadow-xs transition-all ${
+                assignDraftCount > 0
+                  ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+              }`}
               title="Assign or update duty (GD, Halishahar, Taskforce, etc.)"
             >
               <Plus className="w-4 h-4 stroke-[3]" />
               <span>Assign Duty / Activity</span>
+              {assignDraftCount > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded bg-white/20 text-[10px] font-black">
+                  Draft ({assignDraftCount})
+                </span>
+              )}
             </button>
           )}
 

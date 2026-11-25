@@ -1045,16 +1045,16 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  // Helper to render airman list inside multi-day table cells (without flight tags)
  const renderAirmanColumnList = (list: { airman: Airman, notes?: string, previousDutyCode?: string, previousDutyName?: string, dutyName?: string }[], showNotes: boolean = false) => {
     if (!list || list.length === 0) {
-      return <div className="text-center text-slate-400 font-normal py-1">-</div>;
+      return <div className="text-center text-slate-400 font-normal py-1 print:py-0">-</div>;
     }
     return (
-      <ol className="space-y-0.5 text-[11px] leading-snug font-normal text-left">
+      <ol className="space-y-0.5 text-[11px] print:text-[inherit] leading-snug print:leading-[1.15] font-normal text-left">
         {list.map((item, idx) => {
           const shortOffNote = showNotes
             ? formatDutyOffShortName(item.previousDutyCode, item.previousDutyName, item.dutyName || item.notes)
             : '';
           return (
-            <li key={idx} className="whitespace-nowrap">
+            <li key={idx} className="whitespace-nowrap print:whitespace-normal print:break-words">
               {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
               {shortOffNote ? ' - ' + shortOffNote : ''}
             </li>
@@ -1426,15 +1426,81 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
       </div>
 
  {/* SCROLLABLE DOCUMENT CONTAINER */}
- <div id="print-parade-state-content" className="flex-1 overflow-y-auto p-4 sm:p-8 flex justify-center print:p-0 print:overflow-visible print:block">
- <div className="space-y-6 w-full max-w-none 2xl:w-[98%] print:w-auto mx-auto print:mx-0 print:border-none print:rounded-none print:shadow-none bg-transparent">
+ <div id="print-parade-state-content" className="flex-1 overflow-y-auto p-4 sm:p-8 flex justify-center print:p-0 print:overflow-visible print:block print:w-full">
+ <div className="space-y-6 w-full max-w-none 2xl:w-[98%] print:w-full print:max-w-none mx-auto print:mx-0 print:border-none print:rounded-none print:shadow-none bg-transparent">
  {/* PRINT STYLES */}
  <style>{`
+            @page parade-state-landscape {
+              size: A4 landscape;
+              margin: 5mm 6mm;
+            }
             @media print {
               @page {
- size: A4 landscape;
- margin: 8mm;
- }
+                size: A4 landscape;
+                margin: 5mm 6mm;
+              }
+              #print-parade-state-content,
+              #official-parade-document {
+                page: parade-state-landscape;
+                width: 100% !important;
+                max-width: 100% !important;
+                background: #ffffff !important;
+                background-color: #ffffff !important;
+                color: #000000 !important;
+              }
+              #official-parade-document h1,
+              #official-parade-document h2,
+              #official-parade-document h3,
+              #official-parade-document th,
+              #official-parade-document td,
+              #official-parade-document li,
+              #official-parade-document div,
+              #official-parade-document span {
+                color: #000000 !important;
+              }
+              #official-parade-document tr.text-red-600,
+              #official-parade-document tr.text-red-600 td,
+              #official-parade-document tr.text-red-600 li,
+              #official-parade-document tr.text-red-600 div {
+                color: #dc2626 !important;
+              }
+              #official-parade-document table,
+              #official-parade-document th,
+              #official-parade-document td {
+                border-color: #000000 !important;
+              }
+              #official-parade-document table.parade-multiday-table {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                table-layout: fixed !important;
+                border-collapse: collapse !important;
+                font-size: var(--print-table-font, 8.5px) !important;
+              }
+              #official-parade-document table.parade-multiday-table col {
+                width: var(--print-col-w) !important;
+              }
+              #official-parade-document table.parade-multiday-table thead {
+                display: table-header-group;
+              }
+              #official-parade-document table.parade-multiday-table th {
+                white-space: normal !important;
+                word-break: normal !important;
+                overflow-wrap: break-word !important;
+                line-height: 1.15 !important;
+                padding: 3px 2px !important;
+                font-size: var(--print-head-font, 8.5px) !important;
+                vertical-align: middle !important;
+              }
+              #official-parade-document table.parade-multiday-table td {
+                padding: 2.5px 3px !important;
+                vertical-align: middle !important;
+                overflow-wrap: break-word !important;
+              }
+              #official-parade-document table.parade-multiday-table tbody tr {
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+              }
               body { 
                  background: white !important; 
                  color: black !important;
@@ -1454,7 +1520,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  {/* OFFICIAL PARADE DOCUMENT SHEET */}
  <div
  id="official-parade-document"
- className="bg-white dark:bg-slate-900 text-black dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto"
+ className="bg-white dark:bg-slate-900 text-black dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:bg-white print:text-black print:border-none print:rounded-none print:shadow-none print:p-0 print:overflow-visible print:w-full"
  >
  {loading ? (
  <div className="py-20 text-center text-slate-400">
@@ -1543,31 +1609,75 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  });
  };
  
- return (
-    <div className="overflow-x-auto my-3">
+ const showBaseSec = hasData('Base Security Duty');
+ const showBtf = hasData('Base Taskforce Duty');
+ const showNtf = hasData('Najirpara Taskforce Duty');
+ const showAirfield = hasData('Airfield');
+ const showHalishahar = hasData('Halishahar Duty');
+ const showBakeBite = hasData('Bake & Bite');
+ const showTdy = hasData('Tdy');
+ const showLeave = hasData('Leave');
 
- <table className="no-zebra no-zebra w-full print:min-w-0 text-center align-middle border-collapse border-2 border-slate-900 dark:border-slate-600 text-[11px]">
+ const flexColWeights: number[] = [
+ ...(showBaseSec ? [1.0] : []),
+ ...(showBtf ? [1.0] : []),
+ ...(showNtf ? [1.05] : []),
+ ...(showAirfield ? [0.95] : []),
+ ...(showHalishahar ? [0.95] : []),
+ ...(showBakeBite ? [0.9] : []),
+ ...(showTdy ? [0.8] : []),
+ ...customKeysArray.map(() => 0.9),
+ ...(showLeave ? [0.95] : []),
+ 0.85, // IDA Morning
+ 0.85, // IDA Afternoon
+ 0.85, // IDA Night
+ 1.4,  // Duty Off
+ 1.25, // On Parade
+ ];
+ const totalCols = 2 + flexColWeights.length;
+ const dateColPct = totalCols >= 15 ? 3.7 : 4.0;
+ const dayColPct = totalCols >= 15 ? 5.1 : 5.5;
+ const remainingPct = 100 - dateColPct - dayColPct;
+ const totalFlexWeight = flexColWeights.reduce((acc, w) => acc + w, 0) || 1;
+ const flexColPcts = flexColWeights.map((w) => Number(((w / totalFlexWeight) * remainingPct).toFixed(2)));
+ const printTableFont = totalCols <= 12 ? '9px' : totalCols <= 15 ? '8px' : '7.5px';
+ const printHeadFont = totalCols <= 12 ? '9px' : totalCols <= 15 ? '8px' : '7.2px';
+
+ return (
+    <div className="overflow-x-auto my-3 print:overflow-visible print:my-1">
+
+ <table
+   className="parade-multiday-table no-zebra w-full print:min-w-0 text-center align-middle border-collapse border-2 border-slate-900 dark:border-slate-600 text-[11px]"
+   style={{ '--print-table-font': printTableFont, '--print-head-font': printHeadFont } as React.CSSProperties}
+ >
+ <colgroup>
+   <col style={{ '--print-col-w': `${dateColPct}%` } as React.CSSProperties} />
+   <col style={{ '--print-col-w': `${dayColPct}%` } as React.CSSProperties} />
+   {flexColPcts.map((pct, i) => (
+     <col key={i} style={{ '--print-col-w': `${pct}%` } as React.CSSProperties} />
+   ))}
+ </colgroup>
  <thead>
  <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-slate-600">
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Date</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Day</th>
- {hasData('Base Security Duty') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
- {hasData('Base Taskforce Duty') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
- {hasData('Najirpara Taskforce Duty') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
- {hasData('Airfield') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
- {hasData('Halishahar Duty') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
- {hasData('Bake & Bite') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
- {hasData('Tdy') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Tdy</th>}
- {customKeysArray.map(key => <th key={key} className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>{key}</th>)}
- {hasData('Leave') && <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Leave</th>}
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>Duty Off</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Date</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Day</th>
+ {showBaseSec && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Base Security Duty</th>}
+ {showBtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
+ {showNtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
+ {showAirfield && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Airfield Duty</th>}
+ {showHalishahar && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
+ {showBakeBite && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Bake & Bite</th>}
+ {showTdy && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Tdy</th>}
+ {customKeysArray.map(key => <th key={key} className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>{key}</th>)}
+ {showLeave && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Leave</th>}
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Duty Off</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
  </tr>
  <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-slate-600">
- <th className="border border-slate-800 dark:border-slate-700 p-1 text-center align-middle">Morning</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1 text-center align-middle">Afternoon</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1 text-center align-middle">Night</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Morning</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Afternoon</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Night</th>
  </tr>
  </thead>
  <tbody>
@@ -1645,10 +1755,10 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  isWeekend ? 'text-red-600 font-semibold' : 'text-slate-900 dark:text-white'
  }`}
  >
- <td className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-nowrap font-bold text-center align-middle">
+ <td className="border border-slate-800 dark:border-slate-700 p-1.5 print:px-0.5 print:py-1 whitespace-nowrap font-bold text-center align-middle">
  {formatDateSuperShort(dStr)}
  </td>
- <td className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-nowrap text-center align-middle">
+ <td className="border border-slate-800 dark:border-slate-700 p-1.5 print:px-0.5 print:py-1 whitespace-nowrap text-center align-middle">
  {dayName}
  </td>
  {hasData('Base Security Duty') && <td className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle">
@@ -1727,7 +1837,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  </div>
 
  {/* SUMMARY MATRIX TABLE: EXACT SINGLE-ROW FORMAT FOR SELECTED FLIGHT / OVERALL */}
- <div className="overflow-x-auto my-1">
+ <div className="overflow-x-auto my-1 print:overflow-visible">
  <table
  className="w-full text-center align-middle border-collapse border-2 border-slate-900 dark:border-slate-600"
  style={{ fontFamily: 'Arial, sans-serif', fontSize: '10px' }}

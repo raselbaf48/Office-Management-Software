@@ -92,6 +92,7 @@ import { localDb } from './services/localDatabase';
 import {
   isFirebaseConfigured,
   getActiveOfficeIdentity,
+  getOfficeScopedStorageKey,
   updateOfficeTelemetryUserCount,
   syncBrowserTabIdentity,
   isDefault155UasuOffice,
@@ -99,6 +100,11 @@ import {
 } from './firebase';
 import { setLastUsedPortal } from './services/portalPreferenceService';
 import { initGoogleDriveAuth } from './services/googleDriveService';
+
+const INACTIVITY_AUTO_LOGOUT_MS = 10 * 60 * 1000; // 10 minutes continuous minimize or inactivity
+const LAST_ACTIVE_AT_KEY = 'baf_last_active_at';
+const MINIMIZED_AT_KEY = 'baf_minimized_at';
+const AUTO_LOGOUT_RESUME_CTX_KEY = 'baf_auto_logout_resume_ctx_v1';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<SidebarTab>('overview');
@@ -339,115 +345,6 @@ export default function App() {
     
   };
 
-  const handleUserLogout = () => {
-    localDb.saveToFirebase(localDb.getDb(), true).catch(() => {});
-    localDb.detachManifestListener();
-    clearUserSession();
-    setUserSession(null);
-    setJustLoggedIn(false);
-    setIsQuotaPopupOpen(false);
-    setHasSeenNotice(false);
-    handleRoleChange('USER');
-    setLastUsedPortal('Office');
-    syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
-  };
-
-  const logoutRef = useRef(handleUserLogout);
-  logoutRef.current = handleUserLogout;
-  const internalUiPauseUntilRef = useRef<number>(0);
-
-  // Require re-login whenever the user exits/closes/reloads the app (Web, Standalone PWA, or Capacitor APK)
-  useEffect(() => {
-    if (!userSession) return;
-
-    const markInternalUiPause = () => {
-      internalUiPauseUntilRef.current = Date.now() + 60_000;
-    };
-    const clearInternalUiPauseSoon = () => {
-      setTimeout(() => {
-        internalUiPauseUntilRef.current = 0;
-      }, 600);
-    };
-
-    const handleDocumentClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (!target) return;
-      if (
-        (target.tagName === 'INPUT' && (target as HTMLInputElement).type === 'file') ||
-        target.closest('label')?.querySelector('input[type="file"]')
-      ) {
-        markInternalUiPause();
-      }
-    };
-
-    const handleBeforePrint = () => markInternalUiPause();
-    const handleAfterPrint = () => clearInternalUiPauseSoon();
-    const handleWindowFocus = () => clearInternalUiPauseSoon();
-
-    const handlePageExit = () => {
-      clearUserSession();
-    };
-
-    const handlePageShow = (e: PageTransitionEvent) => {
-      if (e.persisted || !getCurrentUserSession()) {
-        logoutRef.current();
-      }
-    };
-
-    const isStandalonePwa =
-      typeof window !== 'undefined' &&
-      (window.matchMedia?.('(display-mode: standalone)')?.matches ||
-        (window.navigator as any)?.standalone === true);
-
-    const handleVisibilityChange = () => {
-      if (isStandalonePwa && document.visibilityState === 'hidden' && Date.now() > internalUiPauseUntilRef.current) {
-        logoutRef.current();
-      }
-    };
-
-    document.addEventListener('click', handleDocumentClick, true);
-    window.addEventListener('beforeprint', handleBeforePrint);
-    window.addEventListener('afterprint', handleAfterPrint);
-    window.addEventListener('focus', handleWindowFocus);
-    window.addEventListener('pagehide', handlePageExit);
-    window.addEventListener('beforeunload', handlePageExit);
-    window.addEventListener('pageshow', handlePageShow);
-    if (isStandalonePwa) {
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-    }
-
-    let capListenerHandle: { remove: () => Promise<void> } | null = null;
-    if (isRunningInApk() && Capacitor.isPluginAvailable('App')) {
-      CapacitorApp.addListener('appStateChange', ({ isActive }) => {
-        if (!isActive && Date.now() > internalUiPauseUntilRef.current) {
-          logoutRef.current();
-        }
-      })
-        .then((handle) => {
-          capListenerHandle = handle;
-        })
-        .catch(() => {});
-    }
-
-    return () => {
-      document.removeEventListener('click', handleDocumentClick, true);
-      window.removeEventListener('beforeprint', handleBeforePrint);
-      window.removeEventListener('afterprint', handleAfterPrint);
-      window.removeEventListener('focus', handleWindowFocus);
-      window.removeEventListener('pagehide', handlePageExit);
-      window.removeEventListener('beforeunload', handlePageExit);
-      window.removeEventListener('pageshow', handlePageShow);
-      if (isStandalonePwa) {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      }
-      if (capListenerHandle) {
-        capListenerHandle.remove().catch(() => {});
-      }
-    };
-  }, [userSession]);
-
-  
-
   const handleManualDarkModeToggle = (dark: boolean) => {
     setThemePreference(dark ? 'dark' : 'light');
   };
@@ -461,6 +358,275 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [selectedShift, setSelectedShift] = useState<ParadeShift>('Morning');
   const [selectedFlight, setSelectedFlight] = useState<FlightName | 'Overall'>('Overall');
+
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const selectedDateRef = useRef(selectedDate);
+  selectedDateRef.current = selectedDate;
+  const selectedFlightRef = useRef(selectedFlight);
+  selectedFlightRef.current = selectedFlight;
+
+  const lastActiveAtRef = useRef<number>(Date.now());
+  const minimizedAtRef = useRef<number | null>(null);
+  const isLoggingOutRef = useRef<boolean>(false);
+  const internalUiPauseUntilRef = useRef<number>(0);
+
+  const performLogout = async ({ isAutoLogout }: { isAutoLogout: boolean }) => {
+    if (isLoggingOutRef.current) return;
+    isLoggingOutRef.current = true;
+    try {
+      // 1. Synchronously tell all active forms/modals (AssignDutyModal, DutyRatioMatrix, etc.) to save drafts
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout } }));
+        try {
+          const ctxKey = getOfficeScopedStorageKey(AUTO_LOGOUT_RESUME_CTX_KEY);
+          if (isAutoLogout) {
+            window.localStorage.setItem(
+              ctxKey,
+              JSON.stringify({
+                activeTab: activeTabRef.current,
+                selectedDate: selectedDateRef.current,
+                selectedFlight: selectedFlightRef.current,
+                reopenAssignModal: Boolean((window as any).__bafAssignDutyModalOpen),
+                savedAt: Date.now(),
+              })
+            );
+          } else {
+            window.localStorage.removeItem(ctxKey);
+          }
+        } catch {}
+      }
+
+      // 2. Flush local & Firebase deltas cleanly before detaching session
+      await localDb.flushBeforeLogout(1800).catch(() => {});
+    } finally {
+      localDb.detachManifestListener();
+      clearUserSession();
+      setUserSession(null);
+      setJustLoggedIn(false);
+      setIsQuotaPopupOpen(false);
+      setHasSeenNotice(false);
+      handleRoleChange('USER');
+      setLastUsedPortal('Office');
+      syncBrowserTabIdentity('', '/office-management-logo.png?v=26', '');
+      isLoggingOutRef.current = false;
+    }
+  };
+
+  const handleUserLogout = () => {
+    void performLogout({ isAutoLogout: false });
+  };
+
+  const autoLogoutRef = useRef<() => void>(() => {
+    void performLogout({ isAutoLogout: true });
+  });
+  autoLogoutRef.current = () => {
+    void performLogout({ isAutoLogout: true });
+  };
+
+  // Lifecycle & Inactivity Session Guard:
+  // - Full close & reopen always requires re-login (via cold-start session clear + pagehide !persisted).
+  // - Normal minimize/maximize (< 10 mins) keeps the user logged in without forcing re-login.
+  // - Continuous 10 minutes minimized or inactive triggers auto-logout after flushing all unsaved drafts & deltas.
+  useEffect(() => {
+    if (!userSession) return;
+
+    isLoggingOutRef.current = false;
+    const initNow = Date.now();
+    lastActiveAtRef.current = initNow;
+    minimizedAtRef.current = null;
+    try {
+      sessionStorage.setItem(LAST_ACTIVE_AT_KEY, String(initNow));
+      sessionStorage.removeItem(MINIMIZED_AT_KEY);
+    } catch {}
+
+    const markInternalUiPause = () => {
+      internalUiPauseUntilRef.current = Date.now() + 60_000;
+    };
+    const clearInternalUiPauseSoon = () => {
+      setTimeout(() => {
+        internalUiPauseUntilRef.current = 0;
+      }, 600);
+    };
+
+    let lastRecordedActivityWrite = initNow;
+    const recordUserActivity = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      lastActiveAtRef.current = now;
+      if (minimizedAtRef.current !== null) {
+        minimizedAtRef.current = null;
+        try {
+          sessionStorage.removeItem(MINIMIZED_AT_KEY);
+        } catch {}
+      }
+      if (now - lastRecordedActivityWrite >= 2000) {
+        lastRecordedActivityWrite = now;
+        try {
+          sessionStorage.setItem(LAST_ACTIVE_AT_KEY, String(now));
+        } catch {}
+      }
+    };
+
+    const markMinimized = () => {
+      const now = Date.now();
+      if (minimizedAtRef.current === null) {
+        minimizedAtRef.current = now;
+        try {
+          sessionStorage.setItem(MINIMIZED_AT_KEY, String(now));
+        } catch {}
+      }
+      try {
+        window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout: false } }));
+      } catch {}
+    };
+
+    const checkInactivityTimeout = (): boolean => {
+      if (isLoggingOutRef.current) return true;
+      const now = Date.now();
+      if (now <= internalUiPauseUntilRef.current) return false;
+
+      let lastActive = lastActiveAtRef.current;
+      try {
+        const storedActive = Number(sessionStorage.getItem(LAST_ACTIVE_AT_KEY) || '0');
+        if (storedActive > 0 && (!lastActive || storedActive < lastActive)) {
+          lastActive = storedActive;
+        }
+      } catch {}
+
+      let minAt = minimizedAtRef.current;
+      try {
+        const storedMin = Number(sessionStorage.getItem(MINIMIZED_AT_KEY) || '0');
+        if (!minAt && storedMin > 0) minAt = storedMin;
+      } catch {}
+
+      const idleElapsed = now - lastActive;
+      const minimizedElapsed = minAt ? now - minAt : 0;
+
+      if (idleElapsed >= INACTIVITY_AUTO_LOGOUT_MS || minimizedElapsed >= INACTIVITY_AUTO_LOGOUT_MS) {
+        autoLogoutRef.current();
+        return true;
+      }
+      return false;
+    };
+
+    const handleResumeFromMinimizeOrFocus = () => {
+      clearInternalUiPauseSoon();
+      if (!getCurrentUserSession()) {
+        autoLogoutRef.current();
+        return;
+      }
+      if (checkInactivityTimeout()) {
+        return;
+      }
+      // Returned within < 10 minutes -> stay logged in seamlessly and refresh activity clock
+      const now = Date.now();
+      minimizedAtRef.current = null;
+      lastActiveAtRef.current = now;
+      lastRecordedActivityWrite = now;
+      try {
+        sessionStorage.removeItem(MINIMIZED_AT_KEY);
+        sessionStorage.setItem(LAST_ACTIVE_AT_KEY, String(now));
+      } catch {}
+    };
+
+    const handleDocumentClick = (e: MouseEvent) => {
+      recordUserActivity();
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        (target.tagName === 'INPUT' && (target as HTMLInputElement).type === 'file') ||
+        target.closest('label')?.querySelector('input[type="file"]')
+      ) {
+        markInternalUiPause();
+      }
+    };
+
+    const handleBeforePrint = () => markInternalUiPause();
+    const handleAfterPrint = () => clearInternalUiPauseSoon();
+
+    const handleBeforeUnload = () => {
+      try {
+        window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout: false } }));
+      } catch {}
+    };
+
+    const handlePageHide = (e: PageTransitionEvent) => {
+      try {
+        window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout: false } }));
+      } catch {}
+      if (e.persisted) {
+        // Mobile browser/PWA put page in bfcache (minimize/switch app) -> do NOT clear session
+        markMinimized();
+      } else {
+        // Actual page unload / app tab close -> require re-login next open
+        clearUserSession();
+      }
+    };
+
+    const handlePageShow = () => {
+      handleResumeFromMinimizeOrFocus();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        markMinimized();
+      } else if (document.visibilityState === 'visible') {
+        handleResumeFromMinimizeOrFocus();
+      }
+    };
+
+    document.addEventListener('click', handleDocumentClick, true);
+    document.addEventListener('pointerdown', recordUserActivity, { passive: true });
+    document.addEventListener('keydown', recordUserActivity, { passive: true });
+    document.addEventListener('touchstart', recordUserActivity, { passive: true });
+    window.addEventListener('wheel', recordUserActivity, { passive: true });
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    window.addEventListener('focus', handleResumeFromMinimizeOrFocus);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pageshow', handlePageShow);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const inactivityInterval = setInterval(() => {
+      checkInactivityTimeout();
+    }, 15_000);
+
+    let capListenerHandle: { remove: () => Promise<void> } | null = null;
+    if (isRunningInApk() && Capacitor.isPluginAvailable('App')) {
+      CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        if (!isActive) {
+          markMinimized();
+        } else {
+          handleResumeFromMinimizeOrFocus();
+        }
+      })
+        .then((handle) => {
+          capListenerHandle = handle;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      clearInterval(inactivityInterval);
+      document.removeEventListener('click', handleDocumentClick, true);
+      document.removeEventListener('pointerdown', recordUserActivity);
+      document.removeEventListener('keydown', recordUserActivity);
+      document.removeEventListener('touchstart', recordUserActivity);
+      window.removeEventListener('wheel', recordUserActivity);
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+      window.removeEventListener('focus', handleResumeFromMinimizeOrFocus);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pageshow', handlePageShow);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (capListenerHandle) {
+        capListenerHandle.remove().catch(() => {});
+      }
+    };
+  }, [userSession]);
 
   // Data
   const [airmen, setAirmen] = useState<Airman[]>(() => {
@@ -731,8 +897,33 @@ export default function App() {
             } else {
               handleRoleChange('USER');
             }
+
+            // Restore workspace tab, date, flight & open Assign Duty draft if user was auto-logged out due to 10-min timeout
+            try {
+              const ctxKey = getOfficeScopedStorageKey(AUTO_LOGOUT_RESUME_CTX_KEY);
+              const rawCtx = window.localStorage.getItem(ctxKey);
+              if (rawCtx) {
+                window.localStorage.removeItem(ctxKey);
+                const parsed = JSON.parse(rawCtx);
+                if (parsed && parsed.savedAt && Date.now() - parsed.savedAt < 24 * 60 * 60 * 1000) {
+                  if (parsed.selectedDate) setSelectedDate(parsed.selectedDate);
+                  if (parsed.selectedFlight) setSelectedFlight(parsed.selectedFlight);
+                  if (parsed.activeTab) setActiveTab(parsed.activeTab as SidebarTab);
+                  const assignDraftRaw = window.localStorage.getItem(
+                    getOfficeScopedStorageKey('baf_assign_duty_pending_draft_v1')
+                  );
+                  if (parsed.reopenAssignModal && assignDraftRaw) {
+                    window.sessionStorage.setItem('baf_reopen_assign_after_login', 'true');
+                    setTimeout(() => {
+                      window.dispatchEvent(new CustomEvent('baf_reopen_assign_duty_modal'));
+                    }, 120);
+                  }
+                }
+              }
+            } catch {}
+
             fetchAirmen();
-            
+
             // Trigger instant data download from Firebase & attach live manifest listener after login
             localDb.attachManifestListener();
             localDb.syncFromFirebase({ isLoginSync: true });

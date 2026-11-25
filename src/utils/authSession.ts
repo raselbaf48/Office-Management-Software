@@ -949,6 +949,8 @@ export const clearUserSession = (): void => {
     sessionStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem('baf_user_role');
     sessionStorage.removeItem('baf_quota_popup_shown_in_session');
+    sessionStorage.removeItem('baf_last_active_at');
+    sessionStorage.removeItem('baf_minimized_at');
   } catch (e) {
     console.error('Failed to clear user session:', e);
   }

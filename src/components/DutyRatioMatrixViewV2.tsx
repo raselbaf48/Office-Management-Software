@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { DutyRatioConfigPanel } from './DutyRatioConfigPanelV4';
 
 import {
@@ -41,9 +41,32 @@ import { PrintableDutyRatioModal, formatDisplayDate } from "./PrintableDutyRatio
 import { AutoAllocateModal } from './AutoAllocateModal';
 import { DateNavigator } from './DateNavigator';
 import { RatioHistoryModal } from './RatioHistoryModal';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice, getOfficeScopedStorageKey } from '../firebase';
 import { localDb } from '../services/localDatabase';
 import { isHolidayDate } from '../utils/holidayUtils';
+
+const DUTY_RATIO_UNSAVED_DRAFT_KEY = 'baf_duty_ratio_unsaved_draft_v1';
+
+interface DutyRatioUnsavedDraft {
+  matrix: DutyRatioTable[];
+  draftDisposals: Record<string, string>;
+  draftManpower?: any;
+  targetDate?: string;
+  savedAt: number;
+}
+
+const loadDutyRatioUnsavedDraft = (): DutyRatioUnsavedDraft | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(getOfficeScopedStorageKey(DUTY_RATIO_UNSAVED_DRAFT_KEY));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DutyRatioUnsavedDraft;
+    if (!parsed || !Array.isArray(parsed.matrix) || parsed.matrix.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
 
 interface DutyRatioMatrixViewProps {
   role?: UserRole;
@@ -119,21 +142,34 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
   onRequestAdminAccess,
   onConfirmNavigate,
 }) => {
-  const [savedApplyDate, setSavedApplyDate] = useState<string>(() => resolveInitialApplyDate());
-  const [targetDate, setTargetDate] = useState<string>(() => resolveInitialApplyDate());
+  const initialApplyDate = useMemo(() => resolveInitialApplyDate(), []);
+  const initialUnsavedDraft = useMemo(() => loadDutyRatioUnsavedDraft(), []);
+
+  const [savedApplyDate, setSavedApplyDate] = useState<string>(() => initialApplyDate);
+  const [targetDate, setTargetDate] = useState<string>(() => initialUnsavedDraft?.targetDate || initialApplyDate);
   const [applyDateGuardMsg, setApplyDateGuardMsg] = useState<string | null>(null);
+  const [restoredDraftNotice, setRestoredDraftNotice] = useState<boolean>(() => Boolean(initialUnsavedDraft));
 
-  const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => {
-    const ver = getDutyRatioVersionForDate(targetDate);
+  const persistedBaselineMatrix = useMemo(() => {
+    const ver = getDutyRatioVersionForDate(initialApplyDate);
     if (ver && ver.matrix && ver.matrix.length > 0) return ver.matrix;
-    return getStoredDutyMatrix(targetDate);
-  });
-  const [savedMatrixJson, setSavedMatrixJson] = useState<string>(() => JSON.stringify(matrix));
+    return getStoredDutyMatrix(initialApplyDate);
+  }, [initialApplyDate]);
 
-  const [draftDisposals, setDraftDisposals] = useState<Record<string, string>>(() => loadStoredDisposals(targetDate));
-  const [savedDisposalsJson, setSavedDisposalsJson] = useState<string>(() => JSON.stringify(loadStoredDisposals(targetDate)));
+  const persistedBaselineDisposals = useMemo(() => loadStoredDisposals(initialApplyDate), [initialApplyDate]);
+
+  const [matrix, setMatrix] = useState<DutyRatioTable[]>(
+    () => (initialUnsavedDraft?.matrix && initialUnsavedDraft.matrix.length > 0 ? initialUnsavedDraft.matrix : persistedBaselineMatrix)
+  );
+  const [savedMatrixJson, setSavedMatrixJson] = useState<string>(() => JSON.stringify(persistedBaselineMatrix));
+
+  const [draftDisposals, setDraftDisposals] = useState<Record<string, string>>(
+    () => (initialUnsavedDraft?.draftDisposals ? initialUnsavedDraft.draftDisposals : persistedBaselineDisposals)
+  );
+  const [savedDisposalsJson, setSavedDisposalsJson] = useState<string>(() => JSON.stringify(persistedBaselineDisposals));
 
   const [draftManpower, setDraftManpower] = useState<any>(() => {
+    if (initialUnsavedDraft?.draftManpower) return initialUnsavedDraft.draftManpower;
     try {
       const saved = localStorage.getItem('baf_duty_distribution_manpower');
       if (saved) return JSON.parse(saved);
@@ -275,21 +311,70 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     | null
   >(null);
 
+  const draftSnapshotRef = useRef<{
+    hasUnsavedChanges: boolean;
+    matrix: DutyRatioTable[];
+    draftDisposals: Record<string, string>;
+    draftManpower: any;
+    targetDate: string;
+  }>({
+    hasUnsavedChanges,
+    matrix,
+    draftDisposals,
+    draftManpower,
+    targetDate,
+  });
+  draftSnapshotRef.current = {
+    hasUnsavedChanges,
+    matrix,
+    draftDisposals,
+    draftManpower,
+    targetDate,
+  };
+
   useEffect(() => {
+    const storageKey = getOfficeScopedStorageKey(DUTY_RATIO_UNSAVED_DRAFT_KEY);
+    const persistDraft = () => {
+      try {
+        const cur = draftSnapshotRef.current;
+        if (cur.hasUnsavedChanges) {
+          window.localStorage.setItem(
+            storageKey,
+            JSON.stringify({
+              matrix: cur.matrix,
+              draftDisposals: cur.draftDisposals,
+              draftManpower: cur.draftManpower,
+              targetDate: cur.targetDate,
+              savedAt: Date.now(),
+            } as DutyRatioUnsavedDraft)
+          );
+        } else {
+          window.localStorage.removeItem(storageKey);
+        }
+      } catch {}
+    };
+    persistDraft();
+
     if (typeof window !== 'undefined') {
       (window as any).__bafDutyRatioHasUnsavedChanges = hasUnsavedChanges;
     }
+    const handleBeforeLogout = () => persistDraft();
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      persistDraft();
       if (hasUnsavedChanges) {
         e.preventDefault();
         e.returnValue = '';
       }
     };
+    window.addEventListener('baf_prepare_auto_logout', handleBeforeLogout);
+    window.addEventListener('baf_before_user_logout', handleBeforeLogout);
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
+      window.removeEventListener('baf_prepare_auto_logout', handleBeforeLogout);
+      window.removeEventListener('baf_before_user_logout', handleBeforeLogout);
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [hasUnsavedChanges]);
+  }, [hasUnsavedChanges, matrix, draftDisposals, draftManpower, targetDate]);
 
   useEffect(() => {
     return () => {
@@ -671,6 +756,10 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
     // 4. Mark clean
     setSavedMatrixJson(JSON.stringify(matrix));
     setSavedDisposalsJson(valStr);
+    setRestoredDraftNotice(false);
+    try {
+      window.localStorage.removeItem(getOfficeScopedStorageKey(DUTY_RATIO_UNSAVED_DRAFT_KEY));
+    } catch {}
     if (typeof window !== 'undefined') {
       (window as any).__bafDutyRatioHasUnsavedChanges = false;
     }
@@ -684,6 +773,8 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
       setDraftDisposals(JSON.parse(savedDisposalsJson));
       setTargetDate(savedApplyDate);
       setApplyDateGuardMsg(null);
+      setRestoredDraftNotice(false);
+      window.localStorage.removeItem(getOfficeScopedStorageKey(DUTY_RATIO_UNSAVED_DRAFT_KEY));
       if (typeof window !== 'undefined') {
         (window as any).__bafDutyRatioHasUnsavedChanges = false;
       }
@@ -947,6 +1038,12 @@ export const DutyRatioMatrixView: React.FC<DutyRatioMatrixViewProps> = ({
             </button>
           )}
         </div>
+        {restoredDraftNotice && hasUnsavedChanges && (
+          <div className="mt-2 px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-700/80 text-emerald-800 dark:text-emerald-300 text-[11px] font-semibold flex items-center gap-1.5 shadow-xs animate-fadeIn">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span>পূর্ববর্তী সেশনের অসংরক্ষিত পরিবর্তনগুলো পুনরুদ্ধার করা হয়েছে — কার্যকর করতে Save &amp; Apply চাপুন।</span>
+          </div>
+        )}
         {applyDateGuardMsg && (
           <div className="mt-2 px-3 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-amber-800 dark:text-amber-300 text-[11px] font-semibold flex items-center gap-1.5 shadow-xs animate-fadeIn">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />

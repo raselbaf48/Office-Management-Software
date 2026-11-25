@@ -49,8 +49,35 @@ import { AssignDeploymentTab } from './AssignDeploymentTab';
 import { localDb, resolveCanonicalIdacShift } from '../services/localDatabase';
 import { isHolidayDate, getWeekdayShort, getWeekdayFull } from '../utils/holidayUtils';
 import { matchAirmanId } from '../utils/airmanDisposalHelper';
-import { doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
+import { doesOfficeHaveFlights, isDefault155UasuOffice, getOfficeScopedStorageKey } from '../firebase';
 import { getBiodataTrades } from '../utils/tradeList';
+
+const ASSIGN_DUTY_DRAFT_KEY = 'baf_assign_duty_pending_draft_v1';
+
+interface AssignDutyDraftPayload {
+  pendingOps: PendingDutyOp[];
+  fromDate?: string;
+  toDate?: string;
+  selectedPresetDays?: number | null;
+  activeDutyCode?: DutyCategoryCode | '';
+  activeFlight?: FlightName | 'All';
+  activeIdaShift?: IDAShift;
+  activeModalTab?: 'Duty' | 'Leave' | 'TDY' | 'Deployment';
+  savedAt: number;
+}
+
+const loadAssignDutyDraft = (): AssignDutyDraftPayload | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(getOfficeScopedStorageKey(ASSIGN_DUTY_DRAFT_KEY));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AssignDutyDraftPayload;
+    if (!parsed || !Array.isArray(parsed.pendingOps) || parsed.pendingOps.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
 
 export const isSameAirman = (id1?: string, id2?: string): boolean => {
   return matchAirmanId(id1, id2);
@@ -120,13 +147,21 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     return officeHasFlights ? airman.flightName === grp : (airman.trade === grp || airman.flightName === grp);
   };
 
+  const initialSavedDraft = useMemo(() => loadAssignDutyDraft(), []);
+
   const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(() => {
+    if (initialSavedDraft && initialSavedDraft.selectedPresetDays !== undefined) {
+      return initialSavedDraft.selectedPresetDays;
+    }
     const init = selectedDate || todayStr;
     const effective = isAdmin && init < todayStr ? todayStr : init;
     return effective === todayStr ? 1 : -1;
   });
   const [singleDateBeforeMulti, setSingleDateBeforeMulti] = useState<string | null>(null);
   const [fromDate, setFromDate] = useState<string>(() => {
+    if (initialSavedDraft?.fromDate && !(isAdmin && initialSavedDraft.fromDate < todayStr)) {
+      return initialSavedDraft.fromDate;
+    }
     const init = selectedDate || todayStr;
     if (isAdmin && init < todayStr) return todayStr;
     return init;
@@ -135,6 +170,9 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const isPastDate = fromDate < todayStr;
   const isReadOnly = isUser || (isPastDate && !isSuperAdmin);
   const [toDate, setToDate] = useState<string>(() => {
+    if (initialSavedDraft?.toDate && !(isAdmin && initialSavedDraft.toDate < todayStr)) {
+      return initialSavedDraft.toDate;
+    }
     const init = selectedDate || todayStr;
     if (isAdmin && init < todayStr) return todayStr;
     return init;
@@ -143,13 +181,14 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
   // Active duty & flight filters
   const [activeDutyCode, setActiveDutyCode] = useState<DutyCategoryCode | ''>(
-    onlyIdac ? 'IDAC' : (initialDutyCode || '')
+    onlyIdac ? 'IDAC' : (initialSavedDraft?.activeDutyCode || initialDutyCode || '')
   );
   const [selectionMode, setSelectionMode] = useState<'DutyFirst' | 'FlightFirst' | 'None'>(
     initialDutyCode ? 'DutyFirst' : (initialFlight !== 'All' ? 'FlightFirst' : 'None')
   );
   const [activeFlight, setActiveFlight] = useState<FlightName | 'All'>(() => {
     if (isAdmin && adminFlight) return adminFlight as FlightName;
+    if (initialSavedDraft?.activeFlight) return initialSavedDraft.activeFlight;
     return initialFlight;
   });
   const [isFlightLocked, setIsFlightLocked] = useState<boolean>(() => {
@@ -192,19 +231,21 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       window.sessionStorage.setItem('baf_duty_locked_airmen_ids', JSON.stringify(ids));
     }
   };
-  const [activeIdaShift, setActiveIdaShift] = useState<IDAShift | undefined>(undefined);
+  const [activeIdaShift, setActiveIdaShift] = useState<IDAShift | undefined>(() => initialSavedDraft?.activeIdaShift);
   const [activeLeaveType, setActiveLeaveType] = useState<'Casual' | 'Annual' | 'Recreation'>('Casual');
   const [isProxyEnabled, setIsProxyEnabled] = useState<boolean>(false);
   const [proxyForFlight, setProxyForFlight] = useState<FlightName | ''>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterByRatio, setFilterByRatio] = useState<boolean>(true);
-    const [activeModalTab, setActiveModalTab] = useState<'Duty' | 'Leave' | 'TDY' | 'Deployment'>('Duty');
+    const [activeModalTab, setActiveModalTab] = useState<'Duty' | 'Leave' | 'TDY' | 'Deployment'>(
+      () => initialSavedDraft?.activeModalTab || 'Duty'
+    );
   const [showRatioModal, setShowRatioModal] = useState<boolean>(false);
 
   // Raw server assignments for fromDate and previous day (staged draft ops are layered on top)
   const [rawServerAssignmentsList, setRawServerAssignmentsList] = useState<DutyAssignment[]>([]);
   const [rawPrevDayAssignmentsList, setRawPrevDayAssignmentsList] = useState<DutyAssignment[]>([]);
-  const [pendingOps, setPendingOps] = useState<PendingDutyOp[]>([]);
+  const [pendingOps, setPendingOps] = useState<PendingDutyOp[]>(() => initialSavedDraft?.pendingOps || []);
   const [isApplyingPending, setIsApplyingPending] = useState<boolean>(false);
   const [unsavedPrompt, setUnsavedPrompt] = useState<{
     open: boolean;
@@ -220,9 +261,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const [processingAirmanId, setProcessingAirmanId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string>('');
   
-  const userManuallySelectedDutyRef = useRef<boolean>(false);
-  const userManuallySelectedFlightRef = useRef<boolean>(false);
-  const userManuallySelectedShiftRef = useRef<boolean>(false);
+  const userManuallySelectedDutyRef = useRef<boolean>(Boolean(initialSavedDraft?.activeDutyCode));
+  const userManuallySelectedFlightRef = useRef<boolean>(Boolean(initialSavedDraft?.activeFlight));
+  const userManuallySelectedShiftRef = useRef<boolean>(Boolean(initialSavedDraft?.activeIdaShift));
+  const hasRestoredInitialDraftRef = useRef<boolean>(Boolean(initialSavedDraft?.pendingOps?.length));
   const pendingAutoSelectDateRef = useRef<string | null>(null);
   const lastAutoSelectedDateRef = useRef<string>('');
   const rosterFetchIdRef = useRef<number>(0);
@@ -862,6 +904,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     if (isFreshDateLoad) {
       lastAutoSelectedDateRef.current = fromDate;
       pendingAutoSelectDateRef.current = null;
+      if (hasRestoredInitialDraftRef.current) {
+        hasRestoredInitialDraftRef.current = false;
+        return;
+      }
       userManuallySelectedDutyRef.current = false;
       userManuallySelectedShiftRef.current = false;
       userManuallySelectedFlightRef.current = false;
@@ -1356,6 +1402,10 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     const discardedCount = pendingOps.length;
     const actionToRun = unsavedPrompt.pendingAction;
     setPendingOps([]);
+    try {
+      window.localStorage.removeItem(getOfficeScopedStorageKey(ASSIGN_DUTY_DRAFT_KEY));
+      window.dispatchEvent(new CustomEvent('baf_assign_draft_changed'));
+    } catch {}
     setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
     if (actionToRun && actionToRun.type !== 'discardOnly') {
       executeLeaveAction(actionToRun);
@@ -1365,10 +1415,89 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
   };
 
+  const pendingDraftRef = useRef<AssignDutyDraftPayload>({
+    pendingOps,
+    fromDate,
+    toDate,
+    selectedPresetDays,
+    activeDutyCode,
+    activeFlight,
+    activeIdaShift,
+    activeModalTab,
+    savedAt: Date.now(),
+  });
+  pendingDraftRef.current = {
+    pendingOps,
+    fromDate,
+    toDate,
+    selectedPresetDays,
+    activeDutyCode,
+    activeFlight,
+    activeIdaShift,
+    activeModalTab,
+    savedAt: Date.now(),
+  };
+
+  // Track modal open flag & show restore banner if staged draft from before auto-logout/close was loaded
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__bafAssignDutyModalOpen = isOpen;
+    }
+    if (isOpen && initialSavedDraft?.pendingOps && initialSavedDraft.pendingOps.length > 0) {
+      setToastMessage(
+        `📝 পূর্ববর্তী অসংরক্ষিত ${initialSavedDraft.pendingOps.length}টি ডিউটি পরিবর্তন পুনরুদ্ধার হয়েছে — সংরক্ষণ করতে Apply চাপুন।`
+      );
+      const t = setTimeout(() => setToastMessage(''), 5000);
+      return () => {
+        clearTimeout(t);
+        if (typeof window !== 'undefined') (window as any).__bafAssignDutyModalOpen = false;
+      };
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__bafAssignDutyModalOpen = false;
+      }
+    };
+  }, [isOpen]);
+
+  // Continuously persist staged pendingOps draft to office-scoped localStorage + flush on auto-logout/beforeunload
+  useEffect(() => {
+    const storageKey = getOfficeScopedStorageKey(ASSIGN_DUTY_DRAFT_KEY);
+    const persistDraft = () => {
+      try {
+        const cur = pendingDraftRef.current;
+        if (cur.pendingOps.length > 0) {
+          window.localStorage.setItem(storageKey, JSON.stringify({ ...cur, savedAt: Date.now() }));
+        } else {
+          window.localStorage.removeItem(storageKey);
+        }
+        window.dispatchEvent(new CustomEvent('baf_assign_draft_changed'));
+      } catch {}
+    };
+    persistDraft();
+
+    const handleBeforeLogout = () => persistDraft();
+    window.addEventListener('baf_prepare_auto_logout', handleBeforeLogout);
+    window.addEventListener('baf_before_user_logout', handleBeforeLogout);
+    return () => {
+      window.removeEventListener('baf_prepare_auto_logout', handleBeforeLogout);
+      window.removeEventListener('baf_before_user_logout', handleBeforeLogout);
+    };
+  }, [pendingOps, fromDate, toDate, selectedPresetDays, activeDutyCode, activeFlight, activeIdaShift, activeModalTab]);
+
   // Warn browser reload / tab close while unsaved duty changes exist
   useEffect(() => {
     if (!isOpen || !hasUnsavedChanges) return;
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      try {
+        const storageKey = getOfficeScopedStorageKey(ASSIGN_DUTY_DRAFT_KEY);
+        if (pendingDraftRef.current.pendingOps.length > 0) {
+          window.localStorage.setItem(
+            storageKey,
+            JSON.stringify({ ...pendingDraftRef.current, savedAt: Date.now() })
+          );
+        }
+      } catch {}
       e.preventDefault();
       e.returnValue = '';
     };
@@ -1647,14 +1776,25 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       )
                   );
                 }
-                list.push({
-                  airmanId: op.airmanId,
-                  date: dStr,
-                  dutyCode: op.dutyCode,
-                  idaShift: op.idaShift,
-                  notes: op.notes || '',
-                  proxyForFlight: op.proxyForFlight,
-                });
+                const alreadyInList = list.some(
+                  (a) =>
+                    isSameAirman(a.airmanId, op.airmanId) &&
+                    a.date === dStr &&
+                    doesAssignmentMatchDuty(a, op.dutyCode, opIsIdac ? op.idaShift : undefined) &&
+                    (a.notes || '') === (op.notes || '') &&
+                    (a.proxyForFlight || '') === (op.proxyForFlight || '')
+                );
+                if (!alreadyInList) {
+                  list.push({
+                    airmanId: op.airmanId,
+                    date: dStr,
+                    dutyCode: op.dutyCode,
+                    idaShift: op.idaShift,
+                    notes: op.notes || '',
+                    proxyForFlight: op.proxyForFlight,
+                    updatedAt: new Date().toISOString(),
+                  });
+                }
                 localDb.db.assignments[mKey] = list;
               });
             } catch (syncErr) {
@@ -1667,12 +1807,16 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       }
 
       try {
-        localDb.saveToStorage(localDb.db, false, false, false);
+        localDb.saveToStorage(localDb.db, false, true, true);
       } catch (saveErr) {
         console.warn('localDb save warning:', saveErr);
       }
 
       setPendingOps([]);
+      try {
+        window.localStorage.removeItem(getOfficeScopedStorageKey(ASSIGN_DUTY_DRAFT_KEY));
+        window.dispatchEvent(new CustomEvent('baf_assign_draft_changed'));
+      } catch {}
       setUnsavedPrompt({ open: false, confirmDiscardStep: false, pendingAction: null });
       window.dispatchEvent(new CustomEvent('baf_state_updated'));
       if (onRefreshParadeData) onRefreshParadeData();
