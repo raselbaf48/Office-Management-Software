@@ -1,7 +1,7 @@
-import { Airman, DutyAssignment, DutyCategoryCode, ConflictAlert, AirmanDutyStats } from '../types';
-import { DUTY_TYPE_MAP } from './dutyTypes';
-import { INITIAL_AIRMEN } from './initialAirmen';
-import { generateOfficialMonthAssignments } from './officialJulyAugustData';
+import type { Airman, DutyAssignment, DutyCategoryCode, ConflictAlert, AirmanDutyStats } from '../types.ts';
+import { DUTY_TYPE_MAP } from './dutyTypes.ts';
+import { INITIAL_AIRMEN } from './initialAirmen.ts';
+import { generateOfficialMonthAssignments } from './officialJulyAugustData.ts';
 
 const SER_TO_DIGITS = new Map<string, string>();
 const DIGITS_TO_SER = new Map<string, number>();

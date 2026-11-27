@@ -4,11 +4,13 @@ import App from './App.tsx';
 import './index.css';
 import { installApiInterceptor } from './services/apiBridge';
 import { installSafeStorageProtection } from './utils/safeStorage';
+import { initLiveAppUpdater } from './utils/liveAppUpdater';
 
 // Initialize Universal API Bridge and Safe Storage Protection
 try {
   installSafeStorageProtection();
   installApiInterceptor();
+  initLiveAppUpdater();
 
   // Suppress false-positive Vite HMR WebSocket connection notices in iframe preview
   if (typeof window !== 'undefined') {

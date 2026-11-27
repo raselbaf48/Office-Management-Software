@@ -24,6 +24,7 @@ import { DutyRatioTable } from '../data/officialDutyRatioMatrix';
 
 import { formatRank } from './rankFormatter';
 import { getActiveOfficeIdentity } from '../firebase';
+import { PageSetupConfig, getDocxPageSize } from './pageSetup';
 export { formatRank };
 
 const formatRunningLetter = (text: string) => {
@@ -62,7 +63,8 @@ export async function exportDutyRosterDocx(
   unitHeader: string,
   dateRangeHeader: string,
   sections: RosterSectionData[],
-  fileName: string = 'Duty_Roster_155_UASU.docx'
+  fileName: string = 'Duty_Roster_155_UASU.docx',
+  pageSetup?: PageSetupConfig
 ) {
   const docChildren: any[] = [
     // Main Unit Header
@@ -182,11 +184,17 @@ export async function exportDutyRosterDocx(
     docChildren.push(new Paragraph({ spacing: { after: 140 }, children: [] }));
   }
 
+  const rosterPageSize = getDocxPageSize(pageSetup, 'portrait');
   const doc = new Document({
     sections: [
       {
         properties: {
           page: {
+            size: {
+              width: rosterPageSize.width,
+              height: rosterPageSize.height,
+              orientation: rosterPageSize.orientation,
+            },
             margin: {
               top: 720,
               right: 720,
@@ -225,7 +233,8 @@ export async function exportIdacRosterDocx(
     signDigitally?: boolean;
     digitalSignatureText?: string;
   },
-  rosterMonthShort?: string
+  rosterMonthShort?: string,
+  pageSetup?: PageSetupConfig
 ) {
   const isMonthFormat = dateRangeHeader.startsWith('Month:');
   const docChildren: any[] = [
@@ -375,11 +384,17 @@ export async function exportIdacRosterDocx(
     );
   }
 
+  const idacPageSize = getDocxPageSize(pageSetup, 'portrait');
   const doc = new Document({
     sections: [
       {
         properties: {
           page: {
+            size: {
+              width: idacPageSize.width,
+              height: idacPageSize.height,
+              orientation: idacPageSize.orientation,
+            },
             margin: {
               top: 720,
               right: 720,
@@ -619,7 +634,7 @@ export interface SingleParadeExportParams {
   flight: string;
   stats: any;
   onParade: Airman[];
-  leave: Airman[];
+  leave: (Airman | { airman: Airman; note?: string })[];
   bakeBite: Airman[];
   tdy: Airman[];
   canteen?: Airman[];
@@ -639,6 +654,7 @@ export interface SingleParadeExportParams {
   leftSig?: { rank: string; name: string; desig: string };
   middleSig?: { rank: string; name: string; desig: string };
   rightSig?: { rank: string; name: string; desig: string };
+  pageSetup?: PageSetupConfig;
 }
 
 export async function exportParadeStateSingleDocx(
@@ -668,7 +684,11 @@ export async function exportParadeStateSingleDocx(
     games = [],
     absent = [],
     otherDisposals = [],
+    pageSetup,
   } = params;
+
+  const singlePageSize = getDocxPageSize(pageSetup, 'landscape');
+  const usableDxa = singlePageSize.usableWidthDxa;
 
   const isPt = documentType === 'PT';
   const finalTitle = documentTitle || (isPt ? 'PT STATE : AIRMEN' : 'PARADE STATE : AIRMEN');
@@ -677,7 +697,7 @@ export async function exportParadeStateSingleDocx(
   const unitLabel =
     flight === 'Overall'
       ? activeOfficeName
-      : `${activeOfficeName} (${flight.toUpperCase()} FLT)`;
+      : (/\b(flt|flight)\b/i.test(flight) ? flight.toUpperCase() : `${flight.toUpperCase()} FLT`);
 
   const docChildren: any[] = [
     new Paragraph({
@@ -753,7 +773,7 @@ export async function exportParadeStateSingleDocx(
 
   const dataRow = new TableRow({ cantSplit: true,
     children: [
-      createArialDataCell(activeOfficeName, 1500, AlignmentType.CENTER),
+      createArialDataCell(unitLabel, 1500, AlignmentType.CENTER),
       createArialDataCell(String(stats.totalStr), 680, AlignmentType.CENTER),
       createArialDataCell(valOrDash(stats.detTdyCount), 680, AlignmentType.CENTER),
       createArialDataCell(String(stats.effStr), 680, AlignmentType.CENTER),
@@ -829,6 +849,14 @@ export async function exportParadeStateSingleDocx(
 
   // Format airman names
   const toDisplay = (airmenList: Airman[]) => airmenList.map((a) => ({ displayName: `${formatRank(a.rank)} ${formatRunningLetter(a.name)}` }));
+
+  const toLeaveDisplay = (leaveItems: (Airman | { airman: Airman; note?: string })[]) =>
+    leaveItems.map((item) => {
+      const a = 'airman' in item ? item.airman : item;
+      const note = 'airman' in item ? (item.note || '').trim() : '';
+      const suffix = note ? ` - ${note}` : '';
+      return { displayName: `${formatRank(a.rank)} ${formatRunningLetter(a.name)}${suffix}` };
+    });
 
   // Format Duty Off as: `${rank} ${name} - ${duty} Off`
   const dutyOffDisplay = dutyOff.map((item) => {
@@ -982,7 +1010,7 @@ export async function exportParadeStateSingleDocx(
   const col2Paragraphs: Paragraph[] = [];
   const secCanteen = buildDisposalSection('Canteen', toDisplay(params.canteen || []), col2Paragraphs.length === 0);
   if (secCanteen.length > 0) col2Paragraphs.push(...secCanteen);
-  const secLeave = buildDisposalSection('Leave', toDisplay(leave), col2Paragraphs.length === 0);
+  const secLeave = buildDisposalSection('Leave', toLeaveDisplay(leave), col2Paragraphs.length === 0);
   if (secLeave.length > 0) col2Paragraphs.push(...secLeave);
 
   const secBakeBite = buildDisposalSection('Bake & Bite', toDisplay(bakeBite), col2Paragraphs.length === 0);
@@ -1115,11 +1143,14 @@ export async function exportParadeStateSingleDocx(
     activeColWidths.push(dutyOnColWidth);
   }
 
-  const totalDisposalWidth = activeColWidths.reduce((sum, w) => sum + w, 0);
+  const rawTotalDisposalWidth = activeColWidths.reduce((sum, w) => sum + w, 0);
+  const disposalScale = rawTotalDisposalWidth > usableDxa ? usableDxa / rawTotalDisposalWidth : 1;
+  const scaledDisposalWidths = activeColWidths.map((w) => Math.floor(w * disposalScale));
+  const totalDisposalWidth = scaledDisposalWidths.reduce((sum, w) => sum + w, 0);
   const disposalTable = new Table({
     layout: TableLayoutType.FIXED,
     width: { size: totalDisposalWidth, type: WidthType.DXA },
-    columnWidths: activeColWidths,
+    columnWidths: scaledDisposalWidths,
     borders: invisibleBorders,
     rows: [
       new TableRow({
@@ -1139,7 +1170,7 @@ export async function exportParadeStateSingleDocx(
     })
   );
 
-  // Signature Table: 3 fixed columns across 15120 DXA
+  // Signature Table: 3 columns fit within usableDxa
   const leftSigName = params.leftSig?.name || 'MD NAHID HASAN KHAN';
   const leftSigRank = params.leftSig?.rank || 'Sgt';
   const leftSigDesig = params.leftSig?.desig || 'UWO';
@@ -1152,10 +1183,15 @@ export async function exportParadeStateSingleDocx(
   const rightSigRank = params.rightSig?.rank || 'FLT LT';
   const rightSigDesig = params.rightSig?.desig || 'Adjutant';
 
+  const sigTargetWidth = Math.min(15120, usableDxa);
+  const sigCol1 = Math.floor(sigTargetWidth * (5040 / 15120));
+  const sigCol2 = Math.floor(sigTargetWidth * (5880 / 15120));
+  const sigCol3 = sigTargetWidth - sigCol1 - sigCol2;
+
   const signatureTable = new Table({
     layout: TableLayoutType.FIXED,
-    width: { size: 15120, type: WidthType.DXA },
-    columnWidths: [5040, 5880, 4200],
+    width: { size: sigTargetWidth, type: WidthType.DXA },
+    columnWidths: [sigCol1, sigCol2, sigCol3],
     borders: invisibleBorders,
     rows: [
       new TableRow({
@@ -1322,7 +1358,12 @@ export async function exportParadeStateSingleDocx(
     ],
   });
 
-  docChildren.push(signatureTable);
+  if (flight === 'Overall') {
+    docChildren.push(signatureTable);
+  } else {
+    // Remove extra signature spacer pushed above when signatures are omitted
+    docChildren.pop();
+  }
 
   const doc = new Document({
     styles: {
@@ -1340,9 +1381,9 @@ export async function exportParadeStateSingleDocx(
         properties: {
           page: {
             size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.LANDSCAPE,
+              width: singlePageSize.width,
+              height: singlePageSize.height,
+              orientation: singlePageSize.orientation,
             },
             margin: { top: 400, right: 400, bottom: 400, left: 400 },
           },
@@ -1384,7 +1425,8 @@ export async function exportParadeStateMultiDocx(
   fileName: string = 'Multi_Day_Parade_State_155_UASU.docx',
   leftSig?: { rank: string; name: string; desig: string },
   rightSig?: { rank: string; name: string; desig: string },
-  docTitle?: string
+  docTitle?: string,
+  pageSetup?: PageSetupConfig
 ) {
   const docChildren: any[] = [
     new Paragraph({
@@ -1542,6 +1584,7 @@ export async function exportParadeStateMultiDocx(
 
   docChildren.push(table);
 
+  const multiPageSize = getDocxPageSize(pageSetup, 'landscape');
   const doc = new Document({
     styles: {
       default: {
@@ -1558,9 +1601,9 @@ export async function exportParadeStateMultiDocx(
         properties: {
           page: {
             size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.LANDSCAPE,
+              width: multiPageSize.width,
+              height: multiPageSize.height,
+              orientation: multiPageSize.orientation,
             },
             margin: { top: 400, right: 400, bottom: 400, left: 400 },
           },

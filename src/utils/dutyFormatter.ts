@@ -423,3 +423,58 @@ export function formatDutyOffShortName(
   }
   return `${baseShort} Off`;
 }
+
+export function formatLeaveShortName(
+  dutyName?: string | null,
+  notes?: string | null
+): string {
+  const cleanNotes = String(notes || '')
+    .replace(/\(f-295[^)]*\)/gi, '')
+    .trim();
+  const cleanDutyName = String(dutyName || '').trim();
+  const combined = `${cleanDutyName} ${cleanNotes}`.toLowerCase();
+
+  if (
+    combined.includes('recreation') ||
+    combined.includes('(rl)') ||
+    combined.includes('r/l') ||
+    /\brl\b/.test(combined) ||
+    combined.includes('rec leave') ||
+    combined.includes('rec.')
+  ) {
+    return 'R/L';
+  }
+  if (
+    combined.includes('annual') ||
+    combined.includes('(al)') ||
+    combined.includes('a/l') ||
+    /\bal\b/.test(combined)
+  ) {
+    return 'A/L';
+  }
+  if (
+    combined.includes('sick') ||
+    combined.includes('(sl)') ||
+    combined.includes('s/l') ||
+    /\bsl\b/.test(combined)
+  ) {
+    return 'S/L';
+  }
+  if (
+    combined.includes('casual') ||
+    combined.includes('(cl)') ||
+    combined.includes('c/l') ||
+    /\bcl\b/.test(combined)
+  ) {
+    return 'C/L';
+  }
+  if (
+    cleanNotes &&
+    !cleanNotes.toLowerCase().includes('imported') &&
+    cleanNotes.toLowerCase() !== 'leave'
+  ) {
+    return cleanNotes;
+  }
+  return 'C/L';
+}
+

@@ -428,12 +428,13 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
   const rawFb = raw.firebaseConfig || firebaseConfigData;
   if (!officeName || !rawFb || typeof rawFb !== 'object') return null;
 
-  // Automatically migrate any config referencing a retired or mismatched AI Studio Firebase project/database to the newly linked firebaseConfigData
+  // Automatically migrate only configs referencing retired legacy projects or mismatched DBs on the SAME primary project
   const isRetiredDefaultProject =
     rawFb.projectId === 'gen-lang-client-0251225792' ||
     rawFb.projectId === 'steady-weft-wf6jr' ||
     rawFb.firestoreDatabaseId === 'ai-studio-155uasubaf-80277d05-254c-4645-916d-5b54fa108313' ||
-    (typeof rawFb.firestoreDatabaseId === 'string' &&
+    (rawFb.projectId === firebaseConfigData.projectId &&
+      typeof rawFb.firestoreDatabaseId === 'string' &&
       rawFb.firestoreDatabaseId.startsWith('ai-studio-') &&
       rawFb.firestoreDatabaseId !== (firebaseConfigData as any).firestoreDatabaseId);
   const fb = isRetiredDefaultProject ? { ...rawFb, ...firebaseConfigData } : rawFb;
@@ -758,8 +759,15 @@ function initDynamicOfficeFirebase(customCfg?: CustomOfficeConfig | null): void 
   if (!isFirebaseConfigured || IS_AI_STUDIO_PRACTICE_MODE) return;
 
   try {
-    const appName = activeCustomOffice
-      ? `office_app_${targetFbConfig.projectId.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+    const safeProj = targetFbConfig.projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeDb = String(targetFbConfig.firestoreDatabaseId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const isPrimaryConfig =
+      targetFbConfig.projectId === firebaseConfigData.projectId &&
+      (targetFbConfig.firestoreDatabaseId || '(default)') === ((firebaseConfigData as any).firestoreDatabaseId || '(default)');
+    const appName = activeCustomOffice && !isPrimaryConfig
+      ? `office_app_${safeProj}_${safeDb}`
+      : activeCustomOffice
+      ? `office_app_${safeProj}`
       : '[DEFAULT]';
 
     const existing = getApps().find((a) => a.name === appName);
@@ -1112,10 +1120,17 @@ export function purgeOfficeLocalStorageKeys(targetOfficeCode?: string): void {
 
 export async function testCustomFirebaseConnection(
   fbConfig: OfficeFirebaseConfig
-): Promise<{ ok: boolean; success: boolean; error?: string; message: string }> {
+): Promise<{
+  ok: boolean;
+  success: boolean;
+  rulesReady?: boolean;
+  effectiveDatabaseId?: string;
+  error?: string;
+  message: string;
+}> {
   if (!fbConfig || !fbConfig.apiKey || !fbConfig.projectId) {
     const msg = 'Missing apiKey or projectId in Firebase Config.';
-    return { ok: false, success: false, error: msg, message: msg };
+    return { ok: false, success: false, rulesReady: false, error: msg, message: msg };
   }
   const dbId = fbConfig.firestoreDatabaseId && fbConfig.firestoreDatabaseId !== '(default)'
     ? fbConfig.firestoreDatabaseId
@@ -1130,9 +1145,13 @@ export async function testCustomFirebaseConnection(
   const timer = setTimeout(() => controller.abort(), 7000);
   try {
     const res = await fetch(url, { method: 'GET', signal: controller.signal });
-    if (res.ok || res.status === 404 || res.status === 403) {
-      const msg = `Connected to Firebase project "${fbConfig.projectId}" successfully.`;
-      return { ok: true, success: true, message: msg };
+    if (res.ok || res.status === 404) {
+      const msg = `Connected to Firebase project "${fbConfig.projectId}" (Firestore Rules Ready).`;
+      return { ok: true, success: true, rulesReady: true, effectiveDatabaseId: dbId, message: msg };
+    }
+    if (res.status === 403) {
+      const msg = `Connected to "${fbConfig.projectId}", but Firestore Security Rules are not deployed yet (HTTP 403). Copy & publish firestore.rules in Firebase Console first.`;
+      return { ok: true, success: true, rulesReady: false, effectiveDatabaseId: dbId, message: msg };
     }
     // If custom databaseId wasn't found, also test (default) database
     if (dbId !== '(default)' && res.status === 400) {
@@ -1140,9 +1159,13 @@ export async function testCustomFirebaseConnection(
         fbConfig.projectId
       )}/databases/(default)/documents/system_meta/sync_manifest?key=${encodeURIComponent(fbConfig.apiKey)}`;
       const fallbackRes = await fetch(fallbackUrl, { method: 'GET', signal: controller.signal });
-      if (fallbackRes.ok || fallbackRes.status === 404 || fallbackRes.status === 403) {
-        const msg = `Connected to Firebase project "${fbConfig.projectId}" successfully.`;
-        return { ok: true, success: true, message: msg };
+      if (fallbackRes.ok || fallbackRes.status === 404) {
+        const msg = `Connected to Firebase project "${fbConfig.projectId}" ((default) database Ready).`;
+        return { ok: true, success: true, rulesReady: true, effectiveDatabaseId: '(default)', message: msg };
+      }
+      if (fallbackRes.status === 403) {
+        const msg = `Connected to "${fbConfig.projectId}", but Firestore Security Rules are not deployed yet (HTTP 403).`;
+        return { ok: true, success: true, rulesReady: false, effectiveDatabaseId: '(default)', message: msg };
       }
     }
     const text = await res.text().catch(() => '');
@@ -1150,6 +1173,7 @@ export async function testCustomFirebaseConnection(
     return {
       ok: false,
       success: false,
+      rulesReady: false,
       error: errMsg,
       message: errMsg,
     };
@@ -1161,12 +1185,626 @@ export async function testCustomFirebaseConnection(
     return {
       ok: false,
       success: false,
+      rulesReady: false,
       error: errMsg,
       message: errMsg,
     };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ============================================================================
+// 2B. MASTER CLOUD POOL (MULTI-FIREBASE SHARD AUTO-ALLOCATION)
+// ============================================================================
+export const MASTER_CLOUD_POOL_KEY = 'baf_master_cloud_pool_v1';
+
+export interface CloudPoolShard {
+  id: string;
+  label: string;
+  status: 'ACTIVE' | 'PAUSED';
+  firebaseConfig: OfficeFirebaseConfig;
+  addedAt: string;
+  updatedAt: string;
+}
+
+const poolDbCache = new Map<string, FirestoreLite>();
+
+export function getOrInitFirestoreForConfig(fbConfig?: OfficeFirebaseConfig | null): FirestoreLite | null {
+  if (!fbConfig || !fbConfig.apiKey || !fbConfig.projectId || IS_AI_STUDIO_PRACTICE_MODE) {
+    return null;
+  }
+  const dbId =
+    fbConfig.firestoreDatabaseId && fbConfig.firestoreDatabaseId !== '(default)'
+      ? fbConfig.firestoreDatabaseId
+      : '(default)';
+  const primaryDbId = (firebaseConfigData as any).firestoreDatabaseId || '(default)';
+  if (fbConfig.projectId === firebaseConfigData.projectId && dbId === primaryDbId && masterDbInstance) {
+    return masterDbInstance;
+  }
+  const cacheKey = `${fbConfig.projectId}::${dbId}`;
+  const cached = poolDbCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const safeProj = fbConfig.projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeDb = dbId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const appName = `pool_app_${safeProj}_${safeDb}`;
+    const existing = getApps().find((a) => a.name === appName);
+    const targetApp =
+      existing ||
+      initializeApp(
+        {
+          apiKey: fbConfig.apiKey,
+          authDomain: fbConfig.authDomain || `${fbConfig.projectId}.firebaseapp.com`,
+          projectId: fbConfig.projectId,
+          storageBucket: fbConfig.storageBucket || `${fbConfig.projectId}.appspot.com`,
+          messagingSenderId: fbConfig.messagingSenderId || '',
+          appId: fbConfig.appId || '',
+        },
+        appName
+      );
+    let targetDb: FirestoreLite;
+    try {
+      targetDb = initializeFirestoreLite(
+        targetApp,
+        { ignoreUndefinedProperties: true },
+        dbId !== '(default)' ? dbId : undefined
+      );
+    } catch {
+      targetDb = getFirestoreLite(targetApp, dbId !== '(default)' ? dbId : undefined);
+    }
+    poolDbCache.set(cacheKey, targetDb);
+    return targetDb;
+  } catch (err) {
+    console.warn('[Firebase] Failed initializing pool shard DB:', err);
+    return null;
+  }
+}
+
+export function getMasterCloudPoolLocal(): CloudPoolShard[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = getRawLocalStorageItem(MASTER_CLOUD_POOL_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (s) => s && s.id && s.firebaseConfig && s.firebaseConfig.apiKey && s.firebaseConfig.projectId
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function saveMasterCloudPool(shards: CloudPoolShard[], syncToCloud: boolean = true): void {
+  const clean = (Array.isArray(shards) ? shards : []).filter(
+    (s) => s && s.id && s.firebaseConfig?.apiKey && s.firebaseConfig?.projectId
+  );
+  if (typeof window !== 'undefined') {
+    setRawLocalStorageItem(MASTER_CLOUD_POOL_KEY, JSON.stringify(clean));
+    window.dispatchEvent(new CustomEvent('baf_master_cloud_pool_updated', { detail: clean }));
+  }
+  if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const nowIso = new Date().toISOString();
+    setDoc(
+      doc(masterDbInstance, 'app_settings', MASTER_CLOUD_POOL_KEY),
+      {
+        settingKey: MASTER_CLOUD_POOL_KEY,
+        value: JSON.stringify(clean),
+        updatedAt: nowIso,
+        updatedBy: 'master_admin',
+      },
+      { merge: true }
+    ).catch((err) => {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
+    });
+  }
+}
+
+let lastCloudPoolFetchAt = 0;
+let inFlightCloudPoolPromise: Promise<CloudPoolShard[]> | null = null;
+
+export async function fetchMasterCloudPoolFromCloud(force: boolean = false): Promise<CloudPoolShard[]> {
+  const local = getMasterCloudPoolLocal();
+  if (!masterDbInstance || isFirestoreQuotaExceeded()) return local;
+  if (!force && isMasterCooldownActive('baf_cd_cloud_pool', lastCloudPoolFetchAt)) {
+    return local;
+  }
+  if (inFlightCloudPoolPromise) return inFlightCloudPoolPromise;
+
+  inFlightCloudPoolPromise = (async () => {
+    try {
+      lastCloudPoolFetchAt = markMasterCooldownTimestamp('baf_cd_cloud_pool');
+      const snap = await getDoc(doc(masterDbInstance!, 'app_settings', MASTER_CLOUD_POOL_KEY));
+      if (snap.exists()) {
+        const d = snap.data();
+        const rawVal = d?.value;
+        if (rawVal) {
+          const parsed = typeof rawVal === 'string' ? JSON.parse(rawVal) : rawVal;
+          if (Array.isArray(parsed)) {
+            const clean = parsed.filter(
+              (s: any) => s && s.id && s.firebaseConfig?.apiKey && s.firebaseConfig?.projectId
+            );
+            saveMasterCloudPool(clean, false);
+            return clean;
+          }
+        }
+      }
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    } finally {
+      inFlightCloudPoolPromise = null;
+    }
+    return local;
+  })();
+
+  return inFlightCloudPoolPromise;
+}
+
+export async function addCloudPoolShard(
+  label: string,
+  fbConfig: OfficeFirebaseConfig
+): Promise<CloudPoolShard[]> {
+  const current = await fetchMasterCloudPoolFromCloud(false).catch(() => getMasterCloudPoolLocal());
+  const dbId = fbConfig.firestoreDatabaseId?.trim() || '(default)';
+  const shardId = `${fbConfig.projectId}__${dbId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const nowIso = new Date().toISOString();
+
+  const nextShard: CloudPoolShard = {
+    id: shardId,
+    label: String(label || fbConfig.projectId).trim() || fbConfig.projectId,
+    status: 'ACTIVE',
+    firebaseConfig: {
+      apiKey: String(fbConfig.apiKey).trim(),
+      authDomain: String(fbConfig.authDomain || `${fbConfig.projectId}.firebaseapp.com`).trim(),
+      projectId: String(fbConfig.projectId).trim(),
+      storageBucket: String(fbConfig.storageBucket || `${fbConfig.projectId}.appspot.com`).trim(),
+      messagingSenderId: String(fbConfig.messagingSenderId || '').trim(),
+      appId: String(fbConfig.appId || '').trim(),
+      ...(dbId && dbId !== '(default)' ? { firestoreDatabaseId: dbId } : {}),
+    },
+    addedAt: current.find((s) => s.id === shardId)?.addedAt || nowIso,
+    updatedAt: nowIso,
+  };
+
+  const filtered = current.filter((s) => s.id !== shardId);
+  const next = [nextShard, ...filtered];
+  saveMasterCloudPool(next, true);
+  return next;
+}
+
+export async function toggleCloudPoolShardStatus(
+  shardId: string,
+  nextStatus: 'ACTIVE' | 'PAUSED'
+): Promise<CloudPoolShard[]> {
+  const current = getMasterCloudPoolLocal();
+  const nowIso = new Date().toISOString();
+  const next = current.map((s) =>
+    s.id === shardId ? { ...s, status: nextStatus, updatedAt: nowIso } : s
+  );
+  saveMasterCloudPool(next, true);
+  return next;
+}
+
+export async function removeCloudPoolShard(shardId: string): Promise<CloudPoolShard[]> {
+  const current = getMasterCloudPoolLocal();
+  const next = current.filter((s) => s.id !== shardId);
+  saveMasterCloudPool(next, true);
+  return next;
+}
+
+export async function reassignOfficeToCloudConfig(
+  officeCodeInput: string,
+  targetFbConfig: OfficeFirebaseConfig
+): Promise<void> {
+  const code = String(officeCodeInput || '').toUpperCase().trim();
+  if (!code || code === '155-UASU' || code === '155UASU') return;
+
+  const nextFb: OfficeFirebaseConfig = {
+    apiKey: String(targetFbConfig.apiKey).trim(),
+    authDomain: String(targetFbConfig.authDomain || `${targetFbConfig.projectId}.firebaseapp.com`).trim(),
+    projectId: String(targetFbConfig.projectId).trim(),
+    storageBucket: String(targetFbConfig.storageBucket || `${targetFbConfig.projectId}.appspot.com`).trim(),
+    messagingSenderId: String(targetFbConfig.messagingSenderId || '').trim(),
+    appId: String(targetFbConfig.appId || '').trim(),
+    ...(targetFbConfig.firestoreDatabaseId && targetFbConfig.firestoreDatabaseId !== '(default)'
+      ? { firestoreDatabaseId: String(targetFbConfig.firestoreDatabaseId).trim() }
+      : {}),
+    officeCode: code,
+  };
+
+  const nowIso = new Date().toISOString();
+  const cache = getLocalMasterOfficesCache();
+  let matchedRecord: RegisteredOfficeRecord | null = null;
+  Object.keys(cache).forEach((k) => {
+    const rec = cache[k];
+    if (!rec) return;
+    const rCode = String(
+      rec.officeCode || rec.firebaseConfig?.officeCode || generateOfficeCodeFromName(rec.officeName || '')
+    )
+      .toUpperCase()
+      .trim();
+    if (rCode === code) {
+      const mergedFb: OfficeFirebaseConfig = {
+        ...rec.firebaseConfig,
+        ...nextFb,
+        officeCode: code,
+      };
+      const updatedRec: RegisteredOfficeRecord = {
+        ...rec,
+        projectId: nextFb.projectId,
+        firebaseConfig: mergedFb,
+        lastActive: nowIso,
+      };
+      cache[k] = updatedRec;
+      matchedRecord = updatedRec;
+    }
+  });
+  saveLocalMasterOfficesCache(cache);
+
+  // Update Global User -> Office Map entries for this office
+  const globalMap = getGlobalUserOfficeMap();
+  let mapModified = false;
+  Object.keys(globalMap).forEach((bdKey) => {
+    const entry = globalMap[bdKey];
+    if (entry && String(entry.officeCode || '').toUpperCase().trim() === code) {
+      entry.officeConfig = {
+        ...(entry.officeConfig || {
+          officeName: entry.officeName,
+          officeLogo: entry.officeLogo,
+          officeSlogan: entry.officeSlogan,
+          officeBase: entry.officeBase,
+          officeCode: code,
+          firebaseConfig: nextFb,
+        }),
+        firebaseConfig: {
+          ...(entry.officeConfig?.firebaseConfig || {}),
+          ...nextFb,
+        },
+      };
+      entry.updatedAt = nowIso;
+      mapModified = true;
+    }
+  });
+  if (mapModified) {
+    saveGlobalUserOfficeMap(globalMap, true);
+  }
+
+  // Update active custom office config if currently selected
+  const activeCustom = getCustomOfficeConfig();
+  if (activeCustom && String(activeCustom.officeCode || '').toUpperCase().trim() === code) {
+    saveCustomOfficeConfig({
+      ...activeCustom,
+      firebaseConfig: {
+        ...activeCustom.firebaseConfig,
+        ...nextFb,
+      },
+    });
+  }
+
+  // Sync registered_offices document in masterDbInstance
+  if (masterDbInstance && !isFirestoreQuotaExceeded() && matchedRecord) {
+    try {
+      const snap = await getDocs(collection(masterDbInstance, 'registered_offices'));
+      const updates: Promise<any>[] = [];
+      snap.forEach((docSnap) => {
+        const d = docSnap.data() as RegisteredOfficeRecord;
+        const dCode = String(
+          d?.officeCode || d?.firebaseConfig?.officeCode || generateOfficeCodeFromName(d?.officeName || '')
+        )
+          .toUpperCase()
+          .trim();
+        if (dCode === code) {
+          updates.push(
+            setDoc(
+              doc(masterDbInstance!, 'registered_offices', docSnap.id),
+              {
+                officeName: String(d.officeName || code).slice(0, 200),
+                projectId: nextFb.projectId.slice(0, 128),
+                firebaseConfig: {
+                  ...(d.firebaseConfig || {}),
+                  ...nextFb,
+                },
+                lastActive: nowIso,
+              },
+              { merge: true }
+            )
+          );
+        }
+      });
+      await Promise.all(updates);
+    } catch (err) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    }
+  }
+}
+
+export async function resolveAutoCloudFirebaseConfigForNewOffice(
+  officeName: string,
+  officeCode?: string,
+  joinPin?: string
+): Promise<OfficeFirebaseConfig> {
+  const finalCode = (officeCode || generateOfficeCodeFromName(officeName)).toUpperCase().trim();
+  const pool = await fetchMasterCloudPoolFromCloud(false).catch(() => getMasterCloudPoolLocal());
+  const activeShards = pool.filter(
+    (s) => s.status === 'ACTIVE' && s.firebaseConfig?.apiKey && s.firebaseConfig?.projectId
+  );
+
+  if (activeShards.length === 0) {
+    return buildAutoCloudFirebaseConfig(officeName, finalCode, joinPin);
+  }
+
+  // Count how many existing offices already live on each shard
+  const offices = await fetchRegisteredOfficesFromMaster(false).catch(() => getRegisteredOfficesLocal());
+  const shardKey = (fb?: Partial<OfficeFirebaseConfig>) =>
+    `${String(fb?.projectId || '').trim()}::${String(fb?.firestoreDatabaseId || '(default)').trim() || '(default)'}`;
+
+  const counts = new Map<string, number>();
+  activeShards.forEach((s) => counts.set(shardKey(s.firebaseConfig), 0));
+
+  offices.forEach((off) => {
+    if (!off || off.status === 'DISABLED') return;
+    const key = shardKey(off.firebaseConfig || { projectId: off.projectId });
+    if (counts.has(key)) {
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  });
+
+  // Pick the active shard with the fewest assigned offices
+  let chosen = activeShards[0];
+  let minCount = Infinity;
+  for (const shard of activeShards) {
+    const c = counts.get(shardKey(shard.firebaseConfig)) ?? 0;
+    if (c < minCount) {
+      minCount = c;
+      chosen = shard;
+    }
+  }
+
+  return {
+    apiKey: chosen.firebaseConfig.apiKey,
+    authDomain: chosen.firebaseConfig.authDomain || `${chosen.firebaseConfig.projectId}.firebaseapp.com`,
+    projectId: chosen.firebaseConfig.projectId,
+    storageBucket: chosen.firebaseConfig.storageBucket || `${chosen.firebaseConfig.projectId}.appspot.com`,
+    messagingSenderId: chosen.firebaseConfig.messagingSenderId || '',
+    appId: chosen.firebaseConfig.appId || '',
+    ...(chosen.firebaseConfig.firestoreDatabaseId && chosen.firebaseConfig.firestoreDatabaseId !== '(default)'
+      ? { firestoreDatabaseId: chosen.firebaseConfig.firestoreDatabaseId }
+      : {}),
+    officeCode: finalCode,
+    ...(joinPin ? { joinPin: String(joinPin).trim() } : {}),
+  };
+}
+
+export function getShareableFirestoreRulesText(): string {
+  return `rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOptStr(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptNum(data, field) {
+      return !(field in data) || data[field] is number;
+    }
+
+    function isOptBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isValidNativeValue(val) {
+      return val is bool ||
+             val is number ||
+             (val is string && val.size() <= 900000) ||
+             (val is list && val.size() <= 5000) ||
+             (val is map && val.size() <= 5000);
+    }
+
+    function isValidAirman(data) {
+      return data.keys().hasAll(['id', 'bdNo', 'name', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'bdNo', 'rank', 'name', 'fullName', 'flightName', 'trade',
+               'seniority', 'mobileNo', 'bloodGroup', 'addressBlock', 'permanentAddress',
+               'dateJoined', 'dateLeft', 'leaveReason', 'remarks', 'code', 'serNo',
+               'email', 'active', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.bdNo is string && data.bdNo.size() >= 1 && data.bdNo.size() <= 64 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             isOptStr(data, 'rank', 64) &&
+             isOptStr(data, 'fullName', 250) &&
+             isOptStr(data, 'flightName', 64) &&
+             isOptStr(data, 'trade', 128) &&
+             isOptNum(data, 'seniority') &&
+             isOptStr(data, 'mobileNo', 64) &&
+             isOptStr(data, 'bloodGroup', 32) &&
+             isOptStr(data, 'addressBlock', 500) &&
+             isOptStr(data, 'permanentAddress', 500) &&
+             isOptStr(data, 'dateJoined', 64) &&
+             isOptStr(data, 'dateLeft', 64) &&
+             isOptStr(data, 'leaveReason', 500) &&
+             isOptStr(data, 'remarks', 500) &&
+             isOptStr(data, 'code', 64) &&
+             isOptNum(data, 'serNo') &&
+             isOptStr(data, 'email', 200) &&
+             isOptBool(data, 'active');
+    }
+
+    function isValidDutyAssignment(data) {
+      return data.keys().hasAll(['id', 'airmanId', 'date', 'dutyCode', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'airmanId', 'date', 'dutyCode', 'dutyName', 'idaShift',
+               'proxyForFlight', 'disposalScope', 'notes', 'location',
+               'isOfficial', 'isCompleted', 'isDeleted', 'updatedAt', 'updatedBy'
+             ]) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.airmanId is string && data.airmanId.size() >= 1 && data.airmanId.size() <= 128 &&
+             data.date is string && data.date.size() >= 4 && data.date.size() <= 32 &&
+             data.dutyCode is string && data.dutyCode.size() >= 1 && data.dutyCode.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             isOptStr(data, 'dutyName', 200) &&
+             isOptStr(data, 'idaShift', 32) &&
+             isOptStr(data, 'proxyForFlight', 64) &&
+             isOptStr(data, 'disposalScope', 32) &&
+             isOptStr(data, 'notes', 1000) &&
+             isOptStr(data, 'location', 200) &&
+             isOptBool(data, 'isOfficial') &&
+             isOptBool(data, 'isCompleted') &&
+             isOptBool(data, 'isDeleted') &&
+             isOptStr(data, 'updatedBy', 128);
+    }
+
+    function isValidParadeStateLog(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'actionType', 'airmanId', 'airmanName', 'airmanRank', 'airmanTrade',
+               'dutyCode', 'idaShift', 'fromDate', 'toDate', 'notes', 'description',
+               'timestamp', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.timestamp is string && data.timestamp.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             isOptStr(data, 'actionType', 64) &&
+             isOptStr(data, 'airmanId', 128) &&
+             isOptStr(data, 'airmanName', 200) &&
+             isOptStr(data, 'airmanRank', 64) &&
+             isOptStr(data, 'airmanTrade', 128) &&
+             isOptStr(data, 'dutyCode', 64) &&
+             isOptStr(data, 'idaShift', 32) &&
+             isOptStr(data, 'fromDate', 32) &&
+             isOptStr(data, 'toDate', 32) &&
+             isOptStr(data, 'notes', 1000) &&
+             isOptStr(data, 'description', 2000);
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['id', 'bdNo', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'airmanId', 'bdNo', 'userId', 'rank', 'name', 'mobileNo', 'flightName',
+               'trade', 'role', 'status', 'password', 'pin', 'isProtected', 'adminPass', 'ownerPass',
+               'detailOrder', 'detailedAt', 'detailedBy', 'remarks', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+             data.bdNo is string && data.bdNo.size() >= 1 && data.bdNo.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             isOptStr(data, 'airmanId', 128) &&
+             isOptStr(data, 'userId', 64) &&
+             isOptStr(data, 'rank', 64) &&
+             isOptStr(data, 'name', 200) &&
+             isOptStr(data, 'mobileNo', 64) &&
+             isOptStr(data, 'flightName', 64) &&
+             isOptStr(data, 'trade', 128) &&
+             isOptStr(data, 'role', 32) &&
+             isOptStr(data, 'status', 32) &&
+             isOptStr(data, 'password', 128) &&
+             isOptStr(data, 'pin', 128) &&
+             isOptBool(data, 'isProtected') &&
+             isOptStr(data, 'adminPass', 128) &&
+             isOptStr(data, 'ownerPass', 128) &&
+             isOptStr(data, 'detailOrder', 128) &&
+             isOptStr(data, 'detailedAt', 64) &&
+             isOptStr(data, 'detailedBy', 128) &&
+             isOptStr(data, 'remarks', 500);
+    }
+
+    function isValidAppSetting(data) {
+      return data.keys().hasAll(['settingKey', 'updatedAt']) &&
+             data.keys().hasOnly(['settingKey', 'value', 'updatedAt', 'updatedBy']) &&
+             data.settingKey is string && data.settingKey.size() >= 1 && data.settingKey.size() <= 200 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             (!('value' in data) || isValidNativeValue(data.value)) &&
+             isOptStr(data, 'updatedBy', 128);
+    }
+
+    function isValidSyncManifest(data) {
+      return data.keys().hasAll(['id', 'revision', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'revision', 'updatedAt', 'updatedBySessionId',
+               'updatedByBdNo', 'lastReason', 'changedCollections',
+               'dataHash', 'airmenCount', 'assignmentsCount'
+             ]) &&
+             data.id is string && data.id.size() >= 1 && data.id.size() <= 64 &&
+             data.revision is number &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             isOptStr(data, 'updatedBySessionId', 128) &&
+             isOptStr(data, 'updatedByBdNo', 64) &&
+             isOptStr(data, 'lastReason', 200) &&
+             isOptStr(data, 'dataHash', 128) &&
+             isOptNum(data, 'airmenCount') &&
+             isOptNum(data, 'assignmentsCount') &&
+             (!('changedCollections' in data) || (
+               data.changedCollections is list &&
+               data.changedCollections.size() <= 20 &&
+               (data.changedCollections.size() == 0 || data.changedCollections[0] is string)
+             ));
+    }
+
+    match /airmen/{airmanId} {
+      allow get: if isValidId(airmanId);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(airmanId) && isValidAirman(incoming());
+      allow delete: if isValidId(airmanId);
+    }
+
+    match /duty_assignments/{assignmentId} {
+      allow get: if isValidId(assignmentId);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(assignmentId) && isValidDutyAssignment(incoming());
+      allow delete: if isValidId(assignmentId);
+    }
+
+    match /parade_states/{logId} {
+      allow get: if isValidId(logId);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(logId) && isValidParadeStateLog(incoming());
+      allow delete: if isValidId(logId);
+    }
+
+    match /user_profiles/{profileId} {
+      allow get: if isValidId(profileId);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(profileId) && isValidUserProfile(incoming());
+      allow delete: if isValidId(profileId);
+    }
+
+    match /app_settings/{settingKey} {
+      allow get: if isValidId(settingKey);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(settingKey) && isValidAppSetting(incoming());
+      allow delete: if isValidId(settingKey);
+    }
+
+    match /system_meta/{metaId} {
+      allow get: if isValidId(metaId);
+      allow list: if request.time != null;
+      allow create, update: if isValidId(metaId) && isValidSyncManifest(incoming());
+      allow delete: if false;
+    }
+
+    match /test/{testId} {
+      allow get: if isValidId(testId);
+      allow write: if false;
+    }
+  }
+}`;
 }
 
 // ============================================================================
@@ -1846,6 +2484,23 @@ export function getOfficeLoginHistoryLocal(officeCodeInput?: string): any[] {
   return [];
 }
 
+function resolveDbForOfficeCode(code: string): FirestoreLite | null {
+  if (code && code !== '155-UASU' && code !== '155UASU' && code !== '155-UASU-BAF') {
+    const offices = getRegisteredOfficesLocal();
+    const matched = offices.find(
+      (o) =>
+        String(o.officeCode || o.firebaseConfig?.officeCode || '')
+          .toUpperCase()
+          .trim() === code
+    );
+    if (matched?.firebaseConfig?.projectId && matched?.firebaseConfig?.apiKey) {
+      const shardDb = getOrInitFirestoreForConfig(matched.firebaseConfig);
+      if (shardDb) return shardDb;
+    }
+  }
+  return masterDbInstance;
+}
+
 export async function fetchOfficeLoginHistory(officeCodeInput?: string): Promise<any[]> {
   const code = String(officeCodeInput || getActiveOfficeCode() || '155-UASU')
     .toUpperCase()
@@ -1857,15 +2512,16 @@ export async function fetchOfficeLoginHistory(officeCodeInput?: string): Promise
     : `baf_user_login_history__office_${safeCode}`;
   const cloudDocId = is155
     ? 'baf_user_login_history'
-    : `off_${safeCode}__baf_user_login_history`;
+    : `off_${safeCode}__baf_user_login_history`.slice(0, 120);
   const masterId = getMasterUserId();
 
   const localLogs = getOfficeLoginHistoryLocal(code);
+  const targetDb = resolveDbForOfficeCode(code);
 
   let cloudLogs: any[] = [];
-  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
+  if (targetDb && !isFirestoreQuotaExceeded()) {
     try {
-      const snap = await getDoc(doc(masterDbInstance, 'app_settings', cloudDocId));
+      const snap = await getDoc(doc(targetDb, 'app_settings', cloudDocId));
       if (snap.exists()) {
         const d = snap.data() as any;
         if (Array.isArray(d?.value)) {
@@ -1913,7 +2569,7 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
     : `baf_user_login_history__office_${safeCode}`;
   const cloudDocId = is155
     ? 'baf_user_login_history'
-    : `off_${safeCode}__baf_user_login_history`;
+    : `off_${safeCode}__baf_user_login_history`.slice(0, 120);
 
   try {
     if (typeof window !== 'undefined') {
@@ -1922,9 +2578,10 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
         window.dispatchEvent(new CustomEvent('baf_login_history_updated', { detail: [] }));
       }
     }
-    if (masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const targetDb = resolveDbForOfficeCode(code);
+    if (targetDb && !isFirestoreQuotaExceeded()) {
       setDoc(
-        doc(masterDbInstance, 'app_settings', cloudDocId),
+        doc(targetDb, 'app_settings', cloudDocId),
         {
           settingKey: cloudDocId,
           value: [],
@@ -3430,9 +4087,10 @@ export async function approveOfficeRegistrationRequest(
   setRawLocalStorageItem(primaryScopedDbKey, JSON.stringify(officeDbObj));
   setRawLocalStorageItem(legacyScopedDbKey, JSON.stringify(officeDbObj));
 
-  // 5. Sync Approved Office, Biodata Register & User Management to Local Registry & Firestore (`masterDbInstance`)
+  // 5. Auto-assign Firebase cloud from Master Cloud Pool & prepare Office Registration config
+  const assignedFbConfig = await resolveAutoCloudFirebaseConfigForNewOffice(req.officeName, officeCode);
   const fbConfig: OfficeFirebaseConfig = {
-    ...buildAutoCloudFirebaseConfig(req.officeName, officeCode),
+    ...assignedFbConfig,
     officeSlogan: officeProfilePayload.officeSlogan,
     officeBase: officeProfilePayload.officeBase,
     adminBdNo: cleanBd,
@@ -3515,13 +4173,14 @@ export async function approveOfficeRegistrationRequest(
     officeDbObj.airmen.length || 1
   ).catch(() => {});
 
-  if (masterDbInstance && !isFirestoreQuotaExceeded()) {
+  const targetOfficeDb = getOrInitFirestoreForConfig(fbConfig) || masterDbInstance;
+  if (targetOfficeDb && !isFirestoreQuotaExceeded()) {
     try {
       const docPrefix = `off_${safeCode}__`;
-      const safeAirmanDocId = `${docPrefix}BD_${cleanBd}`;
-      const safeUserDocId = `${docPrefix}user-login-${cleanBd}`;
-      const safeProfileDocId = `${docPrefix}${OFFICE_PROFILE_STORAGE_KEY}`;
-      const safeManifestDocId = `off_${safeCode}_sync_manifest`;
+      const safeAirmanDocId = `${docPrefix}BD_${cleanBd}`.slice(0, 120);
+      const safeUserDocId = `${docPrefix}user-login-${cleanBd}`.slice(0, 120);
+      const safeProfileDocId = `${docPrefix}${OFFICE_PROFILE_STORAGE_KEY}`.slice(0, 120);
+      const safeManifestDocId = `${docPrefix}sync_manifest`.slice(0, 120);
 
       const firestoreAirmanPayload = {
         id: safeAirmanDocId,
@@ -3574,6 +4233,11 @@ export async function approveOfficeRegistrationRequest(
         updatedBy: 'master_admin',
       };
 
+      const bundleIndexDocId = `${docPrefix}__bundle_index_v1`.slice(0, 120);
+      const bundleAirmenDocId = `${docPrefix}__bundle_airmen_v1`.slice(0, 120);
+      const bundleUsersDocId = `${docPrefix}__bundle_users_v1`.slice(0, 120);
+      const bundleSettingsDocId = `${docPrefix}__bundle_settings_v1`.slice(0, 120);
+
       const firestoreManifestPayload = {
         id: safeManifestDocId,
         revision: Date.now(),
@@ -3588,10 +4252,57 @@ export async function approveOfficeRegistrationRequest(
       };
 
       Promise.all([
-        setDoc(doc(masterDbInstance, 'airmen', safeAirmanDocId), firestoreAirmanPayload, { merge: true }),
-        setDoc(doc(masterDbInstance, 'user_profiles', safeUserDocId), firestoreUserPayload, { merge: true }),
-        setDoc(doc(masterDbInstance, 'app_settings', safeProfileDocId), firestoreProfileSettingPayload, { merge: true }),
-        setDoc(doc(masterDbInstance, 'system_meta', safeManifestDocId), firestoreManifestPayload, { merge: true }),
+        setDoc(doc(targetOfficeDb, 'airmen', safeAirmanDocId), firestoreAirmanPayload, { merge: true }),
+        setDoc(doc(targetOfficeDb, 'user_profiles', safeUserDocId), firestoreUserPayload, { merge: true }),
+        setDoc(doc(targetOfficeDb, 'app_settings', safeProfileDocId), firestoreProfileSettingPayload, { merge: true }),
+        setDoc(
+          doc(targetOfficeDb, 'app_settings', bundleIndexDocId),
+          {
+            settingKey: bundleIndexDocId,
+            value: { version: 1, months: [], monthChunks: {}, overflowSettingKeys: [], updatedAt: nowIso },
+            updatedAt: nowIso,
+            updatedBy: 'master_admin',
+          },
+          { merge: true }
+        ),
+        setDoc(
+          doc(targetOfficeDb, 'app_settings', bundleAirmenDocId),
+          {
+            settingKey: bundleAirmenDocId,
+            value: { items: [{ ...firestoreAirmanPayload, id: airmanId }] },
+            updatedAt: nowIso,
+            updatedBy: 'master_admin',
+          },
+          { merge: true }
+        ),
+        setDoc(
+          doc(targetOfficeDb, 'app_settings', bundleUsersDocId),
+          {
+            settingKey: bundleUsersDocId,
+            value: { items: [{ ...firestoreUserPayload, id: `user-login-${cleanBd}` }] },
+            updatedAt: nowIso,
+            updatedBy: 'master_admin',
+          },
+          { merge: true }
+        ),
+        setDoc(
+          doc(targetOfficeDb, 'app_settings', bundleSettingsDocId),
+          {
+            settingKey: bundleSettingsDocId,
+            value: {
+              items: {
+                [OFFICE_PROFILE_STORAGE_KEY]: {
+                  value: JSON.stringify(officeProfilePayload),
+                  updatedAt: nowIso,
+                },
+              },
+            },
+            updatedAt: nowIso,
+            updatedBy: 'master_admin',
+          },
+          { merge: true }
+        ),
+        setDoc(doc(targetOfficeDb, 'system_meta', safeManifestDocId), firestoreManifestPayload, { merge: true }),
       ]).catch((err) => {
         if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, err?.message);
       });

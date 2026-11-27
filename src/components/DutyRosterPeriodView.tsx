@@ -1,9 +1,8 @@
 import { DateNavigator } from './DateNavigator';
-import { createPortal } from 'react-dom';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Airman, DutyAssignment, UserRole, FlightName } from '../types';
 import { INITIAL_AIRMEN } from '../data/initialAirmen';
-import { getFlightDutyQuotaForDate } from '../data/officialDutyRatioMatrix';
+import { getFlightDutyQuotaForDate, getStoredDutyMatrix } from '../data/officialDutyRatioMatrix';
 import {
  exportDutyRosterDocx,
  exportIdacRosterDocx,
@@ -12,17 +11,18 @@ import {
  formatRank,
  IdacRosterRow,
 } from '../utils/docxExport';
+import { exportElementToPdf } from '../utils/pdfExport';
+import { PageSetupBar } from './PageSetupBar';
+import { PageSetupConfig, getPageDimensions } from '../utils/pageSetup';
 import {
- Calendar,
  FileDown,
- Printer,
- RefreshCw,
+ Download,
+ FileText,
+ ChevronDown,
  Layers,
  Shield,
  Clock,
- CheckCircle2,
  ListFilter,
- X,
  ChevronLeft,
  ChevronRight,
  PenTool,
@@ -49,13 +49,50 @@ export type RosterMode = 'BASE_DUTIES' | 'IDAC_DUTY';
 
 const formatBlockName = (block: string | undefined) => {
   if (!block) return 'L/O';
-  let formatted = block;
-  formatted = formatted.replace(/Airmen's Mess, Block No:\s*/gi, '');
-  formatted = formatted.replace(/Sgt's Mess, Block No:\s*/gi, '');
-  formatted = formatted.replace(/\s*&\s*Svc\s*/gi, '');
-  formatted = formatted.replace(/Svc\s*Qtr\s*No:\s*/gi, 'Qtr No: ');
-  formatted = formatted.replace(/Svc\s*/gi, '');
-  return formatted.trim() || 'L/O';
+  const raw = block.trim();
+  const lower = raw.toLowerCase();
+  if (!raw || raw === '-' || lower === 'n/a') return 'L/O';
+
+  // Detect Living In (Mess / Block / Barrack / direct block number pattern like 123/08)
+  const isLivingIn =
+    lower.includes('mess') ||
+    /\bblock\b/i.test(raw) ||
+    lower.includes('barrack') ||
+    lower === 'l/i' ||
+    lower === 'li' ||
+    lower === 'l/in' ||
+    lower === 'live in' ||
+    lower === 'living in' ||
+    /^[a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?$/.test(raw);
+
+  if (!isLivingIn) {
+    return 'L/O';
+  }
+
+  if (/^[a-zA-Z]?\s*\d+\s*\/\s*\d+[a-zA-Z]?$/.test(raw)) {
+    return raw.replace(/\s+/g, '');
+  }
+
+  const blockMatch = raw.match(/Block\s*(?:No[:\s]*)?([^,]+)/i);
+  if (blockMatch) {
+    const cleaned = blockMatch[1].replace(/^[.\-\s:]+|[.\-\s:]+$/g, '').trim();
+    if (cleaned) return cleaned;
+  }
+
+  const strippedMess = raw
+    .replace(/Airmen's\s*Mess/gi, '')
+    .replace(/Sgt's\s*Mess/gi, '')
+    .replace(/Mess/gi, '')
+    .replace(/^[,\s:.-]+|[,\s:.-]+$/g, '')
+    .trim();
+
+  if (strippedMess && !/^(l\/i|li|l\/in|live\s*in|living\s*in)$/i.test(strippedMess)) {
+    return strippedMess;
+  }
+
+  if (lower.includes("airmen's mess")) return "Airmen's Mess";
+  if (lower.includes("sgt's mess")) return "Sgt's Mess";
+  return 'L/I';
 };
 
 export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
@@ -65,7 +102,53 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  onViewProfile,
 }) => {
  const [rosterMode, setRosterMode] = useState<RosterMode>('BASE_DUTIES');
-  const [showPrintPreview, setShowPrintPreview] = useState(false);
+ const [pageSetup, setPageSetup] = useState<PageSetupConfig>({
+   paperSize: 'a4',
+   orientation: 'portrait',
+ });
+ const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
+ const [matrixRevision, setMatrixRevision] = useState<number>(0);
+ const isExportingRef = useRef<boolean>(false);
+ const exportDropdownRef = useRef<HTMLDivElement | null>(null);
+ const pageDims = getPageDimensions(pageSetup);
+
+ useEffect(() => {
+   const bumpMatrix = () => setMatrixRevision((prev) => prev + 1);
+   window.addEventListener('baf_duty_ratio_updated', bumpMatrix);
+   window.addEventListener('baf_duty_ratio_history_updated', bumpMatrix);
+   window.addEventListener('baf_custom_duties_updated', bumpMatrix);
+   window.addEventListener('baf_duty_distribution_updated', bumpMatrix);
+   window.addEventListener('baf_state_updated', bumpMatrix);
+   window.addEventListener('baf_settings_updated', bumpMatrix);
+   window.addEventListener('storage', bumpMatrix);
+   return () => {
+     window.removeEventListener('baf_duty_ratio_updated', bumpMatrix);
+     window.removeEventListener('baf_duty_ratio_history_updated', bumpMatrix);
+     window.removeEventListener('baf_custom_duties_updated', bumpMatrix);
+     window.removeEventListener('baf_duty_distribution_updated', bumpMatrix);
+     window.removeEventListener('baf_state_updated', bumpMatrix);
+     window.removeEventListener('baf_settings_updated', bumpMatrix);
+     window.removeEventListener('storage', bumpMatrix);
+   };
+ }, []);
+
+ useEffect(() => {
+   if (!showExportMenu) return;
+   const handleClickOutside = (e: MouseEvent) => {
+     if (exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as Node)) {
+       setShowExportMenu(false);
+     }
+   };
+   const handleKeyDown = (e: KeyboardEvent) => {
+     if (e.key === 'Escape') setShowExportMenu(false);
+   };
+   document.addEventListener('mousedown', handleClickOutside);
+   document.addEventListener('keydown', handleKeyDown);
+   return () => {
+     document.removeEventListener('mousedown', handleClickOutside);
+     document.removeEventListener('keydown', handleKeyDown);
+   };
+ }, [showExportMenu]);
 
  // Helper to get Friday-to-Thursday week boundaries
  const getDutyWeekRange = (refDateStr: string, offsetWeeks: number = 0) => {
@@ -99,7 +182,6 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const [weekPreset, setWeekPreset] = useState<'THIS_WEEK' | 'NEXT_WEEK' | 'FULL_MONTH' | 'CUSTOM'>('THIS_WEEK');
  const [loading, setLoading] = useState<boolean>(false);
  const [assignments, setAssignments] = useState<DutyAssignment[]>([]);
- const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
  const officeHasFlights = useMemo(() => doesOfficeHaveFlights(airmen), [airmen]);
  const is155Uasu = useMemo(() => isDefault155UasuOffice(), []);
  const tradesList = useMemo(() => ['All', ...getBiodataTrades(airmen)], [airmen]);
@@ -426,30 +508,96 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  return output;
  };
 
- const syDutyItems = buildSectionItems((code) => code === 'GD');
- const baseTaskforceItems = buildSectionItems((code) => code === 'BTF');
- const nazirparaItems = buildSectionItems((code) => code === 'NTF');
- const halishaharItems = buildSectionItems((code) => code === 'HALISHAHAR');
+ const dutyMatrix = useMemo(() => {
+   return getStoredDutyMatrix(fromDate);
+ }, [fromDate, matrixRevision]);
 
- const baseDutiesSections: RosterSectionData[] = [
- {
- title: 'SY DUTY',
- subTitle: 'Cpl & Below',
- items: syDutyItems,
- },
- {
- title: 'BASE TASKFORCE',
- items: baseTaskforceItems,
- },
- {
- title: 'NAZIRPARA TASKFORCE',
- items: nazirparaItems,
- },
- {
- title: 'HALISHAHAR DUTY',
- items: halishaharItems,
- },
- ];
+ const baseDutiesSections: RosterSectionData[] = useMemo(() => {
+   const excludedCodes = new Set([
+     'IDAC',
+     'IDA',
+     'IDA C',
+     'IDA_C',
+     'IDAC CENTER',
+     'IDA CENTER',
+     'AIRPORT',
+     'AIRFIELD',
+     'RECEPTION',
+     'ON_PARADE',
+     'DUTY_OFF',
+     'LEAVE',
+     'TDY',
+     'ATT',
+     'DETT',
+     'BAKE_N_BITE',
+     'BAKE_BITE',
+     'CANTEEN',
+   ]);
+
+   const builtSections: RosterSectionData[] = [];
+   const handledCodes = new Set<string>();
+
+   const sortedMatrix = [...dutyMatrix].sort(
+     (a, b) => (Number(a.serNo) || 999) - (Number(b.serNo) || 999)
+   );
+
+   sortedMatrix.forEach((tbl) => {
+     const codeUpper = String(tbl.dutyCode || '').trim().toUpperCase();
+     const idLower = String(tbl.id || '').trim().toLowerCase();
+     if (!codeUpper || excludedCodes.has(codeUpper) || idLower.startsWith('idac_')) return;
+     if (handledCodes.has(codeUpper)) return;
+     handledCodes.add(codeUpper);
+
+     const isSecurityDuty = codeUpper === 'GD' || idLower === 'security_duty';
+     const items = buildSectionItems((c) => {
+       const cu = String(c || '').trim().toUpperCase();
+       if (isSecurityDuty) {
+         return cu === 'GD' || cu === 'SY' || cu === 'SY_DUTY' || cu === 'SECURITY';
+       }
+       return cu === codeUpper;
+     });
+
+     const fullTitle = (tbl.title || '').trim() || codeUpper;
+     let subTitle: string | undefined;
+     if (isSecurityDuty && Array.isArray(tbl.eligibleRanks) && tbl.eligibleRanks.length > 0) {
+       const hasSenior = tbl.eligibleRanks.some((r) => ['MWO', 'SWO', 'WO', 'Sgt'].includes(r));
+       if (!hasSenior) {
+         subTitle = 'Cpl & Below';
+       }
+     }
+
+     builtSections.push({
+       title: fullTitle,
+       ...(subTitle ? { subTitle } : {}),
+       items,
+     });
+   });
+
+   // Fallback for core Base Duties if matrix has no matching entries
+   const fallbackDefs: Array<{
+     code: string;
+     match: (c: string) => boolean;
+     title: string;
+     subTitle?: string;
+   }> = [
+     { code: 'GD', match: (c) => c === 'GD' || c === 'SY', title: 'BASE SECURITY DUTY', subTitle: 'Cpl & Below' },
+     { code: 'BTF', match: (c) => c === 'BTF', title: 'BASE TASKFORCE DUTY' },
+     { code: 'NTF', match: (c) => c === 'NTF', title: 'NAJIRPARA TASKFORCE DUTY' },
+     { code: 'HALISHAHAR', match: (c) => c === 'HALISHAHAR', title: 'HALISHAHAR TASKFORCE DUTY' },
+   ];
+
+   fallbackDefs.forEach((fb) => {
+     if (!handledCodes.has(fb.code)) {
+       builtSections.push({
+         title: fb.title,
+         ...(fb.subTitle ? { subTitle: fb.subTitle } : {}),
+         items: buildSectionItems(fb.match),
+       });
+     }
+   });
+
+   return builtSections;
+ }, [dutyMatrix, assignments, activeDates, airmanMap, officeHasFlights, flightFilter, tradeFilter]);
 
  // Format shift cell with proxy flight tag and flight placeholder fallback
  const formatShiftDutyDisplay = (
@@ -581,37 +729,67 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  };
  });
 
- // Handle Export Word Document (.docx)
- const handleExportDocx = async () => {
- setIsExportingDocx(true);
- try {
- const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
- if (rosterMode === 'BASE_DUTIES') {
- await exportDutyRosterDocx(
- activeOfficeName,
- headerDateRange,
- baseDutiesSections,
- `Base_Duties_Roster_${activeOfficeName.replace(/\s+/g, '_')}_${fromDate}_to_${toDate}.docx`
- );
- } else {
- const dateSub = weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : headerDateRange;
- await exportIdacRosterDocx(
- activeOfficeName,
- dateSub,
- idacRosterRows,
- `IDAC_Duty_Roster_${activeOfficeName.replace(/\s+/g, '_')}_${weekPreset === 'FULL_MONTH' ? fromDate.slice(0, 7) : `${fromDate}_to_${toDate}`}.docx`,
- idacSignature,
- formatRosterMonthShort(fromDate)
- );
- }
- } catch (err) {
- console.error('Error generating docx file:', err);
- } finally {
- setIsExportingDocx(false);
- }
+ const getRosterBaseFileName = () => {
+   const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
+   const safeOffice = activeOfficeName.replace(/\s+/g, '_');
+   if (rosterMode === 'BASE_DUTIES') {
+     return `Base_Duties_Roster_${safeOffice}_${fromDate}_to_${toDate}`;
+   }
+   return `IDAC_Duty_Roster_${safeOffice}_${weekPreset === 'FULL_MONTH' ? fromDate.slice(0, 7) : `${fromDate}_to_${toDate}`}`;
  };
 
- const handlePrint = () => { setShowPrintPreview(true); };
+ // Handle Export PDF (.pdf)
+ const handleExportPdf = async () => {
+   setShowExportMenu(false);
+   if (isExportingRef.current) return;
+   isExportingRef.current = true;
+   try {
+     await exportElementToPdf({
+       elementId: 'duty-roster-document',
+       fileName: `${getRosterBaseFileName()}.pdf`,
+       format: pageSetup.paperSize,
+       orientation: pageSetup.orientation,
+     });
+   } catch (err) {
+     console.error('Error generating pdf file:', err);
+   } finally {
+     isExportingRef.current = false;
+   }
+ };
+
+ // Handle Export Word Document (.docx)
+ const handleExportDocx = async () => {
+   setShowExportMenu(false);
+   if (isExportingRef.current) return;
+   isExportingRef.current = true;
+   try {
+     const activeOfficeName = getActiveOfficeIdentity().officeName || '155 UASU BAF';
+     if (rosterMode === 'BASE_DUTIES') {
+       await exportDutyRosterDocx(
+         activeOfficeName,
+         headerDateRange,
+         baseDutiesSections,
+         `${getRosterBaseFileName()}.docx`,
+         pageSetup
+       );
+     } else {
+       const dateSub = weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : headerDateRange;
+       await exportIdacRosterDocx(
+         activeOfficeName,
+         dateSub,
+         idacRosterRows,
+         `${getRosterBaseFileName()}.docx`,
+         idacSignature,
+         formatRosterMonthShort(fromDate),
+         pageSetup
+       );
+     }
+   } catch (err) {
+     console.error('Error generating docx file:', err);
+   } finally {
+     isExportingRef.current = false;
+   }
+ };
 
  const topContent = (
  <>
@@ -727,7 +905,8 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
  )}
 
- {/* Signatures Settings Button (Dedicated for IDAC Duty) */}
+ {/* Signatures Settings Button (Only visible when IDAC Duty is selected) */}
+ {rosterMode === 'IDAC_DUTY' && (
  <button
  type="button"
  onClick={() => setShowIdacSignatureModal(true)}
@@ -737,27 +916,42 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  <PenTool className="w-4 h-4 text-blue-600 dark:text-blue-400" />
  <span>Signatures</span>
  </button>
+ )}
 
- {/* Export document button */}
- <button
- onClick={handleExportDocx}
- disabled={isExportingDocx}
- className="flex items-center space-x-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl font-bold text-xs shadow-xs transition-colors disabled:opacity-50"
- title="Download formatted document"
- >
- <FileDown className="w-4 h-4" />
- <span>{isExportingDocx ? 'Generating...' : 'Download Document'}</span>
- </button>
+ {/* Export Dropdown Button (PDF / DOCX Direct Download) */}
+ <div className="relative" ref={exportDropdownRef}>
+   <button
+     type="button"
+     onClick={() => setShowExportMenu((prev) => !prev)}
+     className="flex items-center space-x-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black text-xs sm:text-sm shadow-lg shadow-emerald-900/20 transition-all cursor-pointer"
+     title="Export PDF or DOCX"
+   >
+     <Download className="w-4 h-4" />
+     <span>Export</span>
+     <ChevronDown className={`w-4 h-4 transition-transform ${showExportMenu ? 'rotate-180' : ''}`} />
+   </button>
 
- {/* Print PDF button */}
- <button
- onClick={handlePrint}
- className="flex items-center space-x-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-xs shadow-xs transition-colors"
- title="Print or Save as PDF"
- >
- <Printer className="w-4 h-4" />
- <span>Official Export / Print</span>
- </button>
+   {showExportMenu && (
+     <div className="absolute right-0 mt-2 w-44 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden py-1">
+       <button
+         type="button"
+         onClick={handleExportPdf}
+         className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer"
+       >
+         <FileText className="w-4 h-4 text-rose-500 shrink-0" />
+         <span>Pdf (.pdf)</span>
+       </button>
+       <button
+         type="button"
+         onClick={handleExportDocx}
+         className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-700/70"
+       >
+         <FileDown className="w-4 h-4 text-blue-500 shrink-0" />
+         <span>Docx (.docx)</span>
+       </button>
+     </div>
+   )}
+ </div>
  </div>
  </div>
 
@@ -842,24 +1036,42 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
   );
 
   const renderDocument = () => (
-    <>
+    <div className="space-y-4">
+      {/* PAGE SETUP BAR DIRECTLY ABOVE PREVIEW */}
+      <PageSetupBar
+        value={pageSetup}
+        onChange={setPageSetup}
+        defaultLabel="Default: A4 Portrait"
+      />
+
+      {/* ACTUAL PRINTABLE WHITE PAPER PREVIEW IN SELECTED PAGE SETUP */}
+      <div className="bg-slate-200/70 dark:bg-slate-950/60 border border-slate-300/70 dark:border-slate-800 rounded-2xl p-3 sm:p-5 overflow-x-auto print:bg-white print:border-none print:p-0">
+        <div
+          id="duty-roster-document"
+          className="bg-white text-black border border-slate-300 rounded-2xl shadow-xl p-6 sm:p-10 mx-auto overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none print:p-0"
+          style={{
+            width: '100%',
+            maxWidth: `${pageDims.widthPx}px`,
+            minHeight: `${Math.round(pageDims.heightPx * 0.72)}px`,
+          }}
+        >
       {/* ========================================================================= */}
  {/* OPTION 1: BASE DUTY (Up to Najirpara Taskforce with Range 1-4 Format) */}
  {/* ========================================================================= */}
  {rosterMode === 'BASE_DUTIES' && (
- <div className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white rounded-2xl border border-slate-200 dark:border-slate-700 shadow-lg p-6 sm:p-10 max-w-4xl mx-auto font-sans print:p-0 print:border-none print:shadow-none">
+ <div className="bg-white text-black font-sans">
  {/* Document Header */}
- <div className="text-center pb-4 border-b border-slate-300 dark:border-slate-700">
+ <div data-pdf-repeat-header="true" className="text-center pb-4 border-b border-slate-300">
  <div className="flex justify-center mb-2">
  <Logo155UASU className="h-14 w-14" />
  </div>
- <h2 className="text-base sm:text-lg font-black uppercase tracking-wider underline">
+ <h2 className="text-base sm:text-lg font-black uppercase tracking-wider underline text-black">
  BASE DUTY: AIRMEN
  </h2>
- <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200 mt-0.5">
+ <h3 className="text-sm font-bold text-black mt-0.5">
  ({getActiveOfficeIdentity().officeName})
  </h3>
- <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1">
+ <p className="text-xs font-bold text-black mt-1">
  ({headerDateRange})
  </p>
  </div>
@@ -872,12 +1084,12 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  return (
  <div key={sIdx} className="space-y-2">
  {/* Section Title */}
- <div className="text-center">
- <h4 className="text-xs sm:text-sm font-black uppercase tracking-wider underline">
+ <div data-pdf-section-heading="true" className="text-center">
+ <h4 className="text-xs sm:text-sm font-black uppercase tracking-wider underline text-black">
  {sec.title}
  </h4>
  {sec.subTitle && (
- <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300 dark:text-slate-300">
+ <div className="text-[11px] font-bold text-black">
  ({sec.subTitle})
  </div>
  )}
@@ -885,48 +1097,46 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  {/* Table */}
  <div className="overflow-x-auto">
- <table className="w-full text-center border-collapse border border-black dark:border-white print:border-black text-xs font-medium">
+ <table className="no-zebra w-full text-center border-collapse border border-black text-xs font-medium text-black">
  <thead>
- <tr className="bg-slate-200/80 dark:bg-slate-800/80 font-bold border-b border-black dark:border-white print:border-black text-[11px]">
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2 w-12">Ser No</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">BD No</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">Rank</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-3 text-center">Name</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">Trade</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">Block</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">Mobile No</th>
- <th className="border border-black dark:border-white print:border-black py-1.5 px-2">Date</th>
- 
+ <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-[11px] text-black">
+ <th className="border border-black py-1.5 px-2 w-12">Ser No</th>
+ <th className="border border-black py-1.5 px-2">BD No</th>
+ <th className="border border-black py-1.5 px-2">Rank</th>
+ <th className="border border-black py-1.5 px-3 text-center">Name</th>
+ <th className="border border-black py-1.5 px-2">Trade</th>
+ <th className="border border-black py-1.5 px-2">Block</th>
+ <th className="border border-black py-1.5 px-2">Mobile No</th>
+ <th className="border border-black py-1.5 px-2">Date</th>
  </tr>
  </thead>
  <tbody>
  {sec.items.map((item, idx) => (
- <tr key={idx} className="border-b border-black dark:border-white print:border-black hover:bg-slate-50 dark:hover:bg-slate-800">
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-mono">
+ <tr key={idx} className={`border-b border-black ${idx % 2 === 1 ? 'pdf-alt-row bg-[#f8fafc]' : 'bg-white'}`}>
+ <td className="border border-black py-1 px-2 font-mono">
  {item.serNo}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-mono font-bold">
+ <td className="border border-black py-1 px-2 font-mono font-bold">
  {item.bdNo}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-bold">
+ <td className="border border-black py-1 px-2 font-bold">
  {item.rank}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-3 text-center font-bold">
+ <td className="border border-black py-1 px-3 text-center font-bold">
  {item.name}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2">
+ <td className="border border-black py-1 px-2">
  {item.trade}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-mono">
+ <td className="border border-black py-1 px-2 font-mono">
  {item.block}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-mono font-bold text-slate-800 dark:text-slate-200">
+ <td className="border border-black py-1 px-2 font-mono font-bold text-black">
  {item.mobileNo}
  </td>
- <td className="border border-black dark:border-white print:border-black py-1 px-2 font-bold bg-slate-50 dark:bg-slate-800">
+ <td className="border border-black py-1 px-2 font-bold text-black">
  {item.dateStr}
  </td>
- 
  </tr>
  ))}
  </tbody>
@@ -938,7 +1148,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  {/* Empty notice if no duties in this period */}
  {baseDutiesSections.every((s) => s.items.length === 0) && (
- <div className="py-12 text-center text-slate-400">
+ <div className="py-12 text-center text-slate-500">
  <p className="text-sm font-semibold">
  No base duties assigned for the period {headerDateRange}.
  </p>
@@ -957,18 +1167,18 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  {rosterMode === 'IDAC_DUTY' && (
  <div
  id="idac-duty-roster-sheet"
- className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white rounded-2xl border border-slate-300 dark:border-slate-700 shadow-lg p-6 sm:p-10 max-w-4xl mx-auto font-[Arial,Helvetica,sans-serif] print:p-0 print:border-none print:shadow-none"
+ className="bg-white text-black font-[Arial,Helvetica,sans-serif]"
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {/* Document Header */}
- <div className="text-center pb-5 border-b border-slate-300 dark:border-slate-700">
+ <div data-pdf-repeat-header="true" className="text-center pb-5 border-b border-slate-300">
  <div className="flex justify-center mb-2">
  <Logo155UASU className="h-14 w-14" />
  </div>
- <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide underline text-slate-950 dark:text-white">
+ <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide underline text-black">
  IDAC DUTY ROSTER : {getActiveOfficeIdentity().officeName}
  </h2>
- <p className="text-xs font-bold text-slate-800 dark:text-slate-200 mt-1">
+ <p className="text-xs font-bold text-black mt-1">
  {weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : `(${headerDateRange})`}
  </p>
  </div>
@@ -976,7 +1186,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  {/* IDA Center Duty Table */}
  <div className="mt-6 overflow-x-auto">
  <table
- className="w-full text-center border-collapse border border-black dark:border-white print:border-black"
+ className="no-zebra w-full text-center border-collapse border border-black text-black"
  style={{
  fontFamily: 'Arial, sans-serif',
  fontSize: '12pt',
@@ -985,20 +1195,20 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  >
  <thead>
  {/* Table Heading Row Bold */}
- <tr className="bg-slate-200/90 dark:bg-slate-800/90 font-bold border-b border-black dark:border-white print:border-black text-slate-950 dark:text-white">
- <th className="border border-black dark:border-white print:border-black py-2.5 px-3 font-bold w-24">Date</th>
- <th className="border border-black dark:border-white print:border-black py-2.5 px-3 font-bold w-28">Day</th>
- <th className="border border-black dark:border-white print:border-black py-2.5 px-4 font-bold">
+ <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-black">
+ <th className="border border-black py-2.5 px-3 font-bold w-24">Date</th>
+ <th className="border border-black py-2.5 px-3 font-bold w-28">Day</th>
+ <th className="border border-black py-2.5 px-4 font-bold">
  Morning
- <div className="text-[10pt] font-normal text-slate-700 dark:text-slate-300 dark:text-slate-300">(0730F - 1430F)</div>
+ <div className="text-[10pt] font-normal text-slate-700">(0730F - 1430F)</div>
  </th>
- <th className="border border-black dark:border-white print:border-black py-2.5 px-4 font-bold">
+ <th className="border border-black py-2.5 px-4 font-bold">
  Afternoon
- <div className="text-[10pt] font-normal text-slate-700 dark:text-slate-300 dark:text-slate-300">(1430F - 2100F)</div>
+ <div className="text-[10pt] font-normal text-slate-700">(1430F - 2100F)</div>
  </th>
- <th className="border border-black dark:border-white print:border-black py-2.5 px-4 font-bold">
+ <th className="border border-black py-2.5 px-4 font-bold">
  Night
- <div className="text-[10pt] font-normal text-slate-700 dark:text-slate-300 dark:text-slate-300">(2100F - 0730F)</div>
+ <div className="text-[10pt] font-normal text-slate-700">(2100F - 0730F)</div>
  </th>
  </tr>
  </thead>
@@ -1007,30 +1217,30 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  {idacRosterRows.map((row, idx) => (
  <tr
  key={idx}
- className={`border-b border-black dark:border-white print:border-black ${idx % 2 === 1 ? 'bg-slate-50/50 dark:bg-slate-800/50' : 'bg-white dark:bg-slate-900'}`}
+ className={`border-b border-black ${idx % 2 === 1 ? 'pdf-alt-row bg-[#f8fafc]' : 'bg-white'}`}
  >
  {/* Date */}
- <td className="border border-black dark:border-white print:border-black py-2 px-3 font-normal text-slate-900 dark:text-white whitespace-nowrap">
+ <td className="border border-black py-2 px-3 font-normal text-black whitespace-nowrap">
  {row.dateDisplay}
  </td>
 
  {/* Day */}
- <td className="border border-black dark:border-white print:border-black py-2 px-3 font-normal text-slate-900 dark:text-white whitespace-nowrap">
+ <td className="border border-black py-2 px-3 font-normal text-black whitespace-nowrap">
  {row.dayDisplay}
  </td>
 
  {/* Morning (0730F - 1430F) */}
- <td className="border border-black dark:border-white print:border-black py-2 px-3 font-normal text-slate-900 dark:text-white">
+ <td className="border border-black py-2 px-3 font-normal text-black">
  {row.morning}
  </td>
 
  {/* Afternoon (1430F - 2100F) */}
- <td className="border border-black dark:border-white print:border-black py-2 px-3 font-normal text-slate-900 dark:text-white">
+ <td className="border border-black py-2 px-3 font-normal text-black">
  {row.afternoon}
  </td>
 
  {/* Night (2100F - 0730F) */}
- <td className="border border-black dark:border-white print:border-black py-2 px-3 font-normal text-slate-900 dark:text-white">
+ <td className="border border-black py-2 px-3 font-normal text-black">
  {row.night}
  </td>
  </tr>
@@ -1044,7 +1254,8 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  {/* Official Signature Footer (Right Side - Authorized By) */}
  <div
- className="flex justify-end items-end pt-2 text-slate-900 dark:text-white print:text-black text-xs"
+ data-pdf-keep-together="true"
+ className="flex justify-end items-end pt-2 text-black text-xs"
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  <div
@@ -1053,21 +1264,21 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  title="Click to configure IDAC Duty signature"
  >
  {idacSignature.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
+ <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
  <span className="font-bold underline">
  {idacSignature.digitalSignatureText || idacSignature.name}
  </span>
- <span className="block text-[8px] font-mono not-italic text-slate-600 dark:text-slate-400">
+ <span className="block text-[8px] font-mono not-italic text-slate-600">
  [Digitally Signed • BAF Verified]
  </span>
  </div>
  )}
- <div className="border-t border-slate-900 dark:border-white print:border-black pt-1.5 group-hover:border-blue-500 transition-colors">
+ <div className="border-t border-black pt-1.5 group-hover:border-blue-600 transition-colors">
  <div className="text-xs uppercase font-black">{idacSignature.name}</div>
  <div className="text-[11px] font-normal">{idacSignature.rank}</div>
  <div className="text-[11px] font-normal">{idacSignature.designation}</div>
  <div className="text-[10px] uppercase font-bold">{idacSignature.unit || getActiveOfficeIdentity().officeName}</div>
- <div className="text-[11px] font-normal text-slate-900 dark:text-white print:text-black mt-0.5">
+ <div className="text-[11px] font-normal text-black mt-0.5">
  {formatRosterMonthShort(fromDate)}
  </div>
  </div>
@@ -1075,51 +1286,15 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
  </div>
  )}
- 
-    </>
+        </div>
+      </div>
+    </div>
   );
 
   return (
     <div className="duty-register-print space-y-6">
       {topContent}
       {renderDocument()}
-      {showPrintPreview && createPortal(
-        <div className="fixed inset-0 z-[100] flex flex-col bg-slate-900/90 backdrop-blur-sm overflow-hidden print:bg-white print:static print:h-auto print:w-auto print:overflow-visible print:block">
-          <div className="flex-none bg-slate-900 border-b border-slate-700 p-4 flex items-center justify-between shadow-2xl print:hidden z-10 sticky top-0">
-            <h2 className="text-white font-bold text-lg">Print Preview</h2>
-            <div className="flex items-center space-x-3 text-white">
-              <button
-                onClick={handleExportDocx}
-                disabled={isExportingDocx}
-                className="flex items-center space-x-2 px-6 py-2.5 bg-blue-700 hover:bg-blue-600 text-white rounded-xl font-black text-sm shadow-lg shadow-blue-900/20 transition-all cursor-pointer disabled:opacity-50"
-              >
-                <FileDown className="w-5 h-5" />
-                <span>{isExportingDocx ? 'Generating...' : 'Download Document'}</span>
-              </button>
-              <button
-                onClick={() => window.print()}
-                className="flex items-center space-x-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black text-sm shadow-lg shadow-emerald-900/20 transition-all cursor-pointer"
-              >
-                <Printer className="w-5 h-5" />
-                <span>Official Export / Print</span>
-              </button>
-              <button
-                onClick={() => setShowPrintPreview(false)}
-                className="flex items-center space-x-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-sm transition-colors cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-                <span>Close</span>
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-auto bg-slate-800 p-4 sm:p-8 flex justify-center print:bg-white print:p-0 print:block print:overflow-visible h-[calc(100vh-80px)]">
-            <div className="bg-white text-black p-8 sm:p-12 shadow-2xl max-w-[1200px] w-full mx-auto print:shadow-none print:p-0 print:w-full print:max-w-none print:m-0 h-max min-h-full">
-              {renderDocument()}
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
       {/* Dedicated IDAC Signature Modal (100% independent of Parade State) */}
       <IdacSignatureModal
         isOpen={showIdacSignatureModal}

@@ -25,11 +25,11 @@ process.on('unhandledRejection', (reason: any) => {
   console.error('[server] Unhandled Rejection:', reason);
 });
 
-import { INITIAL_AIRMEN } from './src/data/initialAirmen';
-import { DUTY_TYPES } from './src/data/dutyTypes';
-import { generateSeedAssignments, calculateDutyStats, detectConflicts } from './src/data/rosterGenerator';
-import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from './src/data/officialJulyAugustData';
-import { Airman, DutyAssignment, FlightName, ParadeShift, ActivityHistoryItem, DutyCategoryCode, IDAShift, ImportHistoryBatch } from './src/types';
+import { INITIAL_AIRMEN } from './src/data/initialAirmen.ts';
+import { DUTY_TYPES } from './src/data/dutyTypes.ts';
+import { generateSeedAssignments, calculateDutyStats, detectConflicts } from './src/data/rosterGenerator.ts';
+import { generateOfficialMonthAssignments, getOfficialParadeStateDocument } from './src/data/officialJulyAugustData.ts';
+import type { Airman, DutyAssignment, FlightName, ParadeShift, ActivityHistoryItem, DutyCategoryCode, IDAShift, ImportHistoryBatch } from './src/types.ts';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'baf_unit_data.json');
@@ -318,6 +318,30 @@ async function startServer() {
   const HOST = hostArgIdx !== -1 && process.argv[hostArgIdx + 1] ? process.argv[hostArgIdx + 1] : (process.env.HOST || '0.0.0.0');
 
   let db = loadDatabase();
+
+  const resolveAppBuildId = (): string => {
+    try {
+      const distIndex = path.join(process.cwd(), 'dist', 'index.html');
+      if (fs.existsSync(distIndex)) {
+        const stat = fs.statSync(distIndex);
+        return `dist_${Math.round(stat.mtimeMs)}_${stat.size}`;
+      }
+    } catch {}
+    return `boot_${Date.now()}`;
+  };
+  const APP_BUILD_ID = resolveAppBuildId();
+
+  app.get('/api/app-build-version', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.json({ buildId: APP_BUILD_ID, updatedAt: new Date().toISOString() });
+  });
+
+  app.get('/sw.js', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
 
 
   app.all('/api/supabase/*', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
@@ -772,6 +796,10 @@ async function startServer() {
 
       const officeQuery = rawCode && !is155Office ? `?office=${encodeURIComponent(rawCode)}` : '';
 
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+        .split(',')[0]
+        .trim();
+      const originBase = `${forwardedProto}://${req.get('host') || 'localhost'}`;
       const manifestPayload = {
         id: '/',
         name: appName,
@@ -783,6 +811,17 @@ async function startServer() {
         background_color: '#020617',
         theme_color: '#020617',
         orientation: 'any',
+        prefer_related_applications: false,
+        related_applications: [
+          {
+            platform: 'webapp',
+            url: `${originBase}/api/pwa-manifest`,
+          },
+          {
+            platform: 'webapp',
+            url: `${originBase}/manifest.json`,
+          },
+        ],
         icons: [
           {
             src: icon192Url,
@@ -1959,8 +1998,8 @@ async function startServer() {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    // Initial connection message
-    res.write(`data: ${JSON.stringify({ type: 'CONNECTED', timestamp: Date.now() })}\n\n`);
+    // Initial connection message with buildId so live & PWA clients detect new deploys immediately
+    res.write(`data: ${JSON.stringify({ type: 'CONNECTED', buildId: APP_BUILD_ID, timestamp: Date.now() })}\n\n`);
 
     sseClients.add(res);
 
@@ -2889,8 +2928,21 @@ ${combinedText.substring(0, 30000)}
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          }
+        },
+      })
+    );
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

@@ -1,5 +1,5 @@
-import { DutyTypeInfo } from '../types';
-import { getCustomDuties } from '../utils/customDuties';
+import type { DutyTypeInfo } from '../types.ts';
+import { getCustomDuties } from '../utils/customDuties.ts';
 
 export const INITIAL_DUTY_TYPES: DutyTypeInfo[] = [
   {

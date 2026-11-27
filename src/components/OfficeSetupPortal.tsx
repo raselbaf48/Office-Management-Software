@@ -27,11 +27,13 @@ import {
 import {
   CustomOfficeConfig,
   RegisteredOfficeRecord,
+  firebaseConfig,
   saveCustomOfficeConfig,
   registerOfficeInMasterTelemetry,
   getCustomOfficeConfig,
   generateOfficeCodeFromName,
   buildAutoCloudFirebaseConfig,
+  resolveAutoCloudFirebaseConfigForNewOffice,
   fetchRegisteredOfficesFromMaster,
   purgeOfficeLocalStorageKeys,
   updateActiveOfficeProfile,
@@ -46,6 +48,7 @@ import {
   pushUserProfilesToFirebase,
   fetchUserProfilesFromFirebase,
   purgeActiveCustomOfficeCloudData,
+  pushBundlesToFirebase,
 } from '../services/firebaseFirestoreService';
 import { localDb } from '../services/localDatabase';
 import { resetDutyMatrixToDefault } from '../data/officialDutyRatioMatrix';
@@ -274,7 +277,7 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
 
     setIsFinalizing(true);
     try {
-      const autoFirebaseConfig = buildAutoCloudFirebaseConfig(
+      const autoFirebaseConfig = await resolveAutoCloudFirebaseConfigForNewOffice(
         officeName.trim(),
         cleanCode,
         cleanJoinPin || undefined
@@ -344,6 +347,15 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
       saveDetailedUsers(brandNewUsers, true);
 
       await pushUserProfilesToFirebase(brandNewUsers).catch(() => {});
+      await pushBundlesToFirebase({
+        airmen: [],
+        users: brandNewUsers,
+        settingsMap: {
+          baf_office_profile_v1: { value: JSON.stringify(savedProfile), updatedAt: nowIso },
+        },
+        updateIndex: true,
+        reason: 'new_office_seed',
+      }).catch(() => {});
 
       // 4. Register this office in Master Owner Telemetry (`registered_offices`) with 1 user (Admin)
       await registerOfficeInMasterTelemetry(newOfficeConfig, 1);
@@ -398,7 +410,7 @@ export const OfficeSetupPortal: React.FC<OfficeSetupPortalProps> = ({
           officeName: codeQuery,
           officeLogo: '/155-uasu-baf-logo.png',
           officeCode: formattedCode,
-          projectId: 'steady-weft-wf6jr',
+          projectId: firebaseConfig.projectId || 'default',
           firebaseConfig: buildAutoCloudFirebaseConfig(codeQuery, formattedCode),
           totalUsers: 1,
           createdAt: new Date().toISOString(),

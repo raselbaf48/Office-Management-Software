@@ -904,10 +904,23 @@ export function extractManifestDataHash(manifest?: SyncManifest | null): string 
   return m && m[1] ? m[1] : '';
 }
 
+export function extractManifestChangedMonths(manifest?: SyncManifest | null): string[] {
+  if (!manifest) return [];
+  const lr = String(manifest.lastReason || '');
+  const m = lr.match(/\|m=([0-9,-]+)/);
+  if (!m || !m[1]) return [];
+  const set = new Set<string>();
+  m[1].split(',').forEach((part) => {
+    const clean = part.trim();
+    if (/^\d{4}-\d{2}$/.test(clean)) set.add(clean);
+  });
+  return Array.from(set);
+}
+
 export async function publishSyncManifest(
   changedCollections: string[],
   reason: string = 'delta_sync',
-  extraMeta?: { dataHash?: string; airmenCount?: number; assignmentsCount?: number }
+  extraMeta?: { dataHash?: string; airmenCount?: number; assignmentsCount?: number; changedMonths?: string[] }
 ): Promise<void> {
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   const manifestDocId = getSyncManifestDocId();
@@ -917,10 +930,21 @@ export async function publishSyncManifest(
     .slice(0, 20);
   const effectiveHash =
     extraMeta?.dataHash || extractManifestDataHash(cachedManifestResult) || '';
-  const baseReason = String(reason || 'delta_sync').split('|h=')[0].slice(0, 90) || 'delta_sync';
-  const encodedReason = effectiveHash
-    ? clampStr(`${baseReason}|h=${effectiveHash}`, 200) || baseReason
-    : clampStr(baseReason, 200) || 'delta_sync';
+  const baseReason =
+    String(reason || 'delta_sync')
+      .split('|h=')[0]
+      .split('|m=')[0]
+      .slice(0, 75) || 'delta_sync';
+  const cleanMonths = Array.from(
+    new Set(
+      (extraMeta?.changedMonths || [])
+        .map((m) => String(m || '').trim())
+        .filter((m) => /^\d{4}-\d{2}$/.test(m))
+    )
+  ).slice(0, 4);
+  const hashSuffix = effectiveHash ? `|h=${effectiveHash}` : '';
+  const monthSuffix = cleanMonths.length > 0 ? `|m=${cleanMonths.join(',')}` : '';
+  const encodedReason = clampStr(`${baseReason}${hashSuffix}${monthSuffix}`, 200) || 'delta_sync';
 
   const coreManifest: SyncManifest = {
     id: manifestDocId,
@@ -1582,6 +1606,618 @@ export async function executeFullMigrationToFirebase(dbData?: any): Promise<Fire
   return result;
 }
 
+// -------------------- 7B. BUNDLED CLOUD SYNC (99% QUOTA REDUCTION) --------------------
+
+export const BUNDLE_INDEX_KEY = '__bundle_index_v1';
+export const BUNDLE_AIRMEN_KEY = '__bundle_airmen_v1';
+export const BUNDLE_USERS_KEY = '__bundle_users_v1';
+export const BUNDLE_HISTORY_KEY = '__bundle_history_v1';
+export const BUNDLE_SETTINGS_KEY = '__bundle_settings_v1';
+
+export interface BundleIndex {
+  version: number;
+  months: string[];
+  monthChunks?: Record<string, string[]>;
+  overflowSettingKeys?: string[];
+  updatedAt: string;
+}
+
+export function getMonthBundleKey(ym: string, partIdx: number = 1): string {
+  const safeYm = String(ym || 'unknown').replace(/[^0-9-]/g, '_');
+  return partIdx <= 1 ? `__bundle_asn_${safeYm}` : `__bundle_asn_${safeYm}_p${partIdx}`;
+}
+
+export function scopeAppSettingDocId(settingKey: string): string {
+  const prefix = getOfficeFirestoreDocPrefix();
+  if (!prefix) return sanitizeDocId(settingKey).slice(0, 120);
+  const altPrefix = prefix.replace(/__$/, '_');
+  let baseKey = String(settingKey || '');
+  if (baseKey.startsWith(prefix)) {
+    baseKey = baseKey.slice(prefix.length);
+  } else if (altPrefix && baseKey.startsWith(altPrefix)) {
+    baseKey = baseKey.slice(altPrefix.length);
+  }
+  const cleanBase = sanitizeDocId(baseKey);
+  return `${prefix}${cleanBase}`.slice(0, 120);
+}
+
+export async function fetchSingleAppSettingDoc(settingKey: string, timeoutMs = 8000): Promise<any | null> {
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return null;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new Error(`Device offline while reading app_settings/${settingKey}`);
+  }
+  const scopedDocId = scopeAppSettingDocId(settingKey);
+  try {
+    const snap = await withFirestoreTimeout(
+      getDoc(doc(dbLite, 'app_settings', scopedDocId)),
+      timeoutMs,
+      `get:app_settings/${scopedDocId}`
+    );
+    return snap.exists() ? snap.data() : null;
+  } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      setFirestoreQuotaExceeded(true, err?.message);
+      throw err;
+    }
+    if (isPermissionDeniedError(err)) {
+      handleFirestoreError(err, OperationType.GET, `app_settings/${scopedDocId}`);
+    }
+    if (typeof fetch === 'function') {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          firebaseConfig.projectId
+        )}/databases/${encodeURIComponent(
+          firebaseConfig.firestoreDatabaseId || '(default)'
+        )}/documents/app_settings/${encodeURIComponent(scopedDocId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+        const headers = await getOptionalAuthHeaders();
+        const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+        if (res.status === 404) return null;
+        if (res.ok) {
+          const docJson = await res.json();
+          if (docJson?.fields) {
+            return decodeFirestoreRestFields(docJson.fields);
+          }
+          return null;
+        }
+        const errText = await res.text().catch(() => `HTTP ${res.status}`);
+        if (res.status === 429 || isQuotaExceededError(errText)) {
+          setFirestoreQuotaExceeded(true, errText);
+          throw new Error(errText);
+        }
+        if (res.status === 403 || isPermissionDeniedError(errText)) {
+          handleFirestoreError(new Error('Missing or insufficient permissions'), OperationType.GET, `app_settings/${scopedDocId}`);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw err;
+  }
+}
+
+let cachedBundleIndexPrefix = '';
+let cachedBundleIndexValue: BundleIndex | null = null;
+let cachedBundleSettingsPrefix = '';
+let cachedBundleSettingsEntries: Record<string, { value: any; updatedAt: string }> = {};
+
+function syncBundleCachesPrefix(): string {
+  const prefix = getOfficeFirestoreDocPrefix();
+  if (prefix !== cachedBundleIndexPrefix) {
+    cachedBundleIndexPrefix = prefix;
+    cachedBundleIndexValue = null;
+  }
+  if (prefix !== cachedBundleSettingsPrefix) {
+    cachedBundleSettingsPrefix = prefix;
+    cachedBundleSettingsEntries = {};
+  }
+  return prefix;
+}
+
+function parseBundleObjectValue(rawVal: any): any {
+  if (rawVal === undefined || rawVal === null) return null;
+  if (typeof rawVal === 'string') {
+    try {
+      return JSON.parse(rawVal);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof rawVal === 'object') return rawVal;
+  return null;
+}
+
+function extractItemsArrayFromBundleDoc(docData: any): any[] {
+  if (!docData) return [];
+  const parsed = parseBundleObjectValue(docData.value);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.items)) return parsed.items;
+  return [];
+}
+
+export async function fetchBundleIndexFromFirebase(): Promise<BundleIndex | null> {
+  syncBundleCachesPrefix();
+  const docData = await fetchSingleAppSettingDoc(BUNDLE_INDEX_KEY, 6000);
+  if (!docData) return null;
+  const val = parseBundleObjectValue(docData.value);
+  if (!val || typeof val !== 'object' || !Array.isArray(val.months)) return null;
+  const idx: BundleIndex = {
+    version: Number(val.version) || 1,
+    months: val.months.map((m: any) => String(m)).filter(Boolean),
+    monthChunks: val.monthChunks && typeof val.monthChunks === 'object' ? val.monthChunks : {},
+    overflowSettingKeys: Array.isArray(val.overflowSettingKeys)
+      ? val.overflowSettingKeys.map((k: any) => String(k)).filter(Boolean)
+      : [],
+    updatedAt: String(val.updatedAt || docData.updatedAt || ''),
+  };
+  cachedBundleIndexValue = idx;
+  return idx;
+}
+
+function unpackSettingsBundleDoc(
+  docData: any,
+  out: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>
+) {
+  if (!docData) return;
+  const val = parseBundleObjectValue(docData.value);
+  if (!val || typeof val !== 'object') return;
+  const entries = val.entries && typeof val.entries === 'object' ? val.entries : val;
+  const docUpdatedAt = String(docData.updatedAt || '');
+  const docUpdatedBy = docData.updatedBy;
+  for (const [k, rawEntry] of Object.entries(entries)) {
+    if (!k) continue;
+    if (rawEntry && typeof rawEntry === 'object' && 'value' in (rawEntry as any)) {
+      const entryObj = rawEntry as any;
+      const entryUpdatedAt = String(entryObj.updatedAt || docUpdatedAt);
+      out[k] = {
+        valueStr: decodeNativeValueToString(entryObj.value),
+        rawValue: entryObj.value,
+        updatedAt: entryUpdatedAt,
+        updatedBy: docUpdatedBy,
+      };
+      cachedBundleSettingsEntries[k] = { value: entryObj.value, updatedAt: entryUpdatedAt };
+    } else if (rawEntry !== undefined) {
+      out[k] = {
+        valueStr: decodeNativeValueToString(rawEntry),
+        rawValue: rawEntry,
+        updatedAt: docUpdatedAt,
+        updatedBy: docUpdatedBy,
+      };
+      cachedBundleSettingsEntries[k] = { value: rawEntry, updatedAt: docUpdatedAt };
+    }
+  }
+}
+
+export async function fetchSpecificBundlesFromFirebase(opts: {
+  airmen?: boolean;
+  users?: boolean;
+  history?: boolean;
+  settings?: boolean;
+  months?: string[];
+  index?: BundleIndex | null;
+}): Promise<{
+  index: BundleIndex | null;
+  airmen: any[];
+  assignments: any[];
+  history: any[];
+  users: any[];
+  settingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>;
+}> {
+  syncBundleCachesPrefix();
+  const index = opts.index !== undefined ? opts.index : await fetchBundleIndexFromFirebase();
+  const airmenPromise = opts.airmen ? fetchSingleAppSettingDoc(BUNDLE_AIRMEN_KEY, 8000) : Promise.resolve(null);
+  const usersPromise = opts.users ? fetchSingleAppSettingDoc(BUNDLE_USERS_KEY, 8000) : Promise.resolve(null);
+  const historyPromise = opts.history ? fetchSingleAppSettingDoc(BUNDLE_HISTORY_KEY, 8000) : Promise.resolve(null);
+  const settingsBundlePromise = opts.settings ? fetchSingleAppSettingDoc(BUNDLE_SETTINGS_KEY, 8000) : Promise.resolve(null);
+
+  const overflowKeys = opts.settings && index?.overflowSettingKeys ? index.overflowSettingKeys : [];
+  const overflowPromises = overflowKeys.map((k) => fetchSingleAppSettingDoc(k, 8000));
+
+  const targetMonths = Array.from(new Set((opts.months || []).filter((m) => /^\d{4}-\d{2}$/.test(m))));
+  const monthChunkKeys: string[] = [];
+  targetMonths.forEach((ym) => {
+    const chunks = index?.monthChunks?.[ym];
+    if (Array.isArray(chunks) && chunks.length > 0) {
+      chunks.forEach((cKey) => monthChunkKeys.push(cKey));
+    } else {
+      monthChunkKeys.push(getMonthBundleKey(ym, 1));
+    }
+  });
+  const monthPromises = monthChunkKeys.map((ck) => fetchSingleAppSettingDoc(ck, 10000));
+
+  const [airmenDoc, usersDoc, historyDoc, settingsBundleDoc, overflowDocs, monthDocs] = await Promise.all([
+    airmenPromise,
+    usersPromise,
+    historyPromise,
+    settingsBundlePromise,
+    Promise.all(overflowPromises),
+    Promise.all(monthPromises),
+  ]);
+
+  const airmen = extractItemsArrayFromBundleDoc(airmenDoc);
+  const users = extractItemsArrayFromBundleDoc(usersDoc);
+  const history = extractItemsArrayFromBundleDoc(historyDoc);
+  const assignments: any[] = [];
+  monthDocs.forEach((mDoc) => {
+    const items = extractItemsArrayFromBundleDoc(mDoc);
+    items.forEach((d) => {
+      assignments.push(isCorruptedAssignmentRecord(d) ? { ...d, isDeleted: true } : d);
+    });
+  });
+
+  const settingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }> = {};
+  if (opts.settings) {
+    unpackSettingsBundleDoc(settingsBundleDoc, settingsMeta);
+    overflowDocs.forEach((d: any) => {
+      if (!d) return;
+      const rawKey = stripActiveOfficePrefixFromRawId(String(d.settingKey || ''));
+      if (!rawKey) return;
+      settingsMeta[rawKey] = {
+        valueStr: decodeNativeValueToString(d.value),
+        rawValue: d.value,
+        updatedAt: String(d.updatedAt || ''),
+        updatedBy: d.updatedBy,
+      };
+    });
+  }
+
+  return { index, airmen, assignments, history, users, settingsMeta };
+}
+
+export async function fetchAllCollectionsViaBundles(): Promise<{
+  exists: boolean;
+  index?: BundleIndex;
+  airmen: any[];
+  assignments: any[];
+  history: any[];
+  users: any[];
+  settingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>;
+}> {
+  const index = await fetchBundleIndexFromFirebase();
+  if (!index) {
+    return {
+      exists: false,
+      airmen: [],
+      assignments: [],
+      history: [],
+      users: [],
+      settingsMeta: {},
+    };
+  }
+  const fetched = await fetchSpecificBundlesFromFirebase({
+    airmen: true,
+    users: true,
+    history: true,
+    settings: true,
+    months: index.months,
+    index,
+  });
+  return {
+    exists: true,
+    index,
+    airmen: fetched.airmen,
+    assignments: fetched.assignments,
+    history: fetched.history,
+    users: fetched.users,
+    settingsMeta: fetched.settingsMeta,
+  };
+}
+
+function buildAssignmentMonthChunks(ym: string, items: any[]): Array<{ key: string; items: any[] }> {
+  if (!items || items.length === 0) return [];
+  const MAX_ITEMS_PER_CHUNK = 1200;
+  const MAX_JSON_BYTES = 540000;
+  const chunks: Array<{ key: string; items: any[] }> = [];
+  let current: any[] = [];
+  let currentBytes = 32;
+  let partIdx = 1;
+
+  for (const item of items) {
+    const cleanItem = stripUndefinedDeep(item);
+    const itemStr = JSON.stringify(cleanItem);
+    const itemBytes = itemStr.length + 2;
+    if (
+      current.length > 0 &&
+      (current.length >= MAX_ITEMS_PER_CHUNK || currentBytes + itemBytes > MAX_JSON_BYTES)
+    ) {
+      chunks.push({ key: getMonthBundleKey(ym, partIdx), items: current });
+      partIdx++;
+      current = [];
+      currentBytes = 32;
+    }
+    current.push(cleanItem);
+    currentBytes += itemBytes;
+  }
+
+  if (current.length > 0) {
+    chunks.push({ key: getMonthBundleKey(ym, partIdx), items: current });
+  }
+  return chunks;
+}
+
+export async function pushBundlesToFirebase(opts: {
+  airmen?: any[];
+  assignmentsByMonth?: Record<string, any[]>;
+  touchedMonths?: string[];
+  deletedAssignments?: any[];
+  history?: any[];
+  users?: any[];
+  settingsMap?: Record<string, { value: any; updatedAt?: string }>;
+  mergeExistingSettings?: boolean;
+  allActiveMonths?: string[];
+  updateIndex?: boolean;
+  reason?: string;
+}): Promise<{ writtenOps: number; index: BundleIndex | null }> {
+  syncBundleCachesPrefix();
+  if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) {
+    return { writtenOps: 0, index: cachedBundleIndexValue };
+  }
+
+  const nowIso = new Date().toISOString();
+  const updatedBy = clampStr(getCurrentBdNo() || 'user', 128) || 'user';
+  const ops: Array<{ path: string; docId: string; data: Record<string, any> }> = [];
+  const deleteDocIds: string[] = [];
+
+  let baseIndex: BundleIndex | null = cachedBundleIndexValue;
+  const needsIndexUpdate =
+    Boolean(opts.updateIndex) ||
+    Boolean(opts.touchedMonths && opts.touchedMonths.length > 0) ||
+    Boolean(opts.assignmentsByMonth) ||
+    Boolean(opts.settingsMap) ||
+    !baseIndex;
+
+  if (needsIndexUpdate && !baseIndex) {
+    baseIndex = await fetchBundleIndexFromFirebase().catch(() => null);
+  }
+
+  const nextMonthChunks: Record<string, string[]> = { ...(baseIndex?.monthChunks || {}) };
+  const activeMonthsSet = new Set<string>(
+    opts.allActiveMonths ? opts.allActiveMonths : baseIndex?.months || []
+  );
+  let overflowKeysSet = new Set<string>(baseIndex?.overflowSettingKeys || []);
+
+  if (Array.isArray(opts.airmen)) {
+    const formattedAirmen = opts.airmen.map((a) => stripUndefinedDeep(formatAirmanForFirestore(a, nowIso).data));
+    ops.push({
+      path: 'app_settings',
+      docId: sanitizeDocId(BUNDLE_AIRMEN_KEY),
+      data: {
+        settingKey: BUNDLE_AIRMEN_KEY,
+        value: { items: formattedAirmen },
+        updatedAt: nowIso,
+        updatedBy,
+      },
+    });
+  }
+
+  if (Array.isArray(opts.users)) {
+    const validUsers = opts.users.filter(
+      (u) => u && u.bdNo && String(u.bdNo).toLowerCase() !== 'deleted_admin'
+    );
+    const formattedUsers = validUsers.map((u) =>
+      stripUndefinedDeep(formatUserProfileForFirestore(u, nowIso).data)
+    );
+    ops.push({
+      path: 'app_settings',
+      docId: sanitizeDocId(BUNDLE_USERS_KEY),
+      data: {
+        settingKey: BUNDLE_USERS_KEY,
+        value: { items: formattedUsers },
+        updatedAt: nowIso,
+        updatedBy,
+      },
+    });
+  }
+
+  if (Array.isArray(opts.history)) {
+    const slicedHist = opts.history.slice(0, 300).map((h) =>
+      stripUndefinedDeep(formatParadeStateForFirestore(h, nowIso).data)
+    );
+    // Safety trim to keep under 550KB
+    const trimmedHist: any[] = [];
+    let bytes = 32;
+    for (const hItem of slicedHist) {
+      const len = JSON.stringify(hItem).length + 2;
+      if (trimmedHist.length > 0 && bytes + len > 540000) break;
+      trimmedHist.push(hItem);
+      bytes += len;
+    }
+    ops.push({
+      path: 'app_settings',
+      docId: sanitizeDocId(BUNDLE_HISTORY_KEY),
+      data: {
+        settingKey: BUNDLE_HISTORY_KEY,
+        value: { items: trimmedHist },
+        updatedAt: nowIso,
+        updatedBy,
+      },
+    });
+  }
+
+  const deletedByMonth = new Map<string, any[]>();
+  const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+  (opts.deletedAssignments || []).forEach((delA) => {
+    if (!delA) return;
+    const ym = String(delA.date || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(ym)) return;
+    const ts = delA.updatedAt ? Date.parse(String(delA.updatedAt)) : nowMs;
+    if (ts && nowMs - ts > FOURTEEN_DAYS_MS) return;
+    const formatted = stripUndefinedDeep(formatDutyAssignmentForFirestore(delA, nowIso, true).data);
+    if (!deletedByMonth.has(ym)) deletedByMonth.set(ym, []);
+    deletedByMonth.get(ym)!.push(formatted);
+  });
+
+  const monthsToWrite = opts.touchedMonths
+    ? Array.from(new Set(opts.touchedMonths.filter((m) => /^\d{4}-\d{2}$/.test(m))))
+    : opts.assignmentsByMonth
+    ? Object.keys(opts.assignmentsByMonth).filter((m) => /^\d{4}-\d{2}$/.test(m))
+    : [];
+
+  for (const ym of monthsToWrite) {
+    const rawList = (opts.assignmentsByMonth && opts.assignmentsByMonth[ym]) || [];
+    const formattedActive: any[] = [];
+    const activeIds = new Set<string>();
+    rawList.forEach((a) => {
+      if (!a || isCorruptedAssignmentRecord(a) || a.isDeleted) return;
+      const f = formatDutyAssignmentForFirestore(a, nowIso, false);
+      activeIds.add(f.docId);
+      formattedActive.push(stripUndefinedDeep(f.data));
+    });
+    const delTombstones = (deletedByMonth.get(ym) || []).filter((d) => !activeIds.has(String(d.id || '')));
+    const combinedItems = [...formattedActive, ...delTombstones];
+
+    const prevChunks = Array.isArray(nextMonthChunks[ym]) ? nextMonthChunks[ym] : [getMonthBundleKey(ym, 1)];
+    if (combinedItems.length === 0) {
+      activeMonthsSet.delete(ym);
+      delete nextMonthChunks[ym];
+      prevChunks.forEach((ck) => deleteDocIds.push(ck));
+      continue;
+    }
+
+    const chunks = buildAssignmentMonthChunks(ym, combinedItems);
+    const newChunkKeys = chunks.map((c) => c.key);
+    prevChunks.forEach((oldKey) => {
+      if (!newChunkKeys.includes(oldKey)) {
+        deleteDocIds.push(oldKey);
+      }
+    });
+
+    if (formattedActive.length > 0 || delTombstones.length > 0) {
+      activeMonthsSet.add(ym);
+      nextMonthChunks[ym] = newChunkKeys;
+    }
+    chunks.forEach((chunk) => {
+      ops.push({
+        path: 'app_settings',
+        docId: sanitizeDocId(chunk.key),
+        data: {
+          settingKey: chunk.key,
+          value: { items: chunk.items },
+          updatedAt: nowIso,
+          updatedBy,
+        },
+      });
+    });
+  }
+
+  if (opts.settingsMap && Object.keys(opts.settingsMap).length > 0) {
+    let existingEntries: Record<string, { value: any; updatedAt: string }> = {
+      ...cachedBundleSettingsEntries,
+    };
+    if (opts.mergeExistingSettings && Object.keys(existingEntries).length === 0) {
+      const existingDoc = await fetchSingleAppSettingDoc(BUNDLE_SETTINGS_KEY, 6000).catch(() => null);
+      if (existingDoc) {
+        const tmpMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }> = {};
+        unpackSettingsBundleDoc(existingDoc, tmpMeta);
+        existingEntries = { ...cachedBundleSettingsEntries };
+      }
+    }
+
+    for (const [k, item] of Object.entries(opts.settingsMap)) {
+      if (!k) continue;
+      const encodedVal = encodeNativeSettingValue(item.value);
+      existingEntries[k] = {
+        value: encodedVal,
+        updatedAt: toIsoString(item.updatedAt || nowIso),
+      };
+    }
+
+    const bundledEntries: Record<string, { value: any; updatedAt: string }> = {};
+    const overflowList: Array<{ key: string; value: any; updatedAt: string }> = [];
+    // Sort entries by JSON size ascending so small keys pack tightly into __bundle_settings_v1
+    const sortedKeys = Object.keys(existingEntries).sort((a, b) => {
+      const la = JSON.stringify(existingEntries[a]).length;
+      const lb = JSON.stringify(existingEntries[b]).length;
+      return la - lb;
+    });
+
+    let bundledBytes = 64;
+    for (const k of sortedKeys) {
+      const entry = existingEntries[k];
+      const cleanedEntry = {
+        value: stripUndefinedDeep(entry.value),
+        updatedAt: entry.updatedAt,
+      };
+      const entryLen = k.length + JSON.stringify(cleanedEntry).length + 12;
+      if (entryLen > 240000 || bundledBytes + entryLen > 540000) {
+        overflowList.push({ key: k, value: cleanedEntry.value, updatedAt: cleanedEntry.updatedAt });
+        overflowKeysSet.add(k);
+      } else {
+        bundledEntries[k] = cleanedEntry;
+        bundledBytes += entryLen;
+        overflowKeysSet.delete(k);
+      }
+    }
+
+    ops.push({
+      path: 'app_settings',
+      docId: sanitizeDocId(BUNDLE_SETTINGS_KEY),
+      data: {
+        settingKey: BUNDLE_SETTINGS_KEY,
+        value: { entries: bundledEntries },
+        updatedAt: nowIso,
+        updatedBy,
+      },
+    });
+
+    overflowList.forEach((ov) => {
+      const docId = sanitizeDocId(ov.key);
+      ops.push({
+        path: 'app_settings',
+        docId,
+        data: {
+          settingKey: clampStr(ov.key, 200) || docId,
+          value: encodeNativeSettingValue(ov.value),
+          updatedAt: ov.updatedAt,
+          updatedBy,
+        },
+      });
+    });
+
+    cachedBundleSettingsEntries = existingEntries;
+  }
+
+  const nextIndex: BundleIndex = {
+    version: 1,
+    months: Array.from(activeMonthsSet).sort(),
+    monthChunks: nextMonthChunks,
+    overflowSettingKeys: Array.from(overflowKeysSet),
+    updatedAt: nowIso,
+  };
+
+  if (needsIndexUpdate || ops.length > 0) {
+    ops.push({
+      path: 'app_settings',
+      docId: sanitizeDocId(BUNDLE_INDEX_KEY),
+      data: {
+        settingKey: BUNDLE_INDEX_KEY,
+        value: nextIndex,
+        updatedAt: nowIso,
+        updatedBy,
+      },
+    });
+  }
+
+  let writtenOps = 0;
+  if (ops.length > 0) {
+    writtenOps = await commitSetOps(ops, `bundles:${opts.reason || 'sync'}`);
+  }
+
+  if (deleteDocIds.length > 0 && !isFirestoreQuotaExceeded()) {
+    const scopedDels = scopeWriteOpsForActiveOffice(
+      deleteDocIds.map((id) => ({ path: 'app_settings', docId: sanitizeDocId(id), data: {} }))
+    );
+    await Promise.allSettled(
+      scopedDels.map((op) => deleteDoc(doc(dbLite!, 'app_settings', op.docId)))
+    );
+  }
+
+  cachedBundleIndexValue = nextIndex;
+  return { writtenOps, index: nextIndex };
+}
+
 /**
  * Purges all Firestore documents scoped to the active custom office prefix (`off_<CODE>__`)
  * so a newly added or reset custom office starts 100% brand new in Firestore.
@@ -1590,11 +2226,63 @@ export async function executeFullMigrationToFirebase(dbData?: any): Promise<Fire
 export async function purgeActiveCustomOfficeCloudData(options?: {
   keepUserIds?: string[];
   onlySettingsAndLeakedUsers?: boolean;
+  includeLegacyScan?: boolean;
 }): Promise<void> {
   if (isDefault155UasuOffice()) return;
   if (!isFirebaseConfigured || !dbLite || isFirestoreQuotaExceeded()) return;
   const prefix = getOfficeFirestoreDocPrefix();
   if (!prefix || !prefix.startsWith('off_')) return;
+
+  // 1. Delete known bundle docs using 1 single index read instead of scanning 5 full collections
+  try {
+    const bundleIdx = await fetchBundleIndexFromFirebase().catch(() => null);
+    const bundleKeysToDelete = new Set<string>();
+    if (options?.onlySettingsAndLeakedUsers) {
+      bundleKeysToDelete.add(BUNDLE_SETTINGS_KEY);
+      (bundleIdx?.overflowSettingKeys || []).forEach((k) => bundleKeysToDelete.add(k));
+      if (!options.keepUserIds || options.keepUserIds.length === 0) {
+        bundleKeysToDelete.add(BUNDLE_USERS_KEY);
+      }
+    } else {
+      bundleKeysToDelete.add(BUNDLE_INDEX_KEY);
+      bundleKeysToDelete.add(BUNDLE_AIRMEN_KEY);
+      bundleKeysToDelete.add(BUNDLE_USERS_KEY);
+      bundleKeysToDelete.add(BUNDLE_HISTORY_KEY);
+      bundleKeysToDelete.add(BUNDLE_SETTINGS_KEY);
+      bundleKeysToDelete.add('__office_presence_v1');
+      (bundleIdx?.overflowSettingKeys || []).forEach((k) => bundleKeysToDelete.add(k));
+      (bundleIdx?.months || []).forEach((ym) => {
+        const chunks = bundleIdx?.monthChunks?.[ym];
+        if (Array.isArray(chunks) && chunks.length > 0) {
+          chunks.forEach((ck) => bundleKeysToDelete.add(ck));
+        } else {
+          bundleKeysToDelete.add(getMonthBundleKey(ym, 1));
+        }
+      });
+    }
+
+    const scopedIds = Array.from(bundleKeysToDelete).map((k) => scopeAppSettingDocId(k));
+    const CHUNK = 350;
+    for (let i = 0; i < scopedIds.length; i += CHUNK) {
+      if (isFirestoreQuotaExceeded()) break;
+      const slice = scopedIds.slice(i, i + CHUNK);
+      const batch = writeBatch(dbLite);
+      slice.forEach((id) => batch.delete(doc(dbLite, 'app_settings', id)));
+      await withFirestoreTimeout(batch.commit(), 12000, 'purgeBatch:bundles');
+    }
+    cachedBundleIndexValue = null;
+    cachedBundleSettingsEntries = {};
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      setFirestoreQuotaExceeded(true, (err as any)?.message);
+      return;
+    }
+  }
+
+  // Only run legacy collection scans when explicitly requested
+  if (!options?.includeLegacyScan) {
+    return;
+  }
 
   const collectionsToClean = options?.onlySettingsAndLeakedUsers
     ? ['user_profiles', 'app_settings']

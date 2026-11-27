@@ -1,4 +1,4 @@
-import { Airman } from '../types';
+import type { Airman } from '../types.ts';
 
 export const INITIAL_AIRMEN: Airman[] = [
   {

@@ -1,5 +1,5 @@
-import { DutyAssignment } from '../types';
-import { INITIAL_AIRMEN } from './initialAirmen';
+import type { DutyAssignment } from '../types.ts';
+import { INITIAL_AIRMEN } from './initialAirmen.ts';
 
 interface DayRaw {
   day: number;

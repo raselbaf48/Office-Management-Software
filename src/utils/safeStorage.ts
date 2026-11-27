@@ -182,6 +182,7 @@ const GLOBAL_UNSCOPED_STORAGE_KEYS = new Set<string>([
   'baf_rejected_office_request_ids_v1',
   'baf_removed_office_codes_v1',
   'baf_master_credentials_v1',
+  'baf_master_cloud_pool_v1',
   'baf_linked_firebase_target',
   'baf_pwa_active_office_meta',
   'baf_theme_pref',

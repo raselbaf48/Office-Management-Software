@@ -748,6 +748,9 @@ export default function App() {
           failureCount = 0;
           try {
             const data = JSON.parse(event.data);
+            if (data.type === 'CONNECTED' && data.buildId) {
+              window.dispatchEvent(new CustomEvent('baf_server_build_id', { detail: { buildId: data.buildId } }));
+            }
             if (
               data.type === 'DATA_UPDATED' ||
               data.type === 'ROSTER_UPDATED' ||

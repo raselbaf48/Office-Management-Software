@@ -1,4 +1,5 @@
-const PWA_SW_VERSION = 'v27';
+const PWA_SW_VERSION = 'v28';
+const SHELL_FALLBACK_CACHE = `baf-shell-${PWA_SW_VERSION}`;
 let activeOfficePwaData = null;
 
 function dataUrlToUint8Array(dataUrl) {
@@ -21,12 +22,35 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    (async () => {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys.filter((k) => k !== SHELL_FALLBACK_CACHE).map((k) => caches.delete(k))
+        );
+      } catch (e) {}
+      await self.clients.claim();
+      try {
+        const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of clients) {
+          client.postMessage({ type: 'SW_UPDATED', version: PWA_SW_VERSION });
+        }
+      } catch (e) {}
+    })()
+  );
 });
 
 self.addEventListener('message', (event) => {
   const data = event.data;
-  if (data && data.type === 'SET_PWA_OFFICE_IDENTITY') {
+  if (!data) return;
+
+  if (data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+    return;
+  }
+
+  if (data.type === 'SET_PWA_OFFICE_IDENTITY') {
     activeOfficePwaData = {
       manifestJson: data.manifestJson || null,
       icon192Bytes: data.icon192DataUrl ? dataUrlToUint8Array(data.icon192DataUrl) : null,
@@ -39,7 +63,10 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('fetch', (event) => {
   try {
-    const url = new URL(event.request.url);
+    const req = event.request;
+    if (req.method !== 'GET') return;
+
+    const url = new URL(req.url);
     const p = url.pathname;
 
     // 1. Intercept Web App Manifest requests (/manifest.json or /api/pwa-manifest)
@@ -56,7 +83,7 @@ self.addEventListener('fetch', (event) => {
         );
         return;
       }
-      event.respondWith(fetch(event.request, { cache: 'no-store' }));
+      event.respondWith(fetch(req, { cache: 'no-store' }));
       return;
     }
 
@@ -88,9 +115,27 @@ self.addEventListener('fetch', (event) => {
           return;
         }
       }
-      event.respondWith(fetch(event.request, { cache: 'no-store' }));
+      event.respondWith(fetch(req, { cache: 'no-store' }));
+      return;
+    }
+
+    // 3. Network-first (no-store) for HTML page navigations so Live App & PWA always receive newly deployed code immediately
+    if (url.origin === self.location.origin && (req.mode === 'navigate' || p === '/' || p === '/index.html')) {
+      event.respondWith(
+        fetch(req, { cache: 'no-store' })
+          .then((networkRes) => {
+            if (networkRes && networkRes.ok) {
+              const copy = networkRes.clone();
+              caches.open(SHELL_FALLBACK_CACHE).then((c) => c.put('/index.html', copy)).catch(() => {});
+            }
+            return networkRes;
+          })
+          .catch(async () => {
+            const cached = await caches.match('/index.html');
+            return cached || new Response('Offline', { status: 503, statusText: 'Offline' });
+          })
+      );
       return;
     }
   } catch (e) {}
 });
-

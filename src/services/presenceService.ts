@@ -1,9 +1,7 @@
 import {
-  collection,
   doc,
   setDoc,
   getDoc,
-  getDocs,
 } from 'firebase/firestore/lite';
 import {
   db,
@@ -53,18 +51,10 @@ const sanitizeDocId = (raw: string): string => {
   return (cleaned || 'unknown').slice(0, 120);
 };
 
-const getPresenceDocId = (rawBdNo: string): string => {
-  const cleanBd = sanitizeDocId(rawBdNo);
+const getPresenceBundleDocId = (): string => {
   const prefix = getOfficeFirestoreDocPrefix();
-  return prefix ? `${prefix}${cleanBd}` : cleanBd;
-};
-
-const isPresenceDocForActiveOffice = (docId: string): boolean => {
-  const prefix = getOfficeFirestoreDocPrefix();
-  if (prefix) {
-    return docId.startsWith(prefix);
-  }
-  return !docId.startsWith('off_');
+  const raw = prefix ? `${prefix}__office_presence_v1` : '__office_presence_v1';
+  return raw.slice(0, 120);
 };
 
 const isMasterProtectedBdOrRole = (bdNo?: string | null, role?: string | null): boolean => {
@@ -163,6 +153,30 @@ export function isMultiUserMode(): boolean {
   return getActiveUsersCount() >= 2;
 }
 
+function sanitizePresencePayloadList(list: UserPresence[]): Array<Record<string, string>> {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  const dedup = new Map<string, Record<string, string>>();
+  (list || []).forEach((u) => {
+    if (!u || !u.bdNo || isMasterProtectedBdOrRole(u.bdNo, u.role) || u.status === 'offline') return;
+    const t = u.lastActive ? Date.parse(u.lastActive) : 0;
+    if (!t || isNaN(t) || t < cutoff) return;
+    const key = sanitizeDocId(u.bdNo).toLowerCase();
+    dedup.set(key, {
+      bdNo: String(u.bdNo).slice(0, 64),
+      sessionId: String(u.sessionId || CLIENT_SESSION_ID).slice(0, 128),
+      name: String(u.name || 'User').slice(0, 200),
+      rank: String(u.rank || '').slice(0, 64),
+      flightName: String(u.flightName || '').slice(0, 64),
+      role: String(u.role || 'USER').slice(0, 32),
+      status: 'online',
+      page: String(u.page || 'Portal').slice(0, 128),
+      deviceInfo: String(u.deviceInfo || 'Web Portal').slice(0, 128),
+      lastActive: String(u.lastActive),
+    });
+  });
+  return Array.from(dedup.values()).slice(0, 200);
+}
+
 export async function pollPresenceFromCloudOnce(force: boolean = false) {
   syncCachedPresenceOffice();
   if (typeof window === 'undefined') return;
@@ -175,27 +189,40 @@ export async function pollPresenceFromCloudOnce(force: boolean = false) {
   try {
     lastPresencePollAt = now;
     const activeCodeBefore = getActiveOfficeCode();
-    const snap = await getDocs(collection(dbLite, 'presence'));
+    const presenceDocId = getPresenceBundleDocId();
+    const snap = await getDoc(doc(dbLite, 'app_settings', presenceDocId));
     if (getActiveOfficeCode() !== activeCodeBefore) return;
     const cloudUsers: UserPresence[] = [];
-    snap.forEach((docSnap) => {
-      if (!isPresenceDocForActiveOffice(docSnap.id)) return;
-      const d = docSnap.data() as any;
-      if (d && d.bdNo && !isMasterProtectedBdOrRole(d.bdNo, d.role)) {
-        cloudUsers.push({
-          bdNo: String(d.bdNo),
-          sessionId: d.sessionId ? String(d.sessionId) : undefined,
-          name: String(d.name || 'User'),
-          rank: String(d.rank || ''),
-          flightName: String(d.flightName || ''),
-          role: d.role ? String(d.role) : 'USER',
-          status: d.status === 'offline' ? 'offline' : 'online',
-          page: d.page ? String(d.page) : '',
-          deviceInfo: d.deviceInfo ? String(d.deviceInfo) : '',
-          lastActive: String(d.lastActive || ''),
+    if (snap.exists()) {
+      const docData = snap.data() as any;
+      let rawUsers: any = docData?.value?.users ?? docData?.value;
+      if (typeof rawUsers === 'string') {
+        try {
+          const parsed = JSON.parse(rawUsers);
+          rawUsers = Array.isArray(parsed) ? parsed : parsed?.users;
+        } catch {
+          rawUsers = [];
+        }
+      }
+      if (Array.isArray(rawUsers)) {
+        rawUsers.forEach((d: any) => {
+          if (d && d.bdNo && !isMasterProtectedBdOrRole(d.bdNo, d.role)) {
+            cloudUsers.push({
+              bdNo: String(d.bdNo),
+              sessionId: d.sessionId ? String(d.sessionId) : undefined,
+              name: String(d.name || 'User'),
+              rank: String(d.rank || ''),
+              flightName: String(d.flightName || ''),
+              role: d.role ? String(d.role) : 'USER',
+              status: d.status === 'offline' ? 'offline' : 'online',
+              page: d.page ? String(d.page) : '',
+              deviceInfo: d.deviceInfo ? String(d.deviceInfo) : '',
+              lastActive: String(d.lastActive || ''),
+            });
+          }
         });
       }
-    });
+    }
     broadcastPresence(cloudUsers);
   } catch (err: any) {
     if (isQuotaExceededError(err)) {
@@ -295,18 +322,13 @@ export const logUserLogin = async (
 
     if (isFirebaseConfigured && dbLite && !isFirestoreQuotaExceeded()) {
       try {
-        const presenceDocId = getPresenceDocId(cleanBd);
-        await setDoc(doc(dbLite, 'presence', presenceDocId), {
-          bdNo: newPresence.bdNo,
-          sessionId: CLIENT_SESSION_ID,
-          name: newPresence.name,
-          rank: newPresence.rank,
-          flightName: newPresence.flightName,
-          role: newPresence.role,
-          status: 'online',
-          page: newPresence.page,
-          deviceInfo: newPresence.deviceInfo,
-          lastActive: nowIso,
+        const presenceDocId = getPresenceBundleDocId();
+        const payloadUsers = sanitizePresencePayloadList(updated);
+        await setDoc(doc(dbLite, 'app_settings', presenceDocId), {
+          settingKey: presenceDocId,
+          value: { users: payloadUsers },
+          updatedAt: nowIso,
+          updatedBy: cleanBd.slice(0, 128),
         });
       } catch (fbErr) {
         if (isQuotaExceededError(fbErr)) {
@@ -365,18 +387,32 @@ export const updatePresence = async (
         lastPresenceWriteAt = nowMs;
         lastPresencePage = nextPage;
         try {
-          const presenceDocId = getPresenceDocId(cleanBd);
-          await setDoc(doc(dbLite, 'presence', presenceDocId), {
-            bdNo: cleanBd,
-            sessionId: CLIENT_SESSION_ID,
-            name: String(targetRecord?.name || 'User').slice(0, 200),
-            rank: String(targetRecord?.rank || '').slice(0, 64),
-            flightName: String(targetRecord?.flightName || '').slice(0, 64),
-            role: String(targetRecord?.role || 'USER').slice(0, 32),
-            status: isLogout ? 'offline' : 'online',
-            page: nextPage,
-            deviceInfo: String(targetRecord?.deviceInfo || 'Web Portal').slice(0, 128),
-            lastActive: nowIso,
+          const presenceDocId = getPresenceBundleDocId();
+          const listForCloud = isLogout
+            ? existing.filter((p) => sanitizeDocId(p.bdNo) !== cleanBd)
+            : targetRecord
+            ? existing
+            : [
+                ...existing,
+                {
+                  bdNo: cleanBd,
+                  sessionId: CLIENT_SESSION_ID,
+                  name: 'User',
+                  rank: '',
+                  flightName: '',
+                  role: 'USER',
+                  status: 'online',
+                  page: nextPage,
+                  deviceInfo: 'Web Portal',
+                  lastActive: nowIso,
+                },
+              ];
+          const payloadUsers = sanitizePresencePayloadList(listForCloud);
+          await setDoc(doc(dbLite, 'app_settings', presenceDocId), {
+            settingKey: presenceDocId,
+            value: { users: payloadUsers },
+            updatedAt: nowIso,
+            updatedBy: cleanBd.slice(0, 128),
           });
         } catch (fbErr) {
           if (isQuotaExceededError(fbErr)) {

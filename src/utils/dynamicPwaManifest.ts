@@ -458,6 +458,17 @@ export async function syncDynamicOfficePwaManifest(
       background_color: '#020617',
       theme_color: '#020617',
       orientation: 'any',
+      prefer_related_applications: false,
+      related_applications: [
+        {
+          platform: 'webapp',
+          url: `${window.location.origin}/api/pwa-manifest`,
+        },
+        {
+          platform: 'webapp',
+          url: `${window.location.origin}/manifest.json`,
+        },
+      ],
       icons: [
         {
           src: manifestIcon192Url,

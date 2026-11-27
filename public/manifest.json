@@ -34,5 +34,12 @@
   "background_color": "#020617",
   "display": "standalone",
   "theme_color": "#020617",
-  "orientation": "any"
+  "orientation": "any",
+  "prefer_related_applications": false,
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "/manifest.json"
+    }
+  ]
 }

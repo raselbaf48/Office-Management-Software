@@ -32,6 +32,7 @@ export const GLOBAL_NON_OFFICE_BACKUP_KEYS = new Set<string>([
   'baf_rejected_office_request_ids_v1',
   'baf_removed_office_codes_v1',
   'baf_master_credentials_v1',
+  'baf_master_cloud_pool_v1',
   'baf_global_user_office_map_v1',
   'baf_pwa_active_office_meta',
   'baf_linked_firebase_target',

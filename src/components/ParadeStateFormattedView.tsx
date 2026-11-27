@@ -10,7 +10,7 @@ import {
  IDAShift,
 } from '../types';
 import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
-import { formatDutyOnShortName, formatDutyOffShortName } from '../utils/dutyFormatter';
+import { formatDutyOnShortName, formatDutyOffShortName, formatLeaveShortName } from '../utils/dutyFormatter';
 import {
  Calendar,
  Printer,
@@ -38,12 +38,13 @@ import {
  CheckSquare,
 Settings,
  Tag,
+ FileText,
+ Copy,
 } from 'lucide-react';
 import { DutyCellPopover } from './DutyCellPopover';
 import { getStoredDutyRatiosForDate } from '../data/dutyRatios';
 import { getIdacShiftsForDateAndFlight } from '../data/officialDutyRatioMatrix';
 import { FlightDutyRatioModal } from './FlightDutyRatioModal';
-import { PrintableParadeStateModal } from './PrintableParadeStateModal';
 import {
  SignatureConfigModal,
  getSavedPreparedBy,
@@ -56,6 +57,9 @@ import {
  exportParadeStateMultiDocx,
  MultiParadeDayItem,
 } from '../utils/docxExport';
+import { exportElementToPdf } from '../utils/pdfExport';
+import { PageSetupBar } from './PageSetupBar';
+import { PageSetupConfig, getPageDimensions } from '../utils/pageSetup';
 import { DisposalCategoryDropdown } from './DisposalCategoryDropdown';
 import { saveCustomDisposal, getSavedCustomDisposals, removeSavedCustomDisposal } from '../utils/customDisposalStore';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
@@ -166,9 +170,43 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
   const multiDayStatesRef = useRef<Record<string, ParadeStateResponse>>({});
   const [loading, setLoading] = useState<boolean>(false);
 
- // Internal Print Modal state
- const [isInternalPrintOpen, setIsInternalPrintOpen] = useState<boolean>(false);
+ // Direct Export dropdown state (PDF / DOCX) + Copy Text state + Flight Filter dropdown state + Page Setup
+ const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
+ const [showFlightMenu, setShowFlightMenu] = useState<boolean>(false);
+ const isExportingRef = useRef<boolean>(false);
+ const [copiedText, setCopiedText] = useState<boolean>(false);
+ const [pageSetup, setPageSetup] = useState<PageSetupConfig>({
+   paperSize: 'a4',
+   orientation: 'landscape',
+ });
+ const exportDropdownRef = useRef<HTMLDivElement | null>(null);
+ const flightDropdownRef = useRef<HTMLDivElement | null>(null);
  const hideEmptyColumns = true;
+ const pageDims = getPageDimensions(pageSetup);
+
+ useEffect(() => {
+   if (!showExportMenu && !showFlightMenu) return;
+   const handleClickOutside = (e: MouseEvent) => {
+     if (showExportMenu && exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as Node)) {
+       setShowExportMenu(false);
+     }
+     if (showFlightMenu && flightDropdownRef.current && !flightDropdownRef.current.contains(e.target as Node)) {
+       setShowFlightMenu(false);
+     }
+   };
+   const handleKeyDown = (e: KeyboardEvent) => {
+     if (e.key === 'Escape') {
+       setShowExportMenu(false);
+       setShowFlightMenu(false);
+     }
+   };
+   document.addEventListener('mousedown', handleClickOutside);
+   document.addEventListener('keydown', handleKeyDown);
+   return () => {
+     document.removeEventListener('mousedown', handleClickOutside);
+     document.removeEventListener('keydown', handleKeyDown);
+   };
+ }, [showExportMenu, showFlightMenu]);
 
  // Signature Config Modal state
  const [showSignatureModal, setShowSignatureModal] = useState<boolean>(false);
@@ -205,6 +243,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
     }
   }, [officeHasFlights, unitGroupOptions.join(',')]);
   const [disposalCategory, setDisposalCategory] = useState<string>('');
+  const [disposalLeaveType, setDisposalLeaveType] = useState<'Casual Leave' | 'Annual Leave' | 'Recreation Leave' | 'Sick Leave'>('Casual Leave');
   const [disposalCustomTitle, setDisposalCustomTitle] = useState<string>('');
   const [selectedDisposalAirmenIds, setSelectedDisposalAirmenIds] = useState<string[]>([]);
   const [disposalPersonnelStatusMap, setDisposalPersonnelStatusMap] = useState<Record<string, { statusCategory: string; dutyCode: string; notes?: string; dutyName?: string }>>({});
@@ -299,6 +338,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  notes?: string;
  } | null>(null);
  const [editDisposalCategory, setEditDisposalCategory] = useState<string>('LEAVE');
+ const [editDisposalLeaveType, setEditDisposalLeaveType] = useState<'Casual Leave' | 'Annual Leave' | 'Recreation Leave' | 'Sick Leave'>('Casual Leave');
  const [editDisposalCustomTitle, setEditDisposalCustomTitle] = useState<string>('');
  const [editDisposalFromDate, setEditDisposalFromDate] = useState<string>(selectedDate);
  const [editDisposalToDate, setEditDisposalToDate] = useState<string>(selectedDate);
@@ -601,7 +641,11 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  try {
  const isCustom = disposalCategory === 'OTHERS';
  const effectiveDutyCode = isCustom ? 'OTHERS' : disposalCategory;
- const effectiveNotes = isCustom ? (disposalCustomTitle.trim() || 'Custom Disposal') : undefined;
+ const effectiveNotes = isCustom
+   ? (disposalCustomTitle.trim() || 'Custom Disposal')
+   : effectiveDutyCode === 'LEAVE'
+   ? disposalLeaveType
+   : undefined;
  if (isCustom && effectiveNotes && effectiveNotes !== 'Custom Disposal') {
  setSavedDisposals(prev => {
  const exists = prev.some(d => d.label === effectiveNotes);
@@ -722,6 +766,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  notes: note,
  });
  setEditDisposalCategory(isStandardCat ? resolvedCode : 'OTHERS');
+ const initLeaveShort = formatLeaveShortName(dutyName, note);
+ setEditDisposalLeaveType(
+   initLeaveShort === 'AL' ? 'Annual Leave'
+   : initLeaveShort === 'RL' ? 'Recreation Leave'
+   : initLeaveShort === 'SL' ? 'Sick Leave'
+   : 'Casual Leave'
+ );
  setEditDisposalCustomTitle(!isStandardCat ? (dutyName || note || resolvedCode || '') : '');
  setEditDisposalFromDate(fromDate);
  setEditDisposalToDate(isMultiDay ? toDate : fromDate);
@@ -738,7 +789,11 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  if (effectiveDutyCode === 'DUTY' || effectiveDutyCode === 'DUTY_ON') {
  effectiveDutyCode = 'OTHERS';
  }
- const effectiveNotes = isCustom ? (editDisposalCustomTitle.trim() || 'Custom Disposal') : undefined;
+ const effectiveNotes = isCustom
+   ? (editDisposalCustomTitle.trim() || 'Custom Disposal')
+   : effectiveDutyCode === 'LEAVE'
+   ? editDisposalLeaveType
+   : undefined;
 
  const res = await fetch('/api/roster/assign-range', {
  method: 'POST',
@@ -801,7 +856,195 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  }
  };
 
- const handleExportOrPrint = () => { setIsInternalPrintOpen(true); };
+ const getExportBaseFileName = () => {
+   const unitPart = selectedFlight === 'Overall' ? activeOfficeName : `${selectedFlight} Flt`;
+   const datePart = fromDate === toDate
+     ? formatDateShort(fromDate).replace(/ \d{2}$/, '')
+     : `${formatDateShort(fromDate).replace(/ \d{2}$/, '')}-${formatDateShort(toDate).replace(/ \d{2}$/, '')}`;
+   return `${documentTitle} - ${unitPart} (${datePart})`;
+ };
+
+ const handleExportPdf = async () => {
+   setShowExportMenu(false);
+   if (isExportingRef.current) return;
+   isExportingRef.current = true;
+   try {
+     await exportElementToPdf({
+       elementId: 'official-parade-document',
+       fileName: `${getExportBaseFileName()}.pdf`,
+       format: pageSetup.paperSize,
+       orientation: pageSetup.orientation,
+     });
+   } catch (err) {
+     console.error('Failed to export PDF:', err);
+   } finally {
+     isExportingRef.current = false;
+   }
+ };
+
+ const handleExportDocx = async () => {
+   setShowExportMenu(false);
+   if (isExportingRef.current) return;
+   isExportingRef.current = true;
+   try {
+     await handleDownloadDocx();
+   } catch (err) {
+     console.error('Failed to export DOCX:', err);
+   } finally {
+     isExportingRef.current = false;
+   }
+ };
+
+ const buildCopyTextForDay = (dStr: string, dayData: ParadeStateResponse | null): string => {
+   const flightLine = selectedFlight === 'Overall' ? activeOfficeName : `${selectedFlight} Flt`;
+   const stateLabel = isPtDocument ? '*PT State*' : isOthersDocument ? `*${documentHeader}*` : '*Parade State*';
+   const onLabel = isPtDocument ? '*On PT*' : '*On Parade*';
+
+   const dateActiveAirmen = airmen.filter((a) => {
+     if (a.active === false) return false;
+     if (a.dateJoined && a.dateJoined > dStr) return false;
+     if (a.dateLeft && a.dateLeft < dStr) return false;
+     if (selectedFlight === 'Overall') return true;
+     return officeHasFlights ? a.flightName === selectedFlight : (a.trade === selectedFlight || a.flightName === selectedFlight);
+   });
+
+   const raw = dayData?.personnelStatusList || [];
+   const pList = selectedFlight === 'Overall'
+     ? raw
+     : raw.filter((item) =>
+         officeHasFlights
+           ? item.airman.flightName === selectedFlight
+           : (item.airman.trade === selectedFlight || item.airman.flightName === selectedFlight)
+       );
+
+   const onLines: string[] = [];
+   const disposalLines: string[] = [];
+
+   const formatNameOnly = (a: Airman) => `${formatRank(a.rank)} ${formatAirmanName(a.name)}`;
+
+   if (pList.length > 0) {
+     pList.forEach((item) => {
+       const { airman, dutyCode, statusCategory, idaShift, notes, dutyName, previousDutyCode, previousDutyName } = item;
+       const codeUpper = (dutyCode || '').toUpperCase();
+       const notesLower = (notes || '').toLowerCase();
+       const shiftLower = (idaShift || '').toLowerCase();
+
+       const isIdac = codeUpper === 'IDAC' || codeUpper === 'IDA' || notesLower.includes('idac') || notesLower.includes('ida center');
+       const isIdacNt = isIdac && (
+         shiftLower === 'night' || shiftLower === 'c' || shiftLower === 'nt' ||
+         (!shiftLower && (notesLower.includes('night') || notesLower.includes('nt') || notesLower.includes('shift c') || notesLower.includes('"c"')))
+       );
+       const isPtIdacA = isPtDocument && isIdac && !isIdacNt && (
+         shiftLower === 'morning' || shiftLower === 'a' || !idaShift ||
+         notesLower.includes('morning') || notesLower.includes('idac a')
+       );
+
+       if (codeUpper === 'LEAVE' || statusCategory === 'LEAVE') {
+         const leaveShort = formatLeaveShortName(dutyName, notes);
+         disposalLines.push(`${formatNameOnly(airman)} - ${leaveShort}`);
+       } else if (isPtDocument && isIdacNt) {
+         const dutyDisplay = formatDutyOnShortName(codeUpper, idaShift, notes, dutyName);
+         disposalLines.push(`${formatNameOnly(airman)}- ${dutyDisplay}`);
+       } else if (statusCategory === 'PARADE' || codeUpper === 'ON_PARADE' || isPtIdacA || (!isPtDocument && isIdacNt && statusCategory !== 'OFF')) {
+         onLines.push(formatNameOnly(airman));
+       } else if (['TDY', 'ATT', 'DETT', 'ATTACHMENT', 'DETACHMENT'].includes(codeUpper) || statusCategory === 'TDY') {
+         disposalLines.push(`${formatNameOnly(airman)}- TDY`);
+       } else if (codeUpper === 'CANTEEN' || statusCategory === 'CANTEEN') {
+         disposalLines.push(`${formatNameOnly(airman)}- ${isPtDocument ? 'Reception Duty' : 'Canteen'}`);
+       } else if (['BAKE_BITE', 'BAKE_N_BITE'].includes(codeUpper) || statusCategory === 'BAKE_N_BITE') {
+         disposalLines.push(`${formatNameOnly(airman)}- Bake & Bite`);
+       } else if (codeUpper === 'ESSN' || notesLower.includes('essn')) {
+         disposalLines.push(`${formatNameOnly(airman)}- ESSN`);
+       } else if (['CMH', 'HOSPITAL'].includes(codeUpper) || notesLower.includes('cmh')) {
+         disposalLines.push(`${formatNameOnly(airman)}- ${dutyName || dutyCode || 'CMH'}`);
+       } else if (['SICK_REPORT', 'SICK', 'EX_PPGF'].includes(codeUpper) || notesLower.includes('sick') || notesLower.includes('ppgf')) {
+         disposalLines.push(`${formatNameOnly(airman)}- ${dutyName || dutyCode || 'Sick Report'}`);
+       } else if (['CAT_C', 'DRILL'].includes(codeUpper) || notesLower.includes('drill')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Admin Order`);
+       } else if (codeUpper === 'RECEPTION' || notesLower.includes('reception') || notesLower.includes('k/o')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Reception`);
+       } else if (['AIRPORT', 'AIR_FD', 'AIRFIELD'].includes(codeUpper) || notesLower.includes('air fd') || notesLower.includes('airfield')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Airfield`);
+       } else if (['ADMIN_ORDER', 'BOI', 'COMMITTEE'].includes(codeUpper) || notesLower.includes('admin order') || notesLower.includes('boi')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Admin Order`);
+       } else if (['CLASS_TRG', 'CLASS', 'TRG', 'LTTB'].includes(codeUpper) || notesLower.includes('class') || notesLower.includes('trg')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Class/Trg`);
+       } else if (['GAMES', 'GH', 'GAME_HONOR'].includes(codeUpper) || notesLower.includes('games') || notesLower.includes('g/h')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Guard of Honour`);
+       } else if (['ABSENT', 'AWL', 'OSL'].includes(codeUpper) || notesLower.includes('absent')) {
+         disposalLines.push(`${formatNameOnly(airman)}- Absent`);
+       } else if (codeUpper === 'DUTY_OFF' || statusCategory === 'OFF') {
+         let offName = formatDutyOffShortName(previousDutyCode, previousDutyName, dutyName || notes || (idaShift ? `IDAC ${idaShift}` : ''));
+         if (offName === 'Esct Off') offName = 'Escort Off';
+         disposalLines.push(`${formatNameOnly(airman)}- ${offName}`);
+       } else if ((['GD', 'SY', 'SY_DUTY', 'SECURITY', 'GUARD_DUTY', 'BTF', 'NTF', 'HALISHAHAR', 'IDAC', 'IDA', 'AIRPORT', 'AIRFIELD', 'AIR_FD', 'ESCORT', 'ESC', 'ESCT'].includes(codeUpper) || codeUpper.startsWith('CUST_') || codeUpper.includes('1794394') || statusCategory === 'DUTY') && !['ON_PARADE', 'PT', 'PT_PARADE', 'P', 'PRESENT', ''].includes(codeUpper)) {
+         const shortDuty = formatDutyOnShortName(codeUpper, idaShift, notes, dutyName);
+         if (shortDuty === 'SY' || shortDuty === 'GD' || shortDuty === 'Sy Duty') {
+           disposalLines.push(`${formatNameOnly(airman)}- SY On`);
+         } else if (shortDuty === 'BTF' || shortDuty === 'NTF') {
+           disposalLines.push(`${formatNameOnly(airman)}- ${shortDuty} On`);
+         } else {
+           disposalLines.push(`${formatNameOnly(airman)}- ${shortDuty}`);
+         }
+       } else {
+         const customLabel = codeUpper === 'OTHERS' ? (notes || 'Other Disposal') : (dutyName || notes || dutyCode || 'Disposal');
+         disposalLines.push(`${formatNameOnly(airman)}- ${customLabel}`);
+       }
+     });
+   } else {
+     dateActiveAirmen.forEach((airman) => onLines.push(formatNameOnly(airman)));
+   }
+
+   const totalStrg = dateActiveAirmen.length > 0 ? dateActiveAirmen.length : pList.length;
+   const numberedOnLines = onLines.length > 0
+     ? onLines.map((line, idx) => `${idx + 1}. ${line}`)
+     : ['Nil'];
+   const numberedDisposalLines = disposalLines.map((line, idx) => `${idx + 1}. ${line}`);
+
+   const lines: string[] = [
+     'Assalamu alaikum sir/all;',
+     flightLine,
+     formatDateShort(dStr),
+     stateLabel,
+     `Total Strg : ${totalStrg}`,
+     '',
+     onLabel,
+     ...numberedOnLines,
+   ];
+
+   if (numberedDisposalLines.length > 0) {
+     lines.push('');
+     lines.push('*Disposal*');
+     lines.push(...numberedDisposalLines);
+   }
+
+   return lines.join('\n');
+ };
+
+ const handleCopyStateText = async () => {
+   const text = isMultiDay
+     ? datesInRange.map((dStr) => buildCopyTextForDay(dStr, multiDayStates[dStr] || null)).join('\n\n--------------------\n\n')
+     : buildCopyTextForDay(fromDate, singleParadeData);
+
+   try {
+     if (navigator.clipboard && window.isSecureContext) {
+       await navigator.clipboard.writeText(text);
+     } else {
+       const ta = document.createElement('textarea');
+       ta.value = text;
+       ta.style.position = 'fixed';
+       ta.style.opacity = '0';
+       document.body.appendChild(ta);
+       ta.select();
+       document.execCommand('copy');
+       document.body.removeChild(ta);
+     }
+     setCopiedText(true);
+     setTimeout(() => setCopiedText(false), 2500);
+   } catch (err) {
+     console.error('Copy text failed:', err);
+   }
+ };
 
  const handleDownloadDocx = async () => {
  if (isMultiDay) {
@@ -875,13 +1118,15 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  (s) => s.dutyCode === 'ON_PARADE' || s.statusCategory === 'PARADE'
  );
 
- const formatListStr = (items: typeof pList, isDutyOff: boolean = false) =>
+ const formatListStr = (items: typeof pList, isDutyOff: boolean = false, isLeaveCol: boolean = false) =>
       items.length > 0
         ? items
             .map((it, idx) => {
                let noteStr = '';
                if (isDutyOff) {
                  noteStr = ' - ' + formatDutyOffShortName(it.previousDutyCode, it.previousDutyName, it.dutyName || it.notes);
+               } else if (isLeaveCol) {
+                 noteStr = ` - ${formatLeaveShortName(it.dutyName, it.notes)}`;
                }
                return `${idx + 1}. ${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
             })
@@ -898,7 +1143,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  halishahar: formatListStr(halishahar),
  bakeBite: formatListStr(bakeBite),
  tdy: formatListStr(tdy),
- leave: formatListStr(leave),
+ leave: formatListStr(leave, false, true),
  idaMorning: formatListStr(idaMorn),
  idaAfternoon: formatListStr(idaAft),
  idaNight: formatListStr(idaNight),
@@ -910,7 +1155,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const unitHeader =
  selectedFlight === 'Overall'
  ? activeOfficeName
- : `${activeOfficeName} (${selectedFlight.toUpperCase()} FLT)`;
+ : (officeHasFlights
+     ? (/\b(flt|flight)\b/i.test(selectedFlight) ? selectedFlight.toUpperCase() : `${selectedFlight.toUpperCase()} FLT`)
+     : selectedFlight.toUpperCase());
  const dateRangeHeader = `${formatDateShort(fromDate)} to ${formatDateShort(toDate)}`;
  const p = getSavedPreparedBy();
  const a = getSavedAuthorizedBy();
@@ -921,7 +1168,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`,
  { name: p.name, rank: p.rank, desig: p.designation },
  { name: a.name, rank: a.rank, desig: a.designation },
- documentHeader
+ documentHeader,
+ pageSetup
  );
  } else {
  const stats = getFlightStats(selectedFlight);
@@ -935,7 +1183,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  documentTitle: documentHeader,
  stats,
  onParade: onPtList.map((i) => i.airman),
- leave: leaveList.map((i) => i.airman),
+ leave: leaveList,
  bakeBite: bakeBiteList.map((i) => i.airman),
  tdy: tdyList.map((i) => i.airman),
  canteen: canteenList.map((i) => i.airman),
@@ -954,6 +1202,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  leftSig: { name: p.name, rank: p.rank, desig: p.designation },
  middleSig: { name: c.name, rank: c.rank, desig: c.designation },
  rightSig: { name: a.name, rank: a.rank, desig: a.designation },
+ pageSetup,
     }, `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`);
  }
  };
@@ -1165,7 +1414,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  );
 
  if (codeUpper === 'LEAVE' || statusCategory === 'LEAVE') {
- leaveList.push({ airman, note: '' });
+ leaveList.push({ airman, note: formatLeaveShortName(item.dutyName, notes) });
  } else if (isPtDocument && isIdacNt) {
  const dutyDisplay = formatDutyOnShortName(codeUpper, idaShift, notes, item.dutyName);
  dutyOnList.push({ airman, note: dutyDisplay });
@@ -1246,7 +1495,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  }
 
  // Helper to render airman list inside multi-day table cells (without flight tags)
- const renderAirmanColumnList = (list: { airman: Airman, notes?: string, previousDutyCode?: string, previousDutyName?: string, dutyName?: string }[], showNotes: boolean = false) => {
+ const renderAirmanColumnList = (list: { airman: Airman, notes?: string, previousDutyCode?: string, previousDutyName?: string, dutyName?: string }[], showNotes: boolean = false, showLeaveType: boolean = false) => {
     if (!list || list.length === 0) {
       return <div className="text-center text-slate-400 font-normal py-1">-</div>;
     }
@@ -1256,10 +1505,14 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
           const shortOffNote = showNotes
             ? formatDutyOffShortName(item.previousDutyCode, item.previousDutyName, item.dutyName || item.notes)
             : '';
+          const shortLeaveNote = showLeaveType
+            ? formatLeaveShortName(item.dutyName, item.notes)
+            : '';
           return (
             <li key={idx} className="whitespace-nowrap">
               {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
               {shortOffNote ? ' - ' + shortOffNote : ''}
+              {shortLeaveNote ? ` - ${shortLeaveNote}` : ''}
             </li>
           );
         })}
@@ -1294,17 +1547,19 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  }}
  className={`truncate group flex items-center justify-between ${
  (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER')
- ? 'cursor-pointer hover:text-purple-700 dark:hover:text-purple-300 hover:bg-purple-50/80 dark:hover:bg-purple-950/40 px-1 rounded transition-colors'
+ ? 'cursor-pointer hover:text-purple-800 hover:bg-purple-50 px-1 rounded transition-colors'
  : ''
  }`}
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit, change or remove disposal' : undefined}
  >
- <span className="truncate">
+ <span className="truncate text-black">
  {i + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  {(isDutyOn || isDutyOff) && noteText ? (
- <span className="text-slate-800 dark:text-slate-200 font-medium"> - {noteText}</span>
+ <span className="text-slate-900 font-medium"> - {noteText}</span>
+ ) : dutyCode === 'LEAVE' && noteText ? (
+ <span className="text-black font-normal"> - {noteText}</span>
  ) : noteText && noteText !== dutyName && noteText !== dutyCode ? (
- <span className="text-[9px] text-slate-400 ml-1">({noteText})</span>
+ <span className="text-[9px] text-slate-600 ml-1">({noteText})</span>
  ) : null}
  </span>
  {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && (
@@ -1459,18 +1714,43 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* Flight / Trade Selector (Hidden on Others State as requested) */}
  {!isOthersDocument && (
- <div className="flex items-center space-x-1.5 bg-slate-100 dark:bg-slate-800 print:bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
- <Filter className="w-3.5 h-3.5 text-slate-400" />
- <select
- value={selectedFlight}
- onChange={(e) => setSelectedFlight(e.target.value as any)}
- className="bg-transparent text-slate-900 dark:text-white print:text-black font-black outline-none cursor-pointer"
- >
- <option value="Overall">Overall</option>
- {unitGroupOptions.map((grp) => (
-   <option key={grp} value={grp}>{grp}</option>
- ))}
- </select>
+ <div className="relative" ref={flightDropdownRef}>
+   <button
+     type="button"
+     onClick={() => setShowFlightMenu((prev) => !prev)}
+     className="flex items-center space-x-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700/80 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-black text-slate-900 dark:text-white transition-colors cursor-pointer"
+     title={officeHasFlights ? 'Filter by Flight' : 'Filter by Trade'}
+   >
+     <Filter className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+     <span>{selectedFlight}</span>
+     <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showFlightMenu ? 'rotate-180' : ''}`} />
+   </button>
+
+   {showFlightMenu && (
+     <div className="absolute left-0 mt-2 w-44 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden py-1">
+       {(['Overall', ...unitGroupOptions] as const).map((grp) => {
+         const isSelected = selectedFlight === grp;
+         return (
+           <button
+             key={grp}
+             type="button"
+             onClick={() => {
+               setSelectedFlight(grp as any);
+               setShowFlightMenu(false);
+             }}
+             className={`w-full flex items-center justify-between px-3.5 py-2 text-left text-xs font-bold transition-colors cursor-pointer ${
+               isSelected
+                 ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-black'
+                 : 'text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700/70'
+             }`}
+           >
+             <span>{grp}</span>
+             {isSelected && <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
+           </button>
+         );
+       })}
+     </div>
+   )}
  </div>
  )}
 
@@ -1494,8 +1774,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </div>
  )}
 
- {/* Signature Settings Button */}
-        {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && !isMultiDay && (
+ {/* Signature Settings Button (Only shown for Overall state) */}
+        {(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && !isMultiDay && selectedFlight === 'Overall' && (
  <button
  onClick={() => setShowSignatureModal(true)}
  className="flex items-center space-x-1.5 px-6 py-2 bg-slate-100 dark:bg-slate-800 print:bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-xl font-black text-sm shadow-lg transition-all cursor-pointer ml-1"
@@ -1508,17 +1788,57 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  
 
           </>
-          {/* Official Export / Print Button */}
+          {/* Copy Text Button (Next to Export) */}
           <button
-            onClick={handleExportOrPrint}
- className="flex items-center space-x-1.5 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white rounded-xl font-black text-sm shadow-lg shadow-emerald-900/20 transition-all cursor-pointer ml-4"
- title="Official Export / Print"
- >
- <Printer className="w-5 h-5" />
- <span>Official Export / Print</span>
- </button>
+            type="button"
+            onClick={handleCopyStateText}
+            className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl font-black text-sm shadow-lg transition-all cursor-pointer ml-2 ${
+              copiedText
+                ? 'bg-emerald-500 text-white'
+                : 'bg-slate-700 hover:bg-slate-600 text-white border border-slate-600'
+            }`}
+            title="Copy State as Formatted Text"
+          >
+            {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            <span>{copiedText ? 'Copied!' : 'Copy Text'}</span>
+          </button>
 
-          {/* Add Disposal Button - Right next to Official Export */}
+          {/* Export Dropdown Button (PDF / DOCX Direct Download) */}
+          <div className="relative ml-2" ref={exportDropdownRef}>
+            <button
+              type="button"
+              onClick={() => setShowExportMenu((prev) => !prev)}
+              className="flex items-center space-x-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black text-sm shadow-lg shadow-emerald-900/20 transition-all cursor-pointer"
+              title="Export PDF or DOCX"
+            >
+              <Download className="w-4 h-4" />
+              <span>Export</span>
+              <ChevronDown className={`w-4 h-4 transition-transform ${showExportMenu ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showExportMenu && (
+              <div className="absolute right-0 mt-2 w-44 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden py-1">
+                <button
+                  type="button"
+                  onClick={handleExportPdf}
+                  className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span>Pdf (.pdf)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportDocx}
+                  className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-700/70"
+                >
+                  <FileDown className="w-4 h-4 text-blue-500 shrink-0" />
+                  <span>Docx (.docx)</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Add Disposal Button - Right next to Export */}
           <button
             onClick={() => setShowAddDisposalModal(true)}
             className="flex items-center space-x-1.5 px-6 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-black text-sm shadow-lg shadow-rose-900/20 transition-all cursor-pointer ml-3"
@@ -1530,15 +1850,28 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </div>
  </div>
 
- {/* OFFICIAL PARADE DOCUMENT SHEET (DISPLAYED ON SCREEN & IN PRINT) */}
+ {/* PAGE SETUP BAR DIRECTLY ABOVE PREVIEW */}
+ <PageSetupBar
+   value={pageSetup}
+   onChange={setPageSetup}
+   defaultLabel="Default: A4 Landscape"
+ />
+
+ {/* OFFICIAL PARADE DOCUMENT SHEET (ACTUAL PRINTABLE WHITE PAPER PREVIEW IN SELECTED PAGE SETUP) */}
+ <div className="bg-slate-200/70 dark:bg-slate-950/60 border border-slate-300/70 dark:border-slate-800 rounded-2xl p-3 sm:p-5 overflow-x-auto print:bg-white print:border-none print:p-0">
  <div
  id="official-parade-document"
- className="bg-white dark:bg-slate-900 text-black dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none"
+ className="bg-white text-black border border-slate-300 rounded-2xl shadow-xl p-6 sm:p-8 mx-auto overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none"
+ style={{
+   width: '100%',
+   maxWidth: `${pageDims.widthPx}px`,
+   minHeight: `${Math.round(pageDims.heightPx * 0.72)}px`,
+ }}
  >
  {loading && (isMultiDay ? Object.keys(multiDayStates).length === 0 : !singleParadeData) ? (
- <div className="py-20 text-center text-slate-400">
- <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-500" />
- <p className="text-sm font-bold">Loading Official Parade State...</p>
+ <div className="py-20 text-center text-slate-500">
+ <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-600" />
+ <p className="text-sm font-bold text-slate-700">Loading Official Parade State...</p>
  </div>
  ) : isMultiDay ? (
  /* ========================================================================= */
@@ -1546,17 +1879,21 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  <div>
  {/* DOCUMENT TOP HEADER */}
- <div className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
  <div className="text-center">
- <h1 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black underline inline-block text-base uppercase">
+ <h1 className="font-bold tracking-wide text-black underline inline-block text-base uppercase">
  {documentHeader}
  </h1>
  <br />
- <h2 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
- {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLIGHT)` : ''}
+ <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block text-sm uppercase">
+ {selectedFlight === 'Overall'
+   ? activeOfficeName
+   : (officeHasFlights
+       ? (/\b(flt|flight)\b/i.test(selectedFlight) ? selectedFlight.toUpperCase() : `${selectedFlight.toUpperCase()} FLT`)
+       : selectedFlight.toUpperCase())}
  </h2>
  </div>
- <div className="text-right font-normal text-slate-900 dark:text-white print:text-black pr-1 text-xs mt-1">
+ <div className="text-right font-normal text-black pr-1 text-xs mt-1">
  Period: {formatDateShort(fromDate)} To {formatDateShort(toDate)}
  </div>
  </div>
@@ -1594,6 +1931,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  customKey = notes;
  }
  }
+ if (isPtDocument && codeUpper === 'CANTEEN') customKey = 'Reception Duty';
+ if (isPtDocument && customKey === 'K/O & Reception') customKey = 'Reception Duty';
  allCustomKeys.add(customKey);
  }
  });
@@ -1623,28 +1962,28 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  return (
  <div className="overflow-x-auto my-3">
 
- <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border-2 border-slate-900 dark:border-white print:border-black text-[11px]">
+ <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border-2 border-black text-[11px]">
  <thead>
- <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-white print:border-black ">
- <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Date</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Day</th>
- {hasData('Base Security Duty') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
- {hasData('Base Taskforce Duty') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
- {hasData('Najirpara Taskforce Duty') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
- {hasData('Airfield') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
- {hasData('Halishahar Duty') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
- {hasData('Bake & Bite') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
- {hasData('Tdy') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Tdy</th>}
- {customKeysArray.map(key => <th key={key} className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>{key}</th>)}
- {hasData('Leave') && <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Leave</th>}
- <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>Duty Off</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
+ <tr className="text-black font-bold border-b-2 border-black">
+ <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Date</th>
+ <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Day</th>
+ {hasData('Base Security Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
+ {hasData('Base Taskforce Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
+ {hasData('Najirpara Taskforce Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
+ {hasData('Airfield') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
+ {hasData('Halishahar Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
+ {hasData('Bake & Bite') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
+ {hasData('Tdy') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Tdy</th>}
+ {customKeysArray.map(key => <th key={key} className="border border-black p-1.5 text-center align-middle" rowSpan={2}>{key}</th>)}
+ {hasData('Leave') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Leave</th>}
+ <th className="border border-black p-1.5 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
+ <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Duty Off</th>
+ <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
  </tr>
- <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-white print:border-black ">
- <th className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">Morning</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">Afternoon</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">Night</th>
+ <tr className="text-black font-bold border-b-2 border-black">
+ <th className="border border-black p-1 text-center align-middle">Morning</th>
+ <th className="border border-black p-1 text-center align-middle">Afternoon</th>
+ <th className="border border-black p-1 text-center align-middle">Night</th>
  </tr>
  </thead>
  <tbody>
@@ -1709,6 +2048,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  customKey = notes;
  }
  }
+ if (isPtDocument && codeUpper === 'CANTEEN') customKey = 'Reception Duty';
+ if (isPtDocument && customKey === 'K/O & Reception') customKey = 'Reception Duty';
  if (!dayCustomDisposals[customKey]) dayCustomDisposals[customKey] = [];
  dayCustomDisposals[customKey].push(item);
  }
@@ -1718,58 +2059,58 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  return (
  <tr
  key={dStr}
- className={`border-b border-slate-800 dark:border-white print:border-black align-top ${
- isWeekend ? 'text-red-600 font-semibold' : 'text-slate-900 dark:text-white print:text-black'
+ className={`border-b border-black align-top ${
+ isWeekend ? 'text-red-600 font-semibold' : 'text-black'
  }`}
  >
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 whitespace-nowrap font-bold text-center align-middle">
+ <td className="border border-black p-1.5 whitespace-nowrap font-bold text-center align-middle">
  {formatDateSuperShort(dStr)}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 whitespace-nowrap text-center align-middle">
+ <td className="border border-black p-1.5 whitespace-nowrap text-center align-middle">
  {dayName}
  </td>
- {hasData('Base Security Duty') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Base Security Duty') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(baseSec)}
  </td>}
- {hasData('Base Taskforce Duty') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Base Taskforce Duty') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(btf)}
  </td>}
- {hasData('Najirpara Taskforce Duty') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Najirpara Taskforce Duty') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(ntf)}
  </td>}
- {hasData('Airfield') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Airfield') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(airfield)}
  </td>}
- {hasData('Halishahar Duty') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Halishahar Duty') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(halishahar)}
  </td>}
- {hasData('Bake & Bite') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Bake & Bite') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(bakeBite)}
  </td>}
- {hasData('Tdy') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ {hasData('Tdy') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(tdy)}
  </td>}
  {customKeysArray.map(key => (
- <td key={key} className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td key={key} className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(dayCustomDisposals[key] || [])}
  </td>
  ))}
- {hasData('Leave') && <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
- {renderAirmanColumnList(leave)}
+ {hasData('Leave') && <td className="border border-black p-1.5 text-center align-middle">
+ {renderAirmanColumnList(leave, false, true)}
  </td>}
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaMorn)}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaAft)}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaNight)}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(dutyOff, true)}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center align-middle">
+ <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(onParade)}
  </td>
  </tr>
@@ -1790,17 +2131,21 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  <div>
  {/* TOP DOCUMENT HEADER */}
- <div className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
  <div className="text-center">
- <h1 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black underline inline-block text-base uppercase">
+ <h1 className="font-bold tracking-wide text-black underline inline-block text-base uppercase">
  {documentHeader}
  </h1>
  <br />
- <h2 className="font-bold tracking-wide text-slate-900 dark:text-white print:text-black mt-0.5 underline inline-block text-sm uppercase">
- {activeOfficeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
+ <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block text-sm uppercase">
+ {selectedFlight === 'Overall'
+   ? activeOfficeName
+   : (officeHasFlights
+       ? (/\b(flt|flight)\b/i.test(selectedFlight) ? selectedFlight.toUpperCase() : `${selectedFlight.toUpperCase()} FLT`)
+       : selectedFlight.toUpperCase())}
  </h2>
  </div>
- <div className="text-right font-normal pr-1 text-xs mt-1 text-slate-900 dark:text-white print:text-black">
+ <div className="text-right font-normal pr-1 text-xs mt-1 text-black">
  Date: {formatDateShort(fromDate)}
  </div>
  </div>
@@ -1808,64 +2153,64 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  {/* SUMMARY MATRIX TABLE: EXACT SINGLE-ROW FORMAT FOR SELECTED FLIGHT / OVERALL */}
  <div className="overflow-x-auto my-1">
  <table
- className="w-full text-center align-middle border-collapse border-2 border-slate-900 dark:border-white print:border-black"
+ className="w-full text-center align-middle border-collapse border-2 border-black text-black"
  style={{ fontFamily: 'Arial, sans-serif', fontSize: '10px' }}
  >
  <thead>
- <tr className="text-slate-900 dark:text-white print:text-black font-bold border-b-2 border-slate-900 dark:border-white print:border-black">
- <th className="border border-slate-800 dark:border-white print:border-black p-1 align-middle text-center min-w-[70px] font-bold">Unit / Flight</th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <tr className="text-black font-bold border-b-2 border-black">
+ <th className="border border-black p-1 align-middle text-center min-w-[70px] font-bold">Unit / Flight</th>
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Total Str</div>
  </th>
 
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Det/Tdy</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Eff Str</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Leave</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Essn</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">CMH/ BNS/ BSH</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Sick Report</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Drill Cat-C</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Security Duty On/Off</div>
  </th>
- {!isPtDocument && (<th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Canteen</div></th>)}
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ {!isPtDocument && (<th className="border border-black p-0.5 align-middle text-center"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Canteen</div></th>)}
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Bake & Bite</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Guard of Honour</div>
  </th>
  {Object.keys(customDisposalsMap).map(key => (
- <th key={key} className="border border-slate-800 dark:border-white print:border-black border-black dark:border-white print:border-black p-0.5 align-middle text-center">
+ <th key={key} className="border border-black p-0.5 align-middle text-center">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">
  {key}
  </div>
  </th>
  ))}
- <th className="border border-black dark:border-white print:border-black p-0.5 align-middle text-center font-extrabold"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center font-extrabold">
+ <th className="border border-black p-0.5 align-middle text-center font-extrabold"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
+ <th className="border border-black p-0.5 align-middle text-center font-extrabold">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </div>
  </th>
- <th className="border border-slate-800 dark:border-white print:border-black p-0.5 align-middle text-center min-w-[35px]">
+ <th className="border border-black p-0.5 align-middle text-center min-w-[35px]">
  <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
  Rmk
  </div>
@@ -1878,34 +2223,36 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const unitLabel =
  selectedFlight === 'Overall'
  ? activeOfficeName
- : `${activeOfficeName} (${selectedFlight.toUpperCase()} FLT)`;
+ : (officeHasFlights
+     ? (/\b(flt|flight)\b/i.test(selectedFlight) ? selectedFlight.toUpperCase() : `${selectedFlight.toUpperCase()} FLT`)
+     : selectedFlight.toUpperCase());
 
  return (
- <tr className="font-bold text-slate-900 dark:text-white print:text-black border-b-2 border-slate-900 dark:border-white print:border-black print:">
- <td className="border border-slate-800 dark:border-white print:border-black p-1.5 text-center font-black whitespace-nowrap align-middle">
+ <tr className="font-bold text-black border-b-2 border-black">
+ <td className="border border-black p-1.5 text-center font-black whitespace-nowrap align-middle">
  {unitLabel}
  </td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.totalStr}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.totalStr}</td>
  
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.detTdyCount > 0 ? stats.detTdyCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.effStr}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.leaveCount > 0 ? stats.leaveCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.essnCount > 0 ? stats.essnCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.hospitalCount > 0 ? stats.hospitalCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.sickExCount > 0 ? stats.sickExCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.drillCatCCount > 0 ? stats.drillCatCCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.guardDutyCount > 0 ? stats.guardDutyCount : '-'}</td>
- {!isPtDocument && (<td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.canteenCount > 0 ? stats.canteenCount : "-"}</td>)}
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.bakeBiteCount > 0 ? stats.bakeBiteCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.koReceptionCount > 0 ? stats.koReceptionCount : '-'}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">{stats.gamesCount > 0 ? stats.gamesCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.detTdyCount > 0 ? stats.detTdyCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.effStr}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.leaveCount > 0 ? stats.leaveCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.essnCount > 0 ? stats.essnCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.hospitalCount > 0 ? stats.hospitalCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.sickExCount > 0 ? stats.sickExCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.drillCatCCount > 0 ? stats.drillCatCCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.guardDutyCount > 0 ? stats.guardDutyCount : '-'}</td>
+ {!isPtDocument && (<td className="border border-black p-1 text-center align-middle">{stats.canteenCount > 0 ? stats.canteenCount : "-"}</td>)}
+ <td className="border border-black p-1 text-center align-middle">{stats.bakeBiteCount > 0 ? stats.bakeBiteCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.koReceptionCount > 0 ? stats.koReceptionCount : '-'}</td>
+ <td className="border border-black p-1 text-center align-middle">{stats.gamesCount > 0 ? stats.gamesCount : '-'}</td>
  {Object.keys(customDisposalsMap).map(key => {
  const count = customDisposalsMap[key].length;
- return <td key={key} className="border border-slate-800 dark:border-white print:border-black border-black dark:border-white print:border-black p-0.5 align-middle text-center">{count > 0 ? count : '-'}</td>;
+ return <td key={key} className="border border-black p-0.5 align-middle text-center">{count > 0 ? count : '-'}</td>;
  })}
- <td className="border border-black dark:border-white print:border-black p-0.5 font-bold text-center align-middle">{stats.totalOutPt}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 font-black print:text-center align-middle">{stats.onPtParadeCount}</td>
- <td className="border border-slate-800 dark:border-white print:border-black p-1 text-center align-middle">-</td>
+ <td className="border border-black p-0.5 font-bold text-center align-middle">{stats.totalOutPt}</td>
+ <td className="border border-black p-1 font-black text-center align-middle">{stats.onPtParadeCount}</td>
+ <td className="border border-black p-1 text-center align-middle">-</td>
  </tr>
  );
  })()}
@@ -1934,16 +2281,16 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="flex flex-wrap items-start justify-start gap-8">
  {/* 1ST COLUMN: ON PARADE / ON PT (1 TO 15 ON LEFT, 16+ ON RIGHT, NIL IF EMPTY) */}
  <div className="min-w-[200px] flex-shrink-0 pr-3">
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1.5 capitalize tracking-wide">
+ <h3 className="font-bold underline text-black mb-1.5 capitalize tracking-wide">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </h3>
 
  {onPtList.length > 0 ? (
  <div className="flex items-start gap-8">
  {/* Left side: 1 to 15 */}
- <ol className="space-y-0.5 font-normal leading-tight">
+ <ol className="space-y-0.5 font-normal leading-tight text-black">
  {onPtList.slice(0, 15).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/40 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
+                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
  {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  </li>
  ))}
@@ -1951,9 +2298,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* Right side: 16+ */}
  {onPtList.length > 15 && (
- <ol className="space-y-0.5 font-normal leading-tight">
+ <ol className="space-y-0.5 font-normal leading-tight text-black">
  {onPtList.slice(15, 30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${16 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/40 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
+                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${16 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
  {16 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  </li>
  ))}
@@ -1962,9 +2309,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* Extra column if > 30 */}
  {onPtList.length > 30 && (
- <ol className="space-y-0.5 font-normal leading-tight">
+ <ol className="space-y-0.5 font-normal leading-tight text-black">
  {onPtList.slice(30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${31 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/40 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
+                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${31 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
  {31 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  </li>
  ))}
@@ -1972,7 +2319,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  )}
  </div>
  ) : (
- <div className="font-bold text-slate-900 dark:text-white print:text-black">Nil</div>
+ <div className="font-bold text-black">Nil</div>
  )}
  </div>
 
@@ -1984,31 +2331,31 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="min-w-[130px] max-w-[180px] flex flex-col space-y-3">
  {bakeBiteList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Bake & Bite</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Bake & Bite</h3>
  {renderDisposalAirmenList(bakeBiteList, 'BAKE_N_BITE', 'Bake & Bite')}
  </div>
  )}
  {tdyList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Det/ Tdy</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Det/ Tdy</h3>
  {renderDisposalAirmenList(tdyList, 'TDY', 'Det/Tdy')}
  </div>
  )}
  {canteenList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Canteen</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Canteen</h3>
  {renderDisposalAirmenList(canteenList, 'CANTEEN', 'Canteen')}
  </div>
  )}
  {leaveList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Leave</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Leave</h3>
  {renderDisposalAirmenList(leaveList, 'LEAVE', 'Leave')}
  </div>
  )}
  {essnList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">
  ESSN
  </h3>
  {renderDisposalAirmenList(essnList, 'ESSN', 'ESSN')}
@@ -2022,7 +2369,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="min-w-[135px] max-w-[185px] flex flex-col space-y-3">
  {cmhList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">
  CMH/ BNS/ BSH
  </h3>
  {renderDisposalAirmenList(cmhList, 'CMH', 'CMH')}
@@ -2030,25 +2377,25 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  )}
  {sickReportList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Sick Report</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Sick Report</h3>
  {renderDisposalAirmenList(sickReportList, 'SICK_REPORT', 'Sick Report')}
  </div>
  )}
  {drillCatCList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Drill Cat-C</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Drill Cat-C</h3>
  {renderDisposalAirmenList(drillCatCList, 'CAT_C', 'Drill Cat-C')}
  </div>
  )}
  {receptionList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</h3>
  {renderDisposalAirmenList(receptionList, 'RECEPTION', isPtDocument ? 'Reception Duty' : 'K/O & Reception')}
  </div>
  )}
  {gamesList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Guard of Honour</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Guard of Honour</h3>
  {renderDisposalAirmenList(gamesList, 'GAMES', 'Guard of Honour')}
  </div>
  )}
@@ -2060,13 +2407,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <div className="min-w-[175px] flex flex-col space-y-3">
  {dutyOnList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty On</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Duty On</h3>
  {renderDisposalAirmenList(dutyOnList, 'DUTY_ON', 'Duty On')}
  </div>
  )}
  {!canPlaceDutyOffBeside && dutyOffList.length > 0 && (
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty Off</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Duty Off</h3>
  {renderDisposalAirmenList(dutyOffList, 'DUTY_OFF', 'Duty Off')}
  </div>
  )}
@@ -2076,7 +2423,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  if (!airmenList || airmenList.length === 0) return null;
  return (
  <div key={catName}>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">
  {catName}
  </h3>
  {renderDisposalAirmenList(airmenList, 'OTHERS', catName)}
@@ -2090,7 +2437,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  {canPlaceDutyOffBeside && dutyOffList.length > 0 && (
  <div className="min-w-[160px] flex flex-col space-y-3">
  <div>
- <h3 className="font-bold underline text-slate-900 dark:text-white print:text-black mb-1 capitalize tracking-wide">Duty Off</h3>
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Duty Off</h3>
  {renderDisposalAirmenList(dutyOffList, 'DUTY_OFF', 'Duty Off')}
  </div>
  </div>
@@ -2101,12 +2448,15 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  })()}
  </div>
  
+              {selectedFlight === 'Overall' && (
+              <>
               {/* SPACER ROW: 0.9 INCH HEIGHT TO PROVIDE AMPLE SIGNATURE HEADROOM */}
  <div className="w-full" style={{ height: '0.9in' }} />
 
  {/* OFFICIAL SIGNATURE FOOTER */}
  <div
- className={`flex justify-between items-end pt-1 ${fromDate !== toDate ? 'hidden print:hidden' : ''} text-slate-900 dark:text-white print:text-black text-xs`}
+ data-pdf-keep-together="true"
+ className={`flex justify-between items-end pt-1 ${fromDate !== toDate ? 'hidden print:hidden' : ''} text-black text-xs`}
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {/* LEFT SIGNATURE BLOCK (Prepared By) */}
@@ -2121,7 +2471,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Prepared By signature' : undefined}
  >
  {preparedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
+ <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
  <span className="font-bold underline">
  {preparedBy.digitalSignatureText || preparedBy.name}
  </span>
@@ -2130,7 +2480,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </span>
  </div>
  )}
- <div className="border-t border-slate-900 dark:border-white print:border-black pt-1.5">
+ <div className="pt-1.5">
  <div className="text-xs uppercase font-black">{preparedBy.name}</div>
  <div className="text-[11px] font-normal">{preparedBy.rank}</div>
  <div className="text-[11px] font-normal">{preparedBy.designation}</div>
@@ -2150,7 +2500,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Checked By signature' : undefined}
  >
  {checkedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
+ <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
  <span className="font-bold underline">
  {checkedBy.digitalSignatureText || checkedBy.name}
  </span>
@@ -2159,7 +2509,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </span>
  </div>
  )}
- <div className="border-t border-slate-900 dark:border-white print:border-black pt-1.5">
+ <div className="pt-1.5">
  <div className="text-xs uppercase font-black">{checkedBy.name}</div>
  <div className="text-[11px] font-normal">{checkedBy.rank}</div>
  <div className="text-[11px] font-normal">{checkedBy.designation}</div>
@@ -2179,7 +2529,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Authorized By signature' : undefined}
  >
  {authorizedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-slate-900 dark:text-white print:text-black select-none">
+ <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
  <span className="font-bold underline">
  {authorizedBy.digitalSignatureText || authorizedBy.name}
  </span>
@@ -2188,7 +2538,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </span>
  </div>
  )}
- <div className="border-t border-slate-900 dark:border-white print:border-black pt-1.5">
+ <div className="pt-1.5">
  <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
  <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
  <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
@@ -2196,9 +2546,12 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
                   </div>
                 </div>
               </div>
+              </>
+              )}
               
  </div>
  )}
+ </div>
  </div>
 
  {/* Row Edit Popover */}
@@ -2332,6 +2685,31 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  />
  )}
  </div>
+
+ {/* Leave Type Selector if LEAVE selected */}
+ {disposalCategory === 'LEAVE' && !isEditingDisposals && (
+ <div className="p-3 bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 rounded-xl space-y-1.5 animate-fadeIn">
+ <label className="text-xs font-bold text-sky-900 dark:text-sky-200 block">
+ Select Leave Type
+ </label>
+ <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+ {(['Casual Leave', 'Annual Leave', 'Recreation Leave', 'Sick Leave'] as const).map((lt) => (
+ <button
+ key={lt}
+ type="button"
+ onClick={() => setDisposalLeaveType(lt)}
+ className={`px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+ disposalLeaveType === lt
+ ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+ : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-sky-200 dark:border-slate-700 hover:border-sky-400'
+ }`}
+ >
+ {lt}
+ </button>
+ ))}
+ </div>
+ </div>
+ )}
 
  {/* Custom Title Input if OTHERS selected */}
  {disposalCategory === 'OTHERS' && (!ALL_DISPOSAL_OPTIONS.find(o => o.label === disposalCustomTitle) || disposalCustomTitle === '') && !isEditingDisposals && (
@@ -2748,6 +3126,31 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
                   )}
                 </div>
 
+                {/* Leave Type Selector if LEAVE selected */}
+                {editDisposalCategory === 'LEAVE' && !isEditingDisposals && (
+                  <div className="p-3 bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 rounded-xl space-y-1.5 animate-fadeIn mt-2">
+                    <label className="text-xs font-bold text-sky-900 dark:text-sky-200 block">
+                      Select Leave Type
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      {(['Casual Leave', 'Annual Leave', 'Recreation Leave', 'Sick Leave'] as const).map((lt) => (
+                        <button
+                          key={lt}
+                          type="button"
+                          onClick={() => setEditDisposalLeaveType(lt)}
+                          className={`px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                            editDisposalLeaveType === lt
+                              ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-sky-200 dark:border-slate-700 hover:border-sky-400'
+                          }`}
+                        >
+                          {lt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Custom Title Input if OTHERS selected */}
                 {editDisposalCategory === 'OTHERS' && (!ALL_DISPOSAL_OPTIONS.find(o => o.label === editDisposalCustomTitle) || editDisposalCustomTitle === '') && !isEditingDisposals && (
                   <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-xl space-y-1 animate-fadeIn mt-2">
@@ -2796,21 +3199,6 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  initialFromDate={fromDate} initialToDate={toDate}
  onClose={() => setShowRatioModal(false)}
  onRatiosUpdated={() => setRatioRefreshTrigger((prev) => prev + 1)}
- />
- )}
-
- {/* Internal Printable Parade State Modal (Fallback) */}
- {isInternalPrintOpen && (
-<PrintableParadeStateModal
-              onDownloadDocx={handleDownloadDocx}
-              userFlight={userFlight} initialHideEmptyColumns={hideEmptyColumns}
- initialFromDate={fromDate} initialToDate={toDate}
- shift="Morning"
- flight={selectedFlight}
- airmen={airmen}
- documentType={isPtDocument ? 'PT' : isOthersDocument ? 'OTHERS' : 'PARADE'}
- customDocumentHeader={documentHeader}
- onClose={() => setIsInternalPrintOpen(false)}
  />
  )}
 

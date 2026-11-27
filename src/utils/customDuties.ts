@@ -1,4 +1,4 @@
-import { DutyTypeInfo, DutyCategoryCode, FlightName, Rank } from '../types';
+import type { DutyTypeInfo, DutyCategoryCode, FlightName, Rank } from '../types.ts';
 
 export interface CustomDutyConfig extends DutyTypeInfo {
   isCustom: true;

@@ -38,6 +38,10 @@ import {
   Sparkles,
   Wrench,
   PowerOff,
+  Cloud,
+  Plus,
+  Play,
+  Pause,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
 import {
@@ -77,6 +81,19 @@ import {
   fetchOfficeLoginHistory,
   clearOfficeLoginHistoryByCode,
   syncBrowserTabIdentity,
+  firebaseConfig,
+  parseFlexibleFirebaseConfig,
+  testCustomFirebaseConnection,
+  buildAutoCloudFirebaseConfig,
+  CloudPoolShard,
+  OfficeFirebaseConfig,
+  getMasterCloudPoolLocal,
+  fetchMasterCloudPoolFromCloud,
+  addCloudPoolShard,
+  toggleCloudPoolShardStatus,
+  removeCloudPoolShard,
+  reassignOfficeToCloudConfig,
+  getShareableFirestoreRulesText,
 } from '../firebase';
 import {
   loginAsMasterOwnerSession,
@@ -141,10 +158,27 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     getRegisteredOfficesLocal()
   );
 
-  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'maintenance' | 'settings'>(() => {
+  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'cloud_pool' | 'maintenance' | 'settings'>(() => {
     const initialReqs = getPendingOfficeRequestsLocal();
     return initialReqs.some((r) => r.status === 'PENDING') ? 'approvals' : 'offices';
   });
+
+  // Master Cloud Pool State (Multi-Firebase Sharding)
+  const [cloudPoolShards, setCloudPoolShards] = useState<CloudPoolShard[]>(() =>
+    getMasterCloudPoolLocal()
+  );
+  const [poolLabelInput, setPoolLabelInput] = useState<string>('');
+  const [poolConfigInput, setPoolConfigInput] = useState<string>('');
+  const [poolDbIdInput, setPoolDbIdInput] = useState<string>('');
+  const [isAddingShard, setIsAddingShard] = useState<boolean>(false);
+  const [poolFormError, setPoolFormError] = useState<string>('');
+  const [poolFormSuccess, setPoolFormSuccess] = useState<string>('');
+  const [testingShardId, setTestingShardId] = useState<string | null>(null);
+  const [shardTestResults, setShardTestResults] = useState<
+    Record<string, { ok: boolean; rulesReady?: boolean; message: string }>
+  >({});
+  const [copiedRules, setCopiedRules] = useState<boolean>(false);
+  const [reassigningOfficeCode, setReassigningOfficeCode] = useState<string | null>(null);
 
   // Maintenance Mode State (Master Control Panel)
   const [appConfig, setAppConfig] = useState<AppConfig>(() => getAppConfig());
@@ -215,20 +249,23 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     const instantRequests = getPendingOfficeRequestsLocal();
     setOffices(instantOffices);
     setOfficeRequests(instantRequests);
+    setCloudPoolShards(getMasterCloudPoolLocal());
 
     if (showRefreshAnimation) {
       setIsSyncingBackground(true);
     }
     try {
-      const [officeList, reqList, syncedCreds] = await Promise.all([
+      const [officeList, reqList, syncedCreds, poolList] = await Promise.all([
         fetchRegisteredOfficesFromMaster(),
         fetchPendingOfficeRequestsFromMaster(),
         syncMasterCredentialsFromCloud(),
+        fetchMasterCloudPoolFromCloud(showRefreshAnimation),
       ]);
       setOffices(officeList);
       setOfficeRequests(reqList.filter((r) => r.status !== 'REJECTED'));
       setCurrentMasterCreds(syncedCreds);
       setNewMasterIdDraft(syncedCreds.masterUserId);
+      setCloudPoolShards(poolList);
       if (!didInitialTabSelectRef.current) {
         didInitialTabSelectRef.current = true;
         if (reqList.some((r) => r.status === 'PENDING')) {
@@ -741,6 +778,152 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     }
   };
 
+  const handleCopyFirestoreRules = async () => {
+    const rulesText = getShareableFirestoreRulesText();
+    try {
+      await navigator.clipboard.writeText(rulesText);
+      setCopiedRules(true);
+      setTimeout(() => setCopiedRules(false), 2500);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = rulesText;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopiedRules(true);
+      setTimeout(() => setCopiedRules(false), 2500);
+    }
+  };
+
+  const handleAddPoolShard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPoolFormError('');
+    setPoolFormSuccess('');
+
+    const parsed = parseFlexibleFirebaseConfig(poolConfigInput);
+    if (!parsed) {
+      setPoolFormError(
+        'Invalid Firebase Config. Paste the JSON or `const firebaseConfig = { ... }` snippet from Firebase Console.'
+      );
+      return;
+    }
+
+    const customDb = poolDbIdInput.trim();
+    const targetConfig: OfficeFirebaseConfig = {
+      ...parsed,
+      ...(customDb && customDb !== '(default)' ? { firestoreDatabaseId: customDb } : {}),
+    };
+
+    setIsAddingShard(true);
+    try {
+      const testRes = await testCustomFirebaseConnection(targetConfig);
+      if (!testRes.ok) {
+        setPoolFormError(testRes.message || 'Could not connect to this Firebase project.');
+        return;
+      }
+
+      if (testRes.effectiveDatabaseId && testRes.effectiveDatabaseId !== '(default)') {
+        targetConfig.firestoreDatabaseId = testRes.effectiveDatabaseId;
+      } else if (testRes.effectiveDatabaseId === '(default)') {
+        delete targetConfig.firestoreDatabaseId;
+      }
+
+      const nextList = await addCloudPoolShard(
+        poolLabelInput.trim() || targetConfig.projectId,
+        targetConfig
+      );
+      const addedId = `${targetConfig.projectId}__${targetConfig.firestoreDatabaseId?.trim() || '(default)'}`.replace(
+        /[^a-zA-Z0-9_-]/g,
+        '_'
+      );
+
+      if (testRes.rulesReady === false) {
+        const pausedList = await toggleCloudPoolShardStatus(addedId, 'PAUSED');
+        setCloudPoolShards(pausedList);
+        setShardTestResults((prev) => ({
+          ...prev,
+          [addedId]: { ok: true, rulesReady: false, message: testRes.message },
+        }));
+        setPoolFormError(
+          `Project "${targetConfig.projectId}" added as PAUSED because Firestore Rules returned 403. Copy & publish firestore.rules in that project, then click Test & Activate.`
+        );
+      } else {
+        setCloudPoolShards(nextList);
+        setShardTestResults((prev) => ({
+          ...prev,
+          [addedId]: { ok: true, rulesReady: true, message: testRes.message },
+        }));
+        setPoolFormSuccess(
+          `Added "${poolLabelInput.trim() || targetConfig.projectId}" to Auto Cloud Pool! New offices will automatically use it.`
+        );
+      }
+
+      setPoolLabelInput('');
+      setPoolConfigInput('');
+      setPoolDbIdInput('');
+    } catch (err: any) {
+      setPoolFormError(err?.message || 'Failed adding Firebase shard to Cloud Pool.');
+    } finally {
+      setIsAddingShard(false);
+    }
+  };
+
+  const handleTestPoolShard = async (shard: CloudPoolShard) => {
+    setTestingShardId(shard.id);
+    try {
+      const res = await testCustomFirebaseConnection(shard.firebaseConfig);
+      setShardTestResults((prev) => ({
+        ...prev,
+        [shard.id]: {
+          ok: res.ok,
+          rulesReady: res.rulesReady,
+          message: res.message,
+        },
+      }));
+    } finally {
+      setTestingShardId(null);
+    }
+  };
+
+  const handleTogglePoolShardStatus = async (shard: CloudPoolShard) => {
+    const nextStatus = shard.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
+    const nextList = await toggleCloudPoolShardStatus(shard.id, nextStatus);
+    setCloudPoolShards(nextList);
+    setApprovalBanner(
+      `Cloud Pool shard "${shard.label}" (${shard.firebaseConfig.projectId}) is now ${nextStatus}.`
+    );
+  };
+
+  const handleRemovePoolShard = async (shard: CloudPoolShard) => {
+    const nextList = await removeCloudPoolShard(shard.id);
+    setCloudPoolShards(nextList);
+    setApprovalBanner(`Removed shard "${shard.label}" from Auto Cloud Pool.`);
+  };
+
+  const handleReassignOfficeCloud = async (officeCode: string, targetValue: string) => {
+    setReassigningOfficeCode(officeCode);
+    try {
+      let targetFb: OfficeFirebaseConfig | null = null;
+      if (targetValue === '__PRIMARY__') {
+        targetFb = buildAutoCloudFirebaseConfig(officeCode, officeCode);
+      } else {
+        const matchedShard = cloudPoolShards.find((s) => s.id === targetValue);
+        if (matchedShard) {
+          targetFb = { ...matchedShard.firebaseConfig, officeCode };
+        }
+      }
+      if (!targetFb) return;
+      await reassignOfficeToCloudConfig(officeCode, targetFb);
+      setOffices(getRegisteredOfficesLocal());
+      setApprovalBanner(
+        `Assigned office "${officeCode}" to Firebase project "${targetFb.projectId}".`
+      );
+    } finally {
+      setReassigningOfficeCode(null);
+    }
+  };
+
   const totalOffices = offices.length;
   // Total Active Users across all active/registered offices
   const totalCombinedActiveUsers = offices
@@ -1044,6 +1227,34 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => {
+                    setActiveTab('cloud_pool');
+                    setPoolFormError('');
+                    setPoolFormSuccess('');
+                  }}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'cloud_pool'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Cloud className="w-4 h-4 shrink-0" />
+                    <span>Cloud Pool</span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-black ${
+                      activeTab === 'cloud_pool'
+                        ? 'bg-white/20 text-white'
+                        : 'bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/30'
+                    }`}
+                  >
+                    {cloudPoolShards.filter((s) => s.status === 'ACTIVE').length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setActiveTab('maintenance')}
                   className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
                     activeTab === 'maintenance'
@@ -1128,6 +1339,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       ? 'Registered Office Workspaces'
                       : activeTab === 'approvals'
                       ? 'New Office Approval Queue'
+                      : activeTab === 'cloud_pool'
+                      ? 'Auto Cloud Pool (Multi-Firebase Sharding)'
                       : activeTab === 'maintenance'
                       ? 'Global System Maintenance Mode'
                       : 'Master Security & Credentials'}
@@ -1142,6 +1355,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                     ? 'Inspect, enter, disable/enable, or view login history for any registered office.'
                     : activeTab === 'approvals'
                     ? 'Review and approve new office setup requests submitted from the login portal.'
+                    : activeTab === 'cloud_pool'
+                    ? 'Register free Firebase projects here. New offices automatically get separate clouds with zero user hassle.'
                     : activeTab === 'maintenance'
                     ? 'Activate, schedule, or deactivate global application maintenance mode across all offices.'
                     : 'Manage your Master User ID and Master PIN for global workspace access.'}
@@ -1389,33 +1604,73 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                               </div>
 
                               {/* Metrics Bar */}
-                              <div className="mt-4 grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/70 dark:border-slate-800/80 text-xs">
-                                <div>
-                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                                    Office Code
-                                  </p>
-                                  <p className="font-mono font-bold text-emerald-600 dark:text-emerald-400 truncate mt-0.5">
-                                    {code}
-                                  </p>
+                              <div className="mt-4 space-y-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200/70 dark:border-slate-800/80 text-xs">
+                                <div className="grid grid-cols-3 gap-2.5">
+                                  <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                      Office Code
+                                    </p>
+                                    <p className="font-mono font-bold text-emerald-600 dark:text-emerald-400 truncate mt-0.5">
+                                      {code}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                      Active Users
+                                    </p>
+                                    <p className="font-mono font-black text-slate-900 dark:text-white mt-0.5 flex items-center gap-1">
+                                      <Users className="w-3.5 h-3.5 text-sky-500" />
+                                      <span>{Number(office.totalUsers) || 0}</span>
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                                      Last Synced
+                                    </p>
+                                    <p className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 truncate mt-0.5">
+                                      {office.lastActive
+                                        ? new Date(office.lastActive).toLocaleDateString()
+                                        : 'Active'}
+                                    </p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                                    Active Users
-                                  </p>
-                                  <p className="font-mono font-black text-slate-900 dark:text-white mt-0.5 flex items-center gap-1">
-                                    <Users className="w-3.5 h-3.5 text-sky-500" />
-                                    <span>{Number(office.totalUsers) || 0}</span>
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                                    Last Synced
-                                  </p>
-                                  <p className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 truncate mt-0.5">
-                                    {office.lastActiveAt
-                                      ? new Date(office.lastActiveAt).toLocaleDateString()
-                                      : 'Active'}
-                                  </p>
+
+                                <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800/70 flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <Database className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                                    <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                      Cloud:
+                                    </span>
+                                    <span className="font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-400 truncate">
+                                      {office.firebaseConfig?.projectId || office.projectId || 'Primary'}
+                                    </span>
+                                  </div>
+
+                                  {!isDefault155 && cloudPoolShards.length > 0 && (
+                                    <select
+                                      value={(() => {
+                                        const curProj = office.firebaseConfig?.projectId || office.projectId;
+                                        const curDb = office.firebaseConfig?.firestoreDatabaseId || '(default)';
+                                        const matched = cloudPoolShards.find(
+                                          (s) =>
+                                            s.firebaseConfig.projectId === curProj &&
+                                            (s.firebaseConfig.firestoreDatabaseId || '(default)') === curDb
+                                        );
+                                        return matched ? matched.id : '__PRIMARY__';
+                                      })()}
+                                      disabled={reassigningOfficeCode === upperCode}
+                                      onChange={(e) => handleReassignOfficeCloud(upperCode, e.target.value)}
+                                      className="px-2 py-1 rounded-lg bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer max-w-[175px]"
+                                      title="Assign Firebase Cloud Shard"
+                                    >
+                                      <option value="__PRIMARY__">Primary Default Cloud</option>
+                                      {cloudPoolShards.map((shard) => (
+                                        <option key={shard.id} value={shard.id}>
+                                          {shard.label} ({shard.firebaseConfig.projectId})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -1685,6 +1940,324 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       })}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* TAB: AUTO CLOUD POOL (MULTI-FIREBASE SHARDING) */}
+              {activeTab === 'cloud_pool' && (
+                <div className="space-y-5">
+                  {/* Primary Default Cloud Status + Copy Rules Bar */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <div className="lg:col-span-2 p-5 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-start gap-3.5">
+                        <div className="w-11 h-11 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                          <Database className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                              Primary Default Cloud
+                            </h3>
+                            <span className="px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                              ACTIVE HQ
+                            </span>
+                          </div>
+                          <p className="text-xs font-mono font-bold text-slate-600 dark:text-slate-300 mt-1">
+                            {buildAutoCloudFirebaseConfig('', '').projectId}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            Used as fallback when no extra active shard is registered in the pool. Offices assigned here:{' '}
+                            <span className="font-bold text-slate-800 dark:text-slate-200">
+                              {
+                                offices.filter(
+                                  (o) =>
+                                    (o.firebaseConfig?.projectId || o.projectId) ===
+                                    buildAutoCloudFirebaseConfig('', '').projectId
+                                ).length
+                              }
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-5 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between gap-3">
+                      <div>
+                        <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                          New Project Security Rules
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                          Publish these Firestore Rules in every new Firebase project before activating it.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCopyFirestoreRules}
+                        className="w-full py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer transition-colors"
+                      >
+                        {copiedRules ? (
+                          <>
+                            <Check className="w-4 h-4" />
+                            <span>Copied firestore.rules!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4" />
+                            <span>Copy Ready firestore.rules</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Registered Extra Cloud Shards */}
+                  <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                    <div className="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
+                      <div>
+                        <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                          Registered Firebase Shards ({cloudPoolShards.length})
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          When a new office is created or approved, the least-loaded ACTIVE shard is automatically assigned.
+                        </p>
+                      </div>
+                    </div>
+
+                    {cloudPoolShards.length === 0 ? (
+                      <div className="p-8 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-1.5">
+                        <Cloud className="w-7 h-7 text-slate-400 mx-auto" />
+                        <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                          No Extra Firebase Shards Added Yet
+                        </p>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                          All offices currently share the Primary Default Cloud (with 99% bundled quota optimization). Add free Firebase projects below to isolate future offices onto separate clouds automatically.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                        {cloudPoolShards.map((shard) => {
+                          const shardDbId = shard.firebaseConfig.firestoreDatabaseId || '(default)';
+                          const assignedOffices = offices.filter(
+                            (o) =>
+                              (o.firebaseConfig?.projectId || o.projectId) ===
+                                shard.firebaseConfig.projectId &&
+                              (o.firebaseConfig?.firestoreDatabaseId || '(default)') === shardDbId
+                          );
+                          const testRes = shardTestResults[shard.id];
+                          const isPaused = shard.status === 'PAUSED';
+
+                          return (
+                            <div
+                              key={shard.id}
+                              className={`p-4 rounded-xl border space-y-3 transition-all ${
+                                isPaused
+                                  ? 'bg-slate-50 dark:bg-slate-900/40 border-amber-500/30 opacity-85'
+                                  : 'bg-slate-50/70 dark:bg-slate-900/70 border-slate-200 dark:border-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <h4 className="text-sm font-black text-slate-900 dark:text-white truncate">
+                                    {shard.label}
+                                  </h4>
+                                  <p className="text-[11px] font-mono font-bold text-sky-600 dark:text-sky-400 truncate">
+                                    {shard.firebaseConfig.projectId}
+                                  </p>
+                                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                                    DB: <span className="font-mono">{shardDbId}</span> • Assigned Offices:{' '}
+                                    <span className="font-bold text-slate-800 dark:text-slate-200">
+                                      {assignedOffices.length}
+                                    </span>
+                                  </p>
+                                </div>
+
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider border shrink-0 ${
+                                    isPaused
+                                      ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                      : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                  }`}
+                                >
+                                  {shard.status}
+                                </span>
+                              </div>
+
+                              {assignedOffices.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {assignedOffices.map((off) => (
+                                    <span
+                                      key={off.officeCode || off.officeName}
+                                      className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300"
+                                    >
+                                      {off.officeCode || off.officeName}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
+                              {testRes && (
+                                <div
+                                  className={`p-2 rounded-lg text-[11px] font-semibold border ${
+                                    testRes.ok && testRes.rulesReady !== false
+                                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300'
+                                  }`}
+                                >
+                                  {testRes.message}
+                                </div>
+                              )}
+
+                              <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTestPoolShard(shard)}
+                                    disabled={testingShardId === shard.id}
+                                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  >
+                                    {testingShardId === shard.id ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <Activity className="w-3 h-3 text-sky-500" />
+                                    )}
+                                    <span>Test</span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTogglePoolShardStatus(shard)}
+                                    className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
+                                      isPaused
+                                        ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                        : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                    }`}
+                                  >
+                                    {isPaused ? (
+                                      <>
+                                        <Play className="w-3 h-3" />
+                                        <span>Activate</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Pause className="w-3 h-3" />
+                                        <span>Pause</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemovePoolShard(shard)}
+                                  className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 cursor-pointer"
+                                  title="Remove Shard from Pool"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Add Extra Firebase Cloud Form */}
+                  <form
+                    onSubmit={handleAddPoolShard}
+                    className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4 max-w-3xl"
+                  >
+                    <div className="flex items-center gap-2.5 border-b border-slate-200 dark:border-slate-800 pb-3">
+                      <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                        <Plus className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                          Add Extra Firebase Cloud to Pool
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Paste the web app `firebaseConfig` from a free Spark Firebase project (with Firestore enabled + rules published).
+                        </p>
+                      </div>
+                    </div>
+
+                    {poolFormError && (
+                      <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-xs font-bold text-rose-700 dark:text-rose-200 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                        <span>{poolFormError}</span>
+                      </div>
+                    )}
+
+                    {poolFormSuccess && (
+                      <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs font-bold text-emerald-700 dark:text-emerald-200 flex items-start gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                        <span>{poolFormSuccess}</span>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Shard Label
+                        </label>
+                        <input
+                          type="text"
+                          value={poolLabelInput}
+                          onChange={(e) => setPoolLabelInput(e.target.value)}
+                          placeholder="e.g. Cloud Shard #2 (F-7 / Regional)"
+                          className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Firestore Database ID (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={poolDbIdInput}
+                          onChange={(e) => setPoolDbIdInput(e.target.value)}
+                          placeholder="Leave blank for (default)"
+                          className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                        Firebase Config (JSON or JS Snippet) <span className="text-rose-500">*</span>
+                      </label>
+                      <textarea
+                        rows={4}
+                        value={poolConfigInput}
+                        onChange={(e) => {
+                          setPoolConfigInput(e.target.value);
+                          setPoolFormError('');
+                        }}
+                        placeholder={`Paste firebaseConfig here, e.g.:\n{ "apiKey": "...", "authDomain": "...", "projectId": "...", "appId": "..." }`}
+                        className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500 resize-y"
+                      />
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={isAddingShard || !poolConfigInput.trim()}
+                        className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 shadow-md cursor-pointer transition-colors"
+                      >
+                        {isAddingShard ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Testing & Adding...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Cloud className="w-4 h-4" />
+                            <span>Test & Add to Pool</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </form>
                 </div>
               )}
 
