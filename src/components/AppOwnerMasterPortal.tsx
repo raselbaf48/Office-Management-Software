@@ -42,6 +42,8 @@ import {
   Plus,
   Play,
   Pause,
+  Mail,
+  Pencil,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
 import {
@@ -94,6 +96,12 @@ import {
   removeCloudPoolShard,
   reassignOfficeToCloudConfig,
   getShareableFirestoreRulesText,
+  PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+  resolveFirebaseOwnerEmail,
+  getFactoryPrimaryFirebaseConfig,
+  DiscoveredFirebaseProject,
+  pickGmailViaGoogleAccountChooser,
+  fetchFirebaseProjectsForGmailWithGoogle,
 } from '../firebase';
 import {
   loginAsMasterOwnerSession,
@@ -168,6 +176,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     getMasterCloudPoolLocal()
   );
   const [poolLabelInput, setPoolLabelInput] = useState<string>('');
+  const [poolOwnerEmailInput, setPoolOwnerEmailInput] = useState<string>('');
   const [poolConfigInput, setPoolConfigInput] = useState<string>('');
   const [poolDbIdInput, setPoolDbIdInput] = useState<string>('');
   const [isAddingShard, setIsAddingShard] = useState<boolean>(false);
@@ -179,6 +188,19 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   >({});
   const [copiedRules, setCopiedRules] = useState<boolean>(false);
   const [reassigningOfficeCode, setReassigningOfficeCode] = useState<string | null>(null);
+
+  // Per-Office Connected Firebase Gmail Switcher Modal State
+  const [firebaseModalOffice, setFirebaseModalOffice] = useState<RegisteredOfficeTelemetry | null>(null);
+  const [fbModalEmail, setFbModalEmail] = useState<string>('');
+  const [fbModalConfigText, setFbModalConfigText] = useState<string>('');
+  const [fbModalDbId, setFbModalDbId] = useState<string>('');
+  const [fbModalShowConfigEditor, setFbModalShowConfigEditor] = useState<boolean>(false);
+  const [fbModalError, setFbModalError] = useState<string>('');
+  const [isSwitchingOfficeFirebase, setIsSwitchingOfficeFirebase] = useState<boolean>(false);
+  const [isPickingGoogleAccount, setIsPickingGoogleAccount] = useState<boolean>(false);
+  const [isFetchingGoogleProjects, setIsFetchingGoogleProjects] = useState<boolean>(false);
+  const [discoveredGoogleProjects, setDiscoveredGoogleProjects] = useState<DiscoveredFirebaseProject[]>([]);
+  const [copiedAuthDomain, setCopiedAuthDomain] = useState<boolean>(false);
 
   // Maintenance Mode State (Master Control Panel)
   const [appConfig, setAppConfig] = useState<AppConfig>(() => getAppConfig());
@@ -307,6 +329,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
       setConfirmAction(null);
       setApprovedSuccessModal(null);
       setHistoryOffice(null);
+      setFirebaseModalOffice(null);
     }
   }, [isOpen, isOwnerAuthenticated]);
 
@@ -829,9 +852,15 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         delete targetConfig.firestoreDatabaseId;
       }
 
+      const cleanOwnerEmail = poolOwnerEmailInput.trim().toLowerCase();
+      if (cleanOwnerEmail) {
+        targetConfig.ownerEmail = cleanOwnerEmail;
+      }
+
       const nextList = await addCloudPoolShard(
-        poolLabelInput.trim() || targetConfig.projectId,
-        targetConfig
+        poolLabelInput.trim() || cleanOwnerEmail || targetConfig.projectId,
+        targetConfig,
+        cleanOwnerEmail || undefined
       );
       const addedId = `${targetConfig.projectId}__${targetConfig.firestoreDatabaseId?.trim() || '(default)'}`.replace(
         /[^a-zA-Z0-9_-]/g,
@@ -855,11 +884,12 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
           [addedId]: { ok: true, rulesReady: true, message: testRes.message },
         }));
         setPoolFormSuccess(
-          `Added "${poolLabelInput.trim() || targetConfig.projectId}" to Auto Cloud Pool! New offices will automatically use it.`
+          `Added "${poolLabelInput.trim() || cleanOwnerEmail || targetConfig.projectId}" to Auto Cloud Pool! New offices will automatically use it.`
         );
       }
 
       setPoolLabelInput('');
+      setPoolOwnerEmailInput('');
       setPoolConfigInput('');
       setPoolDbIdInput('');
     } catch (err: any) {
@@ -905,22 +935,327 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     setReassigningOfficeCode(officeCode);
     try {
       let targetFb: OfficeFirebaseConfig | null = null;
+      let targetEmail: string | undefined;
       if (targetValue === '__PRIMARY__') {
-        targetFb = buildAutoCloudFirebaseConfig(officeCode, officeCode);
+        targetFb = getFactoryPrimaryFirebaseConfig(officeCode);
+        targetEmail = PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL;
       } else {
         const matchedShard = cloudPoolShards.find((s) => s.id === targetValue);
         if (matchedShard) {
-          targetFb = { ...matchedShard.firebaseConfig, officeCode };
+          targetEmail = String(
+            matchedShard.ownerEmail || matchedShard.firebaseConfig?.ownerEmail || ''
+          )
+            .trim()
+            .toLowerCase();
+          targetFb = {
+            ...matchedShard.firebaseConfig,
+            officeCode,
+            ...(targetEmail ? { ownerEmail: targetEmail } : {}),
+          };
         }
       }
       if (!targetFb) return;
-      await reassignOfficeToCloudConfig(officeCode, targetFb);
+      await reassignOfficeToCloudConfig(officeCode, targetFb, targetEmail);
       setOffices(getRegisteredOfficesLocal());
       setApprovalBanner(
-        `Assigned office "${officeCode}" to Firebase project "${targetFb.projectId}".`
+        `Assigned office "${officeCode}" to Firebase project "${targetFb.projectId}"${
+          targetEmail ? ` (${targetEmail})` : ''
+        }.`
       );
     } finally {
       setReassigningOfficeCode(null);
+    }
+  };
+
+  const findSavedFirebaseByGmail = (
+    emailInput: string
+  ): { email: string; firebaseConfig: OfficeFirebaseConfig; label: string } | null => {
+    const clean = emailInput.trim().toLowerCase();
+    if (!clean) return null;
+    if (clean === PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL) {
+      return {
+        email: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+        firebaseConfig: getFactoryPrimaryFirebaseConfig(),
+        label: 'Primary Default Cloud',
+      };
+    }
+    const matchedShard = cloudPoolShards.find(
+      (s) =>
+        String(s.ownerEmail || s.firebaseConfig?.ownerEmail || '')
+          .trim()
+          .toLowerCase() === clean
+    );
+    if (matchedShard) {
+      return {
+        email: clean,
+        firebaseConfig: matchedShard.firebaseConfig,
+        label: matchedShard.label || matchedShard.firebaseConfig.projectId,
+      };
+    }
+    const matchedOffice = offices.find(
+      (o) =>
+        String(o.ownerEmail || o.firebaseConfig?.ownerEmail || '')
+          .trim()
+          .toLowerCase() === clean &&
+        o.firebaseConfig?.apiKey &&
+        o.firebaseConfig?.projectId
+    );
+    if (matchedOffice) {
+      return {
+        email: clean,
+        firebaseConfig: matchedOffice.firebaseConfig,
+        label: matchedOffice.officeName || matchedOffice.projectId,
+      };
+    }
+    return null;
+  };
+
+  const connectOfficeToTargetConfig = async (
+    office: RegisteredOfficeTelemetry,
+    emailInput: string,
+    rawConfig: OfficeFirebaseConfig,
+    saveToPool: boolean = false
+  ) => {
+    const cleanEmail = emailInput.trim().toLowerCase();
+    const code = String(
+      office.officeCode || office.firebaseConfig?.officeCode || office.projectId
+    )
+      .toUpperCase()
+      .trim();
+
+    const targetConfig: OfficeFirebaseConfig = {
+      ...rawConfig,
+      ownerEmail: cleanEmail,
+      officeCode: code,
+    };
+
+    if (saveToPool) {
+      const updatedPool = await addCloudPoolShard(cleanEmail, targetConfig, cleanEmail);
+      setCloudPoolShards(updatedPool);
+    }
+
+    await reassignOfficeToCloudConfig(code, targetConfig, cleanEmail);
+    setOffices(getRegisteredOfficesLocal());
+    setApprovalBanner(
+      `Office "${office.officeName}" is now connected to ${cleanEmail} (${targetConfig.projectId}).`
+    );
+    setFirebaseModalOffice(null);
+  };
+
+  const handlePickGmailFromGoogle = async (targetOffice?: RegisteredOfficeTelemetry) => {
+    const office = targetOffice || firebaseModalOffice;
+    if (!office) return;
+    setFbModalError('');
+    setIsPickingGoogleAccount(true);
+    try {
+      const picked = await pickGmailViaGoogleAccountChooser();
+      setFbModalEmail(picked.email);
+      setDiscoveredGoogleProjects([]);
+      setFbModalConfigText('');
+
+      const saved = findSavedFirebaseByGmail(picked.email);
+      if (saved) {
+        setIsSwitchingOfficeFirebase(true);
+        try {
+          await connectOfficeToTargetConfig(office, picked.email, saved.firebaseConfig, false);
+        } finally {
+          setIsSwitchingOfficeFirebase(false);
+        }
+      } else {
+        setFbModalShowConfigEditor(true);
+      }
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      if (code === 'auth/popup-blocked') {
+        setFbModalError(
+          'Browser blocked the Google Account popup. Please allow popups or click "Sign in with Google" below.'
+        );
+      } else if (code === 'auth/unauthorized-domain') {
+        setFbModalError(
+          `Domain "${window.location.hostname}" is not authorized in Firebase Auth Console yet. You can still select or enter a Gmail and paste its firebaseConfig below.`
+        );
+      } else {
+        setFbModalError(err?.message || 'Could not open Google Account Chooser.');
+      }
+    } finally {
+      setIsPickingGoogleAccount(false);
+    }
+  };
+
+  const handleAutoFetchGoogleProjects = async () => {
+    setFbModalError('');
+    setIsFetchingGoogleProjects(true);
+    try {
+      const res = await fetchFirebaseProjectsForGmailWithGoogle(fbModalEmail.trim());
+      if (res.email) {
+        setFbModalEmail(res.email);
+      }
+      setDiscoveredGoogleProjects(res.projects);
+      if (res.projects.length === 0) {
+        setFbModalError(
+          `No Firebase projects were found under "${res.email}". Create one at console.firebase.google.com or paste a firebaseConfig below.`
+        );
+      }
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      setFbModalError(
+        err?.message ||
+          'Could not auto-fetch Firebase projects from Google. Paste the firebaseConfig manually below once.'
+      );
+      setFbModalShowConfigEditor(true);
+    } finally {
+      setIsFetchingGoogleProjects(false);
+    }
+  };
+
+  const handleConnectDiscoveredProject = async (proj: DiscoveredFirebaseProject) => {
+    if (!firebaseModalOffice || !proj.firebaseConfig) return;
+    setFbModalError('');
+    setIsSwitchingOfficeFirebase(true);
+    try {
+      const cleanEmail = fbModalEmail.trim().toLowerCase();
+      const customDb = fbModalDbId.trim();
+      const targetConfig: OfficeFirebaseConfig = {
+        ...proj.firebaseConfig,
+        ownerEmail: cleanEmail,
+        ...(customDb && customDb !== '(default)' ? { firestoreDatabaseId: customDb } : {}),
+      };
+      const testRes = await testCustomFirebaseConnection(targetConfig);
+      if (!testRes.ok) {
+        setFbModalError(testRes.message || 'Could not connect to this Firebase project.');
+        return;
+      }
+      if (testRes.effectiveDatabaseId && testRes.effectiveDatabaseId !== '(default)') {
+        targetConfig.firestoreDatabaseId = testRes.effectiveDatabaseId;
+      } else if (testRes.effectiveDatabaseId === '(default)') {
+        delete targetConfig.firestoreDatabaseId;
+      }
+      if (testRes.rulesReady === false) {
+        setFbModalError(
+          `Connected to "${targetConfig.projectId}", but Firestore Rules returned 403. Copy & publish firestore.rules in that project first, then retry.`
+        );
+        return;
+      }
+      await connectOfficeToTargetConfig(firebaseModalOffice, cleanEmail, targetConfig, true);
+    } catch (err: any) {
+      setFbModalError(err?.message || 'Failed connecting to selected Firebase project.');
+    } finally {
+      setIsSwitchingOfficeFirebase(false);
+    }
+  };
+
+  const handleOpenChangeFirebaseModal = (
+    office: RegisteredOfficeTelemetry,
+    launchGoogleChooser: boolean = true
+  ) => {
+    const currentEmail = resolveFirebaseOwnerEmail(office.firebaseConfig, cloudPoolShards, office);
+    setFirebaseModalOffice(office);
+    setFbModalEmail(currentEmail || PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL);
+    setFbModalConfigText('');
+    setFbModalDbId('');
+    setFbModalShowConfigEditor(false);
+    setFbModalError('');
+    setDiscoveredGoogleProjects([]);
+    if (launchGoogleChooser) {
+      void handlePickGmailFromGoogle(office);
+    }
+  };
+
+  const handleSaveOfficeFirebaseByGmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!firebaseModalOffice) return;
+    setFbModalError('');
+
+    const cleanEmail = fbModalEmail.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setFbModalError('Please enter a valid Gmail address (e.g. name@gmail.com).');
+      return;
+    }
+
+    const code = String(
+      firebaseModalOffice.officeCode ||
+        firebaseModalOffice.firebaseConfig?.officeCode ||
+        firebaseModalOffice.projectId
+    )
+      .toUpperCase()
+      .trim();
+
+    const pastedRaw = fbModalConfigText.trim();
+    const matchedSaved = !pastedRaw ? findSavedFirebaseByGmail(cleanEmail) : null;
+
+    if (!pastedRaw && !matchedSaved) {
+      setFbModalShowConfigEditor(true);
+      setFbModalError(
+        `"${cleanEmail}" is not in the saved Cloud Pool yet. Paste that Gmail account's Firebase Config below once to test & connect it.`
+      );
+      return;
+    }
+
+    setIsSwitchingOfficeFirebase(true);
+    try {
+      let targetConfig: OfficeFirebaseConfig;
+
+      if (pastedRaw) {
+        const parsed = parseFlexibleFirebaseConfig(pastedRaw);
+        if (!parsed) {
+          setFbModalError(
+            'Invalid Firebase Config. Paste the JSON or `const firebaseConfig = { ... }` snippet from that Gmail account’s Firebase Console.'
+          );
+          return;
+        }
+        const customDb = fbModalDbId.trim();
+        targetConfig = {
+          ...parsed,
+          ownerEmail: cleanEmail,
+          officeCode: code,
+          ...(customDb && customDb !== '(default)' ? { firestoreDatabaseId: customDb } : {}),
+        };
+
+        const testRes = await testCustomFirebaseConnection(targetConfig);
+        if (!testRes.ok) {
+          setFbModalError(testRes.message || 'Could not connect to this Firebase project.');
+          return;
+        }
+
+        if (testRes.effectiveDatabaseId && testRes.effectiveDatabaseId !== '(default)') {
+          targetConfig.firestoreDatabaseId = testRes.effectiveDatabaseId;
+        } else if (testRes.effectiveDatabaseId === '(default)') {
+          delete targetConfig.firestoreDatabaseId;
+        }
+
+        if (testRes.rulesReady === false) {
+          setFbModalError(
+            `Connected to "${targetConfig.projectId}", but Firestore Rules returned 403 (Permission Denied). Copy & publish firestore.rules in that Firebase project first, then retry.`
+          );
+          return;
+        }
+
+        const updatedPool = await addCloudPoolShard(cleanEmail, targetConfig, cleanEmail);
+        setCloudPoolShards(updatedPool);
+      } else {
+        targetConfig = {
+          ...matchedSaved!.firebaseConfig,
+          ownerEmail: cleanEmail,
+          officeCode: code,
+        };
+      }
+
+      await reassignOfficeToCloudConfig(code, targetConfig, cleanEmail);
+      setOffices(getRegisteredOfficesLocal());
+      setApprovalBanner(
+        `Office "${firebaseModalOffice.officeName}" is now connected to ${cleanEmail} (${targetConfig.projectId}).`
+      );
+      setFirebaseModalOffice(null);
+    } catch (err: any) {
+      setFbModalError(err?.message || 'Failed switching Firebase connection.');
+    } finally {
+      setIsSwitchingOfficeFirebase(false);
     }
   };
 
@@ -939,11 +1274,13 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const filteredOffices = offices.filter((o) => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
+    const resolvedMail = resolveFirebaseOwnerEmail(o.firebaseConfig, cloudPoolShards, o);
     return (
       (o.officeName || '').toLowerCase().includes(q) ||
       (o.officeCode || '').toLowerCase().includes(q) ||
       (o.officeBase || '').toLowerCase().includes(q) ||
-      (o.projectId || '').toLowerCase().includes(q)
+      (o.projectId || '').toLowerCase().includes(q) ||
+      resolvedMail.toLowerCase().includes(q)
     );
   });
 
@@ -1576,6 +1913,22 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                           Primary HQ
                                         </span>
                                       )}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenChangeFirebaseModal(office, true)}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 transition-colors cursor-pointer max-w-full"
+                                        title={`Connected Firebase Gmail: ${resolveFirebaseOwnerEmail(office.firebaseConfig, cloudPoolShards, office) || 'Not set'} — Click to choose Gmail from Google`}
+                                      >
+                                        <Mail className="w-3 h-3 text-indigo-500 shrink-0" />
+                                        <span className="truncate max-w-[170px]">
+                                          {resolveFirebaseOwnerEmail(
+                                            office.firebaseConfig,
+                                            cloudPoolShards,
+                                            office
+                                          ) || 'Set Firebase Gmail'}
+                                        </span>
+                                        <Pencil className="w-2.5 h-2.5 opacity-75 shrink-0" />
+                                      </button>
                                     </div>
                                     <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400 mt-0.5">
                                       <span className="inline-flex items-center gap-1">
@@ -1646,31 +1999,51 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                     </span>
                                   </div>
 
-                                  {!isDefault155 && cloudPoolShards.length > 0 && (
-                                    <select
-                                      value={(() => {
-                                        const curProj = office.firebaseConfig?.projectId || office.projectId;
-                                        const curDb = office.firebaseConfig?.firestoreDatabaseId || '(default)';
-                                        const matched = cloudPoolShards.find(
-                                          (s) =>
-                                            s.firebaseConfig.projectId === curProj &&
-                                            (s.firebaseConfig.firestoreDatabaseId || '(default)') === curDb
-                                        );
-                                        return matched ? matched.id : '__PRIMARY__';
-                                      })()}
-                                      disabled={reassigningOfficeCode === upperCode}
-                                      onChange={(e) => handleReassignOfficeCloud(upperCode, e.target.value)}
-                                      className="px-2 py-1 rounded-lg bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer max-w-[175px]"
-                                      title="Assign Firebase Cloud Shard"
-                                    >
-                                      <option value="__PRIMARY__">Primary Default Cloud</option>
-                                      {cloudPoolShards.map((shard) => (
-                                        <option key={shard.id} value={shard.id}>
-                                          {shard.label} ({shard.firebaseConfig.projectId})
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {cloudPoolShards.length > 0 && (
+                                      <select
+                                        value={(() => {
+                                          const curProj = office.firebaseConfig?.projectId || office.projectId;
+                                          const curDb = office.firebaseConfig?.firestoreDatabaseId || '(default)';
+                                          const matched = cloudPoolShards.find(
+                                            (s) =>
+                                              s.firebaseConfig.projectId === curProj &&
+                                              (s.firebaseConfig.firestoreDatabaseId || '(default)') === curDb
+                                          );
+                                          return matched ? matched.id : '__PRIMARY__';
+                                        })()}
+                                        disabled={reassigningOfficeCode === upperCode}
+                                        onChange={(e) => handleReassignOfficeCloud(upperCode, e.target.value)}
+                                        className="px-2 py-1 rounded-lg bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer max-w-[175px]"
+                                        title="Assign Firebase Cloud Shard"
+                                      >
+                                        <option value="__PRIMARY__">
+                                          {PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL} (Primary)
                                         </option>
-                                      ))}
-                                    </select>
-                                  )}
+                                        {cloudPoolShards.map((shard) => {
+                                          const shardEmail =
+                                            shard.ownerEmail || shard.firebaseConfig?.ownerEmail;
+                                          return (
+                                            <option key={shard.id} value={shard.id}>
+                                              {shardEmail
+                                                ? `${shardEmail} (${shard.firebaseConfig.projectId})`
+                                                : `${shard.label} (${shard.firebaseConfig.projectId})`}
+                                            </option>
+                                          );
+                                        })}
+                                      </select>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenChangeFirebaseModal(office, true)}
+                                      className="px-2 py-1 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300 border border-indigo-500/30 text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                                      title="Open Google Account Chooser to change Firebase Gmail"
+                                    >
+                                      <Mail className="w-3 h-3" />
+                                      <span>Change Gmail</span>
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -1961,9 +2334,13 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                             <span className="px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
                               ACTIVE HQ
                             </span>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30">
+                              <Mail className="w-3 h-3 text-indigo-500" />
+                              <span>{PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL}</span>
+                            </span>
                           </div>
                           <p className="text-xs font-mono font-bold text-slate-600 dark:text-slate-300 mt-1">
-                            {buildAutoCloudFirebaseConfig('', '').projectId}
+                            {getFactoryPrimaryFirebaseConfig().projectId}
                           </p>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                             Used as fallback when no extra active shard is registered in the pool. Offices assigned here:{' '}
@@ -1972,7 +2349,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                                 offices.filter(
                                   (o) =>
                                     (o.firebaseConfig?.projectId || o.projectId) ===
-                                    buildAutoCloudFirebaseConfig('', '').projectId
+                                    getFactoryPrimaryFirebaseConfig().projectId
                                 ).length
                               }
                             </span>
@@ -2057,10 +2434,20 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
-                                  <h4 className="text-sm font-black text-slate-900 dark:text-white truncate">
-                                    {shard.label}
-                                  </h4>
-                                  <p className="text-[11px] font-mono font-bold text-sky-600 dark:text-sky-400 truncate">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <h4 className="text-sm font-black text-slate-900 dark:text-white truncate">
+                                      {shard.label}
+                                    </h4>
+                                    {(shard.ownerEmail || shard.firebaseConfig?.ownerEmail) && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30">
+                                        <Mail className="w-3 h-3 text-indigo-500" />
+                                        <span className="truncate max-w-[180px]">
+                                          {shard.ownerEmail || shard.firebaseConfig?.ownerEmail}
+                                        </span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] font-mono font-bold text-sky-600 dark:text-sky-400 truncate mt-0.5">
                                     {shard.firebaseConfig.projectId}
                                   </p>
                                   <p className="text-[10px] text-slate-500 dark:text-slate-400">
@@ -2195,7 +2582,19 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       </div>
                     )}
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Firebase Owner Gmail
+                        </label>
+                        <input
+                          type="email"
+                          value={poolOwnerEmailInput}
+                          onChange={(e) => setPoolOwnerEmailInput(e.target.value)}
+                          placeholder="e.g. account2@gmail.com"
+                          className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
                       <div className="space-y-1">
                         <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
                           Shard Label
@@ -2896,6 +3295,376 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
               </div>
             </div>
           )}
+
+          {/* CHANGE OFFICE CONNECTED FIREBASE BY GMAIL MODAL */}
+          {firebaseModalOffice && (() => {
+            const modalSavedMatch = findSavedFirebaseByGmail(fbModalEmail);
+            const knownGmails: Array<{ email: string; projectId: string; label: string }> = [
+              {
+                email: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+                projectId: getFactoryPrimaryFirebaseConfig().projectId,
+                label: 'Primary Default Cloud',
+              },
+            ];
+            cloudPoolShards.forEach((s) => {
+              const em = String(s.ownerEmail || s.firebaseConfig?.ownerEmail || '')
+                .trim()
+                .toLowerCase();
+              if (em && !knownGmails.some((k) => k.email === em)) {
+                knownGmails.push({
+                  email: em,
+                  projectId: s.firebaseConfig.projectId,
+                  label: s.label || s.firebaseConfig.projectId,
+                });
+              }
+            });
+
+            return (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fadeIn">
+                <form
+                  onSubmit={handleSaveOfficeFirebaseByGmail}
+                  className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 shadow-2xl space-y-4 text-slate-900 dark:text-white"
+                >
+                  <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3.5">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                        <Mail className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black text-slate-900 dark:text-white">
+                          Connected Firebase Gmail
+                        </h3>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Office: <span className="font-bold text-slate-800 dark:text-slate-200">{firebaseModalOffice.officeName}</span>{' '}
+                          ({firebaseModalOffice.officeCode || firebaseModalOffice.projectId})
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setFirebaseModalOffice(null)}
+                      className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Official Google Account Chooser Trigger */}
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      disabled={isPickingGoogleAccount || isSwitchingOfficeFirebase}
+                      onClick={() => void handlePickGmailFromGoogle()}
+                      className="w-full py-2.5 px-4 rounded-xl bg-white dark:bg-slate-950 hover:bg-slate-50 dark:hover:bg-slate-800/90 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-white text-xs font-bold flex items-center justify-center gap-2.5 shadow-sm cursor-pointer transition-all disabled:opacity-50"
+                    >
+                      {isPickingGoogleAccount ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+                          <span>Opening Google Account Chooser...</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 48 48"
+                            className="w-4 h-4 shrink-0"
+                          >
+                            <path
+                              fill="#EA4335"
+                              d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                            />
+                            <path
+                              fill="#4285F4"
+                              d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                            />
+                            <path
+                              fill="#FBBC05"
+                              d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                            />
+                            <path
+                              fill="#34A853"
+                              d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                            />
+                          </svg>
+                          <span>Choose Gmail from Google Account List</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Quick Select Saved Gmail Accounts */}
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Saved Gmail Firebase Accounts
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {knownGmails.map((item) => {
+                        const isSelected = fbModalEmail.trim().toLowerCase() === item.email;
+                        return (
+                          <button
+                            key={item.email}
+                            type="button"
+                            onClick={() => {
+                              setFbModalEmail(item.email);
+                              setFbModalError('');
+                              setFbModalShowConfigEditor(false);
+                              setFbModalConfigText('');
+                              setDiscoveredGoogleProjects([]);
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                              isSelected
+                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                                : 'bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-indigo-400'
+                            }`}
+                          >
+                            <Mail className="w-3 h-3" />
+                            <span>{item.email}</span>
+                            <span className="opacity-75 font-mono text-[10px]">
+                              ({item.projectId})
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Gmail Input */}
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                      Firebase Owner Gmail <span className="text-rose-500">*</span>
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="email"
+                        value={fbModalEmail}
+                        onChange={(e) => {
+                          setFbModalEmail(e.target.value);
+                          setFbModalError('');
+                          setDiscoveredGoogleProjects([]);
+                        }}
+                        placeholder="e.g. youraccount@gmail.com"
+                        className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  {/* Live Match Indicator */}
+                  {modalSavedMatch && !fbModalConfigText.trim() ? (
+                    <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-300 flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-bold">
+                            Matched Firebase Project: <span className="font-mono">{modalSavedMatch.firebaseConfig.projectId}</span>
+                          </p>
+                          <p className="text-[11px] opacity-85">
+                            Saving will immediately switch "{firebaseModalOffice.officeName}" to {modalSavedMatch.email}'s Firebase.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFbModalShowConfigEditor((v) => !v)}
+                        className="text-[10px] font-bold underline shrink-0 cursor-pointer"
+                      >
+                        {fbModalShowConfigEditor ? 'Hide Config' : 'Use Different Config'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-800 dark:text-amber-300 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2">
+                          <Database className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-bold">
+                              Link Firebase Project for {fbModalEmail || 'this Gmail'} (1-time setup)
+                            </p>
+                            <p className="text-[11px] opacity-90">
+                              Auto-fetch Firebase projects from this Gmail or paste its <span className="font-mono">firebaseConfig</span> below once.
+                            </p>
+                          </div>
+                        </div>
+                        {!fbModalShowConfigEditor && (
+                          <button
+                            type="button"
+                            onClick={() => setFbModalShowConfigEditor(true)}
+                            className="text-[10px] font-bold underline shrink-0 cursor-pointer"
+                          >
+                            Paste Config
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          disabled={isFetchingGoogleProjects || isSwitchingOfficeFirebase}
+                          onClick={() => void handleAutoFetchGoogleProjects()}
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          {isFetchingGoogleProjects ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Fetching Projects...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Cloud className="w-3.5 h-3.5" />
+                              <span>Auto-Fetch Firebase Projects</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {discoveredGoogleProjects.length > 0 && (
+                        <div className="space-y-1.5 pt-1">
+                          {discoveredGoogleProjects.map((proj) => (
+                            <div
+                              key={proj.projectId}
+                              className="p-2 rounded-lg bg-white dark:bg-slate-950 border border-amber-500/30 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="font-bold text-slate-900 dark:text-white truncate text-[11px]">
+                                  {proj.displayName}
+                                </p>
+                                <p className="font-mono text-[10px] text-slate-500 truncate">
+                                  {proj.projectId}
+                                </p>
+                              </div>
+                              {proj.firebaseConfig ? (
+                                <button
+                                  type="button"
+                                  disabled={isSwitchingOfficeFirebase}
+                                  onClick={() => void handleConnectDiscoveredProject(proj)}
+                                  className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold cursor-pointer shrink-0"
+                                >
+                                  Connect
+                                </button>
+                              ) : (
+                                <span className="text-[10px] text-slate-400 shrink-0">
+                                  No Web App
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(fbModalShowConfigEditor || (!modalSavedMatch && fbModalEmail.includes('@'))) && (
+                    <div className="space-y-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Firebase Config (JSON or JS Snippet)
+                        </label>
+                        <button
+                          type="button"
+                          onClick={handleCopyFirestoreRules}
+                          className="px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedRules ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedRules ? 'Copied Rules' : 'Copy firestore.rules'}</span>
+                        </button>
+                      </div>
+                      <textarea
+                        rows={4}
+                        value={fbModalConfigText}
+                        onChange={(e) => {
+                          setFbModalConfigText(e.target.value);
+                          setFbModalError('');
+                        }}
+                        placeholder={`Paste firebaseConfig from ${fbModalEmail || 'this Gmail'}'s Firebase Console:\n{ "apiKey": "...", "authDomain": "...", "projectId": "...", "appId": "..." }`}
+                        className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-[11px] font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 resize-y"
+                      />
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                          Firestore Database ID (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={fbModalDbId}
+                          onChange={(e) => setFbModalDbId(e.target.value)}
+                          placeholder="Leave blank for (default)"
+                          className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-[11px] font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {fbModalError && (
+                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-xs font-bold text-rose-700 dark:text-rose-200 space-y-2">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                        <span>{fbModalError}</span>
+                      </div>
+                      {fbModalError.includes('not authorized') && typeof window !== 'undefined' && (
+                        <div className="flex flex-wrap items-center gap-2 pl-6">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(window.location.hostname);
+                                setCopiedAuthDomain(true);
+                                setTimeout(() => setCopiedAuthDomain(false), 2000);
+                              } catch {}
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            {copiedAuthDomain ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                            <span>{copiedAuthDomain ? 'Domain Copied!' : 'Copy Domain'}</span>
+                          </button>
+                          <a
+                            href={`https://console.firebase.google.com/project/${getFactoryPrimaryFirebaseConfig().projectId}/authentication/settings`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-200 hover:bg-rose-100 dark:hover:bg-rose-900/40 text-[10px] font-bold inline-flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            <span>Open Firebase Authorized Domains</span>
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+                    <button
+                      type="button"
+                      disabled={isSwitchingOfficeFirebase}
+                      onClick={() => setFirebaseModalOffice(null)}
+                      className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 cursor-pointer transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSwitchingOfficeFirebase}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer transition-colors"
+                    >
+                      {isSwitchingOfficeFirebase ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Connecting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>
+                            {fbModalConfigText.trim()
+                              ? 'Test & Connect Firebase'
+                              : 'Connect to This Gmail Firebase'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

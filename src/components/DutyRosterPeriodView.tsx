@@ -13,7 +13,8 @@ import {
 } from '../utils/docxExport';
 import { exportElementToPdf } from '../utils/pdfExport';
 import { PageSetupBar } from './PageSetupBar';
-import { PageSetupConfig, getPageDimensions } from '../utils/pageSetup';
+import { PageSetupConfig } from '../utils/pageSetup';
+import { PaginatedPaperPreview } from './PaginatedPaperPreview';
 import {
  FileDown,
  Download,
@@ -27,7 +28,6 @@ import {
  ChevronRight,
  PenTool,
 } from 'lucide-react';
-import { Logo155UASU } from './Logo155UASU';
 import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
 import { getBiodataTrades } from '../utils/tradeList';
 import {
@@ -110,7 +110,6 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  const [matrixRevision, setMatrixRevision] = useState<number>(0);
  const isExportingRef = useRef<boolean>(false);
  const exportDropdownRef = useRef<HTMLDivElement | null>(null);
- const pageDims = getPageDimensions(pageSetup);
 
  useEffect(() => {
    const bumpMatrix = () => setMatrixRevision((prev) => prev + 1);
@@ -1045,33 +1044,28 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
       />
 
       {/* ACTUAL PRINTABLE WHITE PAPER PREVIEW IN SELECTED PAGE SETUP */}
-      <div className="bg-slate-200/70 dark:bg-slate-950/60 border border-slate-300/70 dark:border-slate-800 rounded-2xl p-3 sm:p-5 overflow-x-auto print:bg-white print:border-none print:p-0">
-        <div
-          id="duty-roster-document"
-          className="bg-white text-black border border-slate-300 rounded-2xl shadow-xl p-6 sm:p-10 mx-auto overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none print:p-0"
-          style={{
-            width: '100%',
-            maxWidth: `${pageDims.widthPx}px`,
-            minHeight: `${Math.round(pageDims.heightPx * 0.72)}px`,
-          }}
-        >
+      <PaginatedPaperPreview
+        elementId="duty-roster-document"
+        paperSize={pageSetup.paperSize}
+        orientation={pageSetup.orientation}
+        marginType="narrow"
+        refreshKey={`${rosterMode}-${fromDate}-${toDate}-${flightFilter}-${tradeFilter}-${pageSetup.paperSize}-${pageSetup.orientation}-${matrixRevision}`}
+      >
+        <div className="w-full print:bg-white print:text-black">
       {/* ========================================================================= */}
  {/* OPTION 1: BASE DUTY (Up to Najirpara Taskforce with Range 1-4 Format) */}
  {/* ========================================================================= */}
  {rosterMode === 'BASE_DUTIES' && (
- <div className="bg-white text-black font-sans">
+ <div className="bg-white text-black" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  {/* Document Header */}
- <div data-pdf-repeat-header="true" className="text-center pb-4 border-b border-slate-300">
- <div className="flex justify-center mb-2">
- <Logo155UASU className="h-14 w-14" />
- </div>
- <h2 className="text-base sm:text-lg font-black uppercase tracking-wider underline text-black">
+ <div data-pdf-repeat-header="true" className="text-center pb-4 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
+ <h2 className="font-bold uppercase tracking-wider underline text-black" style={{ fontSize: '12pt' }}>
  BASE DUTY: AIRMEN
  </h2>
- <h3 className="text-sm font-bold text-black mt-0.5">
+ <h3 className="font-bold text-black mt-0.5" style={{ fontSize: '12pt' }}>
  ({getActiveOfficeIdentity().officeName})
  </h3>
- <p className="text-xs font-bold text-black mt-1">
+ <p className="font-bold text-black mt-1" style={{ fontSize: '12pt' }}>
  ({headerDateRange})
  </p>
  </div>
@@ -1084,12 +1078,12 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  return (
  <div key={sIdx} className="space-y-2">
  {/* Section Title */}
- <div data-pdf-section-heading="true" className="text-center">
- <h4 className="text-xs sm:text-sm font-black uppercase tracking-wider underline text-black">
+ <div data-pdf-section-heading="true" className="text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
+ <h4 className="font-bold uppercase tracking-wider underline text-black" style={{ fontSize: '12pt' }}>
  {sec.title}
  </h4>
  {sec.subTitle && (
- <div className="text-[11px] font-bold text-black">
+ <div className="font-bold text-black" style={{ fontSize: '12pt' }}>
  ({sec.subTitle})
  </div>
  )}
@@ -1097,44 +1091,47 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
 
  {/* Table */}
  <div className="overflow-x-auto">
- <table className="no-zebra w-full text-center border-collapse border border-black text-xs font-medium text-black">
+ <table
+   className="no-zebra w-full text-center border-collapse border border-black font-normal text-black"
+   style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
+ >
  <thead>
- <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-[11px] text-black">
- <th className="border border-black py-1.5 px-2 w-12">Ser No</th>
- <th className="border border-black py-1.5 px-2">BD No</th>
- <th className="border border-black py-1.5 px-2">Rank</th>
- <th className="border border-black py-1.5 px-3 text-center">Name</th>
- <th className="border border-black py-1.5 px-2">Trade</th>
- <th className="border border-black py-1.5 px-2">Block</th>
- <th className="border border-black py-1.5 px-2">Mobile No</th>
- <th className="border border-black py-1.5 px-2">Date</th>
+ <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-black" style={{ fontSize: '12pt' }}>
+ <th className="border border-black py-1.5 px-2 w-12 text-center align-middle">Ser No</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">BD No</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">Rank</th>
+ <th className="border border-black py-1.5 px-3 text-center align-middle">Name</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">Trade</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">Block</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">Mobile No</th>
+ <th className="border border-black py-1.5 px-2 text-center align-middle">Date</th>
  </tr>
  </thead>
  <tbody>
  {sec.items.map((item, idx) => (
  <tr key={idx} className={`border-b border-black ${idx % 2 === 1 ? 'pdf-alt-row bg-[#f8fafc]' : 'bg-white'}`}>
- <td className="border border-black py-1 px-2 font-mono">
+ <td className="border border-black py-1 px-2 text-center align-middle">
  {item.serNo}
  </td>
- <td className="border border-black py-1 px-2 font-mono font-bold">
+ <td className="border border-black py-1 px-2 font-bold text-center align-middle">
  {item.bdNo}
  </td>
- <td className="border border-black py-1 px-2 font-bold">
+ <td className="border border-black py-1 px-2 font-bold text-center align-middle">
  {item.rank}
  </td>
- <td className="border border-black py-1 px-3 text-center font-bold">
+ <td className="border border-black py-1 px-3 text-center align-middle font-bold">
  {item.name}
  </td>
- <td className="border border-black py-1 px-2">
+ <td className="border border-black py-1 px-2 text-center align-middle">
  {item.trade}
  </td>
- <td className="border border-black py-1 px-2 font-mono">
+ <td className="border border-black py-1 px-2 text-center align-middle">
  {item.block}
  </td>
- <td className="border border-black py-1 px-2 font-mono font-bold text-black">
+ <td className="border border-black py-1 px-2 font-bold text-black text-center align-middle">
  {item.mobileNo}
  </td>
- <td className="border border-black py-1 px-2 font-bold text-black">
+ <td className="border border-black py-1 px-2 font-bold text-black text-center align-middle">
  {item.dateStr}
  </td>
  </tr>
@@ -1171,14 +1168,11 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {/* Document Header */}
- <div data-pdf-repeat-header="true" className="text-center pb-5 border-b border-slate-300">
- <div className="flex justify-center mb-2">
- <Logo155UASU className="h-14 w-14" />
- </div>
- <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide underline text-black">
+ <div data-pdf-repeat-header="true" className="text-center pb-5 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <h2 className="font-bold uppercase tracking-wide underline text-black" style={{ fontSize: '12pt' }}>
  IDAC DUTY ROSTER : {getActiveOfficeIdentity().officeName}
  </h2>
- <p className="text-xs font-bold text-black mt-1">
+ <p className="font-bold text-black mt-1" style={{ fontSize: '12pt' }}>
  {weekPreset === 'FULL_MONTH' ? formatMonthNameDisplay(fromDate) : `(${headerDateRange})`}
  </p>
  </div>
@@ -1195,20 +1189,20 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  >
  <thead>
  {/* Table Heading Row Bold */}
- <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-black">
- <th className="border border-black py-2.5 px-3 font-bold w-24">Date</th>
- <th className="border border-black py-2.5 px-3 font-bold w-28">Day</th>
- <th className="border border-black py-2.5 px-4 font-bold">
+ <tr className="pdf-thead-light bg-[#f8fafc] font-bold border-b border-black text-black" style={{ fontSize: '12pt' }}>
+ <th className="border border-black py-2 px-3 font-bold w-24 text-center align-middle">Date</th>
+ <th className="border border-black py-2 px-3 font-bold w-28 text-center align-middle">Day</th>
+ <th className="border border-black py-2 px-3 font-bold text-center align-middle">
  Morning
- <div className="text-[10pt] font-normal text-slate-700">(0730F - 1430F)</div>
+ <div className="font-normal text-black" style={{ fontSize: '12pt' }}>(0730F - 1430F)</div>
  </th>
- <th className="border border-black py-2.5 px-4 font-bold">
+ <th className="border border-black py-2 px-3 font-bold text-center align-middle">
  Afternoon
- <div className="text-[10pt] font-normal text-slate-700">(1430F - 2100F)</div>
+ <div className="font-normal text-black" style={{ fontSize: '12pt' }}>(1430F - 2100F)</div>
  </th>
- <th className="border border-black py-2.5 px-4 font-bold">
+ <th className="border border-black py-2 px-3 font-bold text-center align-middle">
  Night
- <div className="text-[10pt] font-normal text-slate-700">(2100F - 0730F)</div>
+ <div className="font-normal text-black" style={{ fontSize: '12pt' }}>(2100F - 0730F)</div>
  </th>
  </tr>
  </thead>
@@ -1255,8 +1249,8 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  {/* Official Signature Footer (Right Side - Authorized By) */}
  <div
  data-pdf-keep-together="true"
- className="flex justify-end items-end pt-2 text-black text-xs"
- style={{ fontFamily: 'Arial, sans-serif' }}
+ className="flex justify-end items-end pt-2 text-black"
+ style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
  >
  <div
  onClick={() => setShowIdacSignatureModal(true)}
@@ -1264,21 +1258,21 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  title="Click to configure IDAC Duty signature"
  >
  {idacSignature.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
+ <div className="mb-1 text-left italic text-black select-none" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <span className="font-bold underline">
  {idacSignature.digitalSignatureText || idacSignature.name}
  </span>
- <span className="block text-[8px] font-mono not-italic text-slate-600">
+ <span className="block not-italic text-slate-600" style={{ fontSize: '12pt' }}>
  [Digitally Signed • BAF Verified]
  </span>
  </div>
  )}
- <div className="border-t border-black pt-1.5 group-hover:border-blue-600 transition-colors">
- <div className="text-xs uppercase font-black">{idacSignature.name}</div>
- <div className="text-[11px] font-normal">{idacSignature.rank}</div>
- <div className="text-[11px] font-normal">{idacSignature.designation}</div>
- <div className="text-[10px] uppercase font-bold">{idacSignature.unit || getActiveOfficeIdentity().officeName}</div>
- <div className="text-[11px] font-normal text-black mt-0.5">
+ <div className="border-t border-black pt-1.5 group-hover:border-blue-600 transition-colors" style={{ fontSize: '12pt' }}>
+ <div className="uppercase font-bold">{idacSignature.name}</div>
+ <div className="font-normal">{idacSignature.rank}</div>
+ <div className="font-normal">{idacSignature.designation}</div>
+ <div className="uppercase font-bold">{idacSignature.unit || getActiveOfficeIdentity().officeName}</div>
+ <div className="font-normal text-black mt-0.5">
  {formatRosterMonthShort(fromDate)}
  </div>
  </div>
@@ -1287,7 +1281,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
  )}
         </div>
-      </div>
+      </PaginatedPaperPreview>
     </div>
   );
 

@@ -75,6 +75,7 @@ import { AdminPasscodeModal } from './components/AdminPasscodeModal';
 import { AppUpdateModal } from './components/AppUpdateModal';
 import { StandaloneBackupPage } from './components/StandaloneBackupPage';
 import { FirebaseQuotaPopupModal } from './components/FirebaseQuotaPopupModal';
+import { ExportFeedbackPopup } from './components/ExportFeedbackPopup';
 
 import {
   checkForAppUpdate,
@@ -1180,6 +1181,7 @@ export default function App() {
   return (
     <div className={`min-h-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
       <FirebaseQuotaPopupModal checkOnMount={justLoggedIn} onOpenChange={setIsQuotaPopupOpen} />
+      <ExportFeedbackPopup />
       {renderNoticeModal()}
       {/* Left Sidebar Navigation */}
       <Sidebar

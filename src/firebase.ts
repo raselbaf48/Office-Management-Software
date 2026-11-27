@@ -147,6 +147,9 @@ export interface GlobalUserOfficeEntry {
   updatedAt: string;
 }
 
+export const PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL = 'raselbaf48@gmail.com';
+export const PRIMARY_155_FIREBASE_OVERRIDE_KEY = 'baf_155_firebase_override_v1';
+
 export interface OfficeFirebaseConfig {
   apiKey: string;
   authDomain?: string;
@@ -155,6 +158,7 @@ export interface OfficeFirebaseConfig {
   messagingSenderId?: string;
   appId?: string;
   firestoreDatabaseId?: string;
+  ownerEmail?: string;
   officeCode?: string;
   joinPin?: string;
   officeSlogan?: string;
@@ -187,6 +191,7 @@ export interface RegisteredOfficeRecord {
   officeBase?: string;
   officeCode?: string;
   joinPin?: string;
+  ownerEmail?: string;
   projectId: string;
   firebaseConfig: OfficeFirebaseConfig;
   totalUsers: number;
@@ -403,12 +408,53 @@ export function generateOfficeCodeFromName(officeName: string): string {
   return code.slice(0, 24);
 }
 
-export function buildAutoCloudFirebaseConfig(
-  officeName: string,
+export function getPrimary155FirebaseOverride(): OfficeFirebaseConfig | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = getRawLocalStorageItem(PRIMARY_155_FIREBASE_OVERRIDE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.apiKey && parsed.projectId) {
+      return parsed as OfficeFirebaseConfig;
+    }
+  } catch {}
+  return null;
+}
+
+export function savePrimary155FirebaseOverride(
+  fbConfig: OfficeFirebaseConfig | null,
+  syncToCloud: boolean = true
+): void {
+  if (typeof window !== 'undefined') {
+    if (fbConfig && fbConfig.apiKey && fbConfig.projectId) {
+      setRawLocalStorageItem(PRIMARY_155_FIREBASE_OVERRIDE_KEY, JSON.stringify(fbConfig));
+    } else {
+      try {
+        window.localStorage.removeItem(PRIMARY_155_FIREBASE_OVERRIDE_KEY);
+      } catch {}
+    }
+  }
+  if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
+    const nowIso = new Date().toISOString();
+    setDoc(
+      doc(masterDbInstance, 'app_settings', PRIMARY_155_FIREBASE_OVERRIDE_KEY),
+      {
+        settingKey: PRIMARY_155_FIREBASE_OVERRIDE_KEY,
+        value: fbConfig ? JSON.stringify(fbConfig) : '',
+        updatedAt: nowIso,
+        updatedBy: 'master_admin',
+      },
+      { merge: true }
+    ).catch((err) => {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
+    });
+  }
+}
+
+export function getFactoryPrimaryFirebaseConfig(
   officeCode?: string,
   joinPin?: string
 ): OfficeFirebaseConfig {
-  const finalCode = (officeCode || generateOfficeCodeFromName(officeName)).toUpperCase().trim();
   return {
     apiKey: firebaseConfigData.apiKey,
     authDomain: firebaseConfigData.authDomain,
@@ -417,6 +463,39 @@ export function buildAutoCloudFirebaseConfig(
     messagingSenderId: firebaseConfigData.messagingSenderId,
     appId: firebaseConfigData.appId,
     firestoreDatabaseId: (firebaseConfigData as any).firestoreDatabaseId,
+    ownerEmail: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+    ...(officeCode ? { officeCode } : {}),
+    ...(joinPin ? { joinPin: String(joinPin).trim() } : {}),
+  };
+}
+
+export function buildAutoCloudFirebaseConfig(
+  officeName: string,
+  officeCode?: string,
+  joinPin?: string
+): OfficeFirebaseConfig {
+  const finalCode = (officeCode || generateOfficeCodeFromName(officeName)).toUpperCase().trim();
+  const is155 = finalCode === '155-UASU' || finalCode === '155UASU';
+  if (is155) {
+    const override = getPrimary155FirebaseOverride();
+    if (override && override.apiKey && override.projectId) {
+      return {
+        ...override,
+        officeCode: '155-UASU',
+        ownerEmail: String(override.ownerEmail || PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL).trim().toLowerCase(),
+        ...(joinPin ? { joinPin: String(joinPin).trim() } : {}),
+      };
+    }
+  }
+  return {
+    apiKey: firebaseConfigData.apiKey,
+    authDomain: firebaseConfigData.authDomain,
+    projectId: firebaseConfigData.projectId,
+    storageBucket: firebaseConfigData.storageBucket,
+    messagingSenderId: firebaseConfigData.messagingSenderId,
+    appId: firebaseConfigData.appId,
+    firestoreDatabaseId: (firebaseConfigData as any).firestoreDatabaseId,
+    ownerEmail: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
     officeCode: finalCode,
     ...(joinPin ? { joinPin: String(joinPin).trim() } : {}),
   };
@@ -458,6 +537,10 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
     raw.officeBase || fb.officeBase
       ? String(raw.officeBase || fb.officeBase).trim()
       : undefined;
+  const ownerEmail =
+    fb.ownerEmail || raw.ownerEmail
+      ? String(fb.ownerEmail || raw.ownerEmail).trim().toLowerCase()
+      : undefined;
 
   return {
     officeName,
@@ -476,6 +559,7 @@ export function validateCustomOfficePayload(raw: any): CustomOfficeConfig | null
       firestoreDatabaseId: fb.firestoreDatabaseId
         ? String(fb.firestoreDatabaseId).trim()
         : (firebaseConfigData as any).firestoreDatabaseId,
+      ...(ownerEmail ? { ownerEmail } : {}),
       officeCode,
       ...(joinPin ? { joinPin } : {}),
       officeSlogan,
@@ -717,7 +801,14 @@ function resolveActiveOfficeFirebaseConfig(): OfficeFirebaseConfig {
   if (custom && custom.firebaseConfig?.apiKey && custom.firebaseConfig?.projectId) {
     return custom.firebaseConfig;
   }
-  return firebaseConfigData as OfficeFirebaseConfig;
+  const override155 = getPrimary155FirebaseOverride();
+  if (override155 && override155.apiKey && override155.projectId) {
+    return override155;
+  }
+  return {
+    ...(firebaseConfigData as OfficeFirebaseConfig),
+    ownerEmail: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+  };
 }
 
 export let firebaseConfig: OfficeFirebaseConfig = resolveActiveOfficeFirebaseConfig();
@@ -746,7 +837,13 @@ export let auth: Auth = null as unknown as Auth;
 
 function initDynamicOfficeFirebase(customCfg?: CustomOfficeConfig | null): void {
   activeCustomOffice = customCfg !== undefined ? customCfg : getCustomOfficeConfig();
-  const targetFbConfig = activeCustomOffice?.firebaseConfig || (firebaseConfigData as OfficeFirebaseConfig);
+  const override155 = !activeCustomOffice ? getPrimary155FirebaseOverride() : null;
+  const targetFbConfig: OfficeFirebaseConfig =
+    activeCustomOffice?.firebaseConfig ||
+    override155 || {
+      ...(firebaseConfigData as OfficeFirebaseConfig),
+      ownerEmail: PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+    };
   firebaseConfig = targetFbConfig;
   isFirebaseConfigured = Boolean(
     !IS_AI_STUDIO_PRACTICE_MODE &&
@@ -764,7 +861,7 @@ function initDynamicOfficeFirebase(customCfg?: CustomOfficeConfig | null): void 
     const isPrimaryConfig =
       targetFbConfig.projectId === firebaseConfigData.projectId &&
       (targetFbConfig.firestoreDatabaseId || '(default)') === ((firebaseConfigData as any).firestoreDatabaseId || '(default)');
-    const appName = activeCustomOffice && !isPrimaryConfig
+    const appName = (activeCustomOffice || override155) && !isPrimaryConfig
       ? `office_app_${safeProj}_${safeDb}`
       : activeCustomOffice
       ? `office_app_${safeProj}`
@@ -1202,10 +1299,47 @@ export const MASTER_CLOUD_POOL_KEY = 'baf_master_cloud_pool_v1';
 export interface CloudPoolShard {
   id: string;
   label: string;
+  ownerEmail?: string;
   status: 'ACTIVE' | 'PAUSED';
   firebaseConfig: OfficeFirebaseConfig;
   addedAt: string;
   updatedAt: string;
+}
+
+export function resolveFirebaseOwnerEmail(
+  fbConfig?: Partial<OfficeFirebaseConfig> | null,
+  poolShards?: CloudPoolShard[],
+  office?: Partial<RegisteredOfficeRecord> | null
+): string {
+  const direct = String(
+    office?.ownerEmail ||
+      office?.firebaseConfig?.ownerEmail ||
+      fbConfig?.ownerEmail ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+  if (direct) return direct;
+
+  const proj = String(fbConfig?.projectId || office?.projectId || '').trim();
+  const dbId = String(fbConfig?.firestoreDatabaseId || '(default)').trim() || '(default)';
+  const shards = poolShards || getMasterCloudPoolLocal();
+  const matchedShard = shards.find(
+    (s) =>
+      s.firebaseConfig?.projectId === proj &&
+      (s.firebaseConfig?.firestoreDatabaseId || '(default)') === dbId &&
+      Boolean(s.ownerEmail || s.firebaseConfig?.ownerEmail)
+  );
+  if (matchedShard) {
+    return String(matchedShard.ownerEmail || matchedShard.firebaseConfig?.ownerEmail || '')
+      .trim()
+      .toLowerCase();
+  }
+
+  if (!proj || proj === firebaseConfigData.projectId) {
+    return PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL;
+  }
+  return '';
 }
 
 const poolDbCache = new Map<string, FirestoreLite>();
@@ -1344,16 +1478,28 @@ export async function fetchMasterCloudPoolFromCloud(force: boolean = false): Pro
 
 export async function addCloudPoolShard(
   label: string,
-  fbConfig: OfficeFirebaseConfig
+  fbConfig: OfficeFirebaseConfig,
+  ownerEmail?: string
 ): Promise<CloudPoolShard[]> {
   const current = await fetchMasterCloudPoolFromCloud(false).catch(() => getMasterCloudPoolLocal());
   const dbId = fbConfig.firestoreDatabaseId?.trim() || '(default)';
   const shardId = `${fbConfig.projectId}__${dbId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const nowIso = new Date().toISOString();
+  const existingShard = current.find((s) => s.id === shardId);
+  const cleanEmail = String(
+    ownerEmail ||
+      fbConfig.ownerEmail ||
+      existingShard?.ownerEmail ||
+      existingShard?.firebaseConfig?.ownerEmail ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
 
   const nextShard: CloudPoolShard = {
     id: shardId,
-    label: String(label || fbConfig.projectId).trim() || fbConfig.projectId,
+    label: String(label || cleanEmail || fbConfig.projectId).trim() || fbConfig.projectId,
+    ...(cleanEmail ? { ownerEmail: cleanEmail } : {}),
     status: 'ACTIVE',
     firebaseConfig: {
       apiKey: String(fbConfig.apiKey).trim(),
@@ -1362,9 +1508,10 @@ export async function addCloudPoolShard(
       storageBucket: String(fbConfig.storageBucket || `${fbConfig.projectId}.appspot.com`).trim(),
       messagingSenderId: String(fbConfig.messagingSenderId || '').trim(),
       appId: String(fbConfig.appId || '').trim(),
+      ...(cleanEmail ? { ownerEmail: cleanEmail } : {}),
       ...(dbId && dbId !== '(default)' ? { firestoreDatabaseId: dbId } : {}),
     },
-    addedAt: current.find((s) => s.id === shardId)?.addedAt || nowIso,
+    addedAt: existingShard?.addedAt || nowIso,
     updatedAt: nowIso,
   };
 
@@ -1396,10 +1543,22 @@ export async function removeCloudPoolShard(shardId: string): Promise<CloudPoolSh
 
 export async function reassignOfficeToCloudConfig(
   officeCodeInput: string,
-  targetFbConfig: OfficeFirebaseConfig
+  targetFbConfig: OfficeFirebaseConfig,
+  ownerEmailOverride?: string
 ): Promise<void> {
-  const code = String(officeCodeInput || '').toUpperCase().trim();
-  if (!code || code === '155-UASU' || code === '155UASU') return;
+  const rawCode = String(officeCodeInput || '').toUpperCase().trim();
+  const code = rawCode === '155UASU' || rawCode === '155-UASU-BAF' ? '155-UASU' : rawCode;
+  if (!code) return;
+
+  const is155 = code === '155-UASU';
+  const resolvedEmail = String(
+    ownerEmailOverride ||
+      targetFbConfig.ownerEmail ||
+      resolveFirebaseOwnerEmail(targetFbConfig) ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
 
   const nextFb: OfficeFirebaseConfig = {
     apiKey: String(targetFbConfig.apiKey).trim(),
@@ -1408,6 +1567,7 @@ export async function reassignOfficeToCloudConfig(
     storageBucket: String(targetFbConfig.storageBucket || `${targetFbConfig.projectId}.appspot.com`).trim(),
     messagingSenderId: String(targetFbConfig.messagingSenderId || '').trim(),
     appId: String(targetFbConfig.appId || '').trim(),
+    ...(resolvedEmail ? { ownerEmail: resolvedEmail } : {}),
     ...(targetFbConfig.firestoreDatabaseId && targetFbConfig.firestoreDatabaseId !== '(default)'
       ? { firestoreDatabaseId: String(targetFbConfig.firestoreDatabaseId).trim() }
       : {}),
@@ -1415,16 +1575,30 @@ export async function reassignOfficeToCloudConfig(
   };
 
   const nowIso = new Date().toISOString();
+
+  if (is155) {
+    const isDefaultProject =
+      nextFb.projectId === firebaseConfigData.projectId &&
+      (nextFb.firestoreDatabaseId || '(default)') ===
+        ((firebaseConfigData as any).firestoreDatabaseId || '(default)');
+    if (isDefaultProject && (!resolvedEmail || resolvedEmail === PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL)) {
+      savePrimary155FirebaseOverride(null, true);
+    } else {
+      savePrimary155FirebaseOverride(nextFb, true);
+    }
+  }
+
   const cache = getLocalMasterOfficesCache();
   let matchedRecord: RegisteredOfficeRecord | null = null;
   Object.keys(cache).forEach((k) => {
     const rec = cache[k];
     if (!rec) return;
-    const rCode = String(
+    const rawRCode = String(
       rec.officeCode || rec.firebaseConfig?.officeCode || generateOfficeCodeFromName(rec.officeName || '')
     )
       .toUpperCase()
       .trim();
+    const rCode = rawRCode === '155UASU' || rawRCode === '155-UASU-BAF' ? '155-UASU' : rawRCode;
     if (rCode === code) {
       const mergedFb: OfficeFirebaseConfig = {
         ...rec.firebaseConfig,
@@ -1433,6 +1607,7 @@ export async function reassignOfficeToCloudConfig(
       };
       const updatedRec: RegisteredOfficeRecord = {
         ...rec,
+        ...(resolvedEmail ? { ownerEmail: resolvedEmail } : {}),
         projectId: nextFb.projectId,
         firebaseConfig: mergedFb,
         lastActive: nowIso,
@@ -1441,6 +1616,27 @@ export async function reassignOfficeToCloudConfig(
       matchedRecord = updatedRec;
     }
   });
+
+  if (is155 && !matchedRecord) {
+    const defProf = getDefault155OfficeProfile();
+    const created155: RegisteredOfficeRecord = {
+      officeName: defProf.officeName || '155 UASU BAF',
+      officeLogo: defProf.officeLogo || '/155-uasu-baf-logo.png',
+      officeSlogan: defProf.officeSlogan || 'Intel • Surveillance • Strike',
+      officeBase: defProf.officeBase || 'BAF BASE ZHR',
+      officeCode: '155-UASU',
+      ...(resolvedEmail ? { ownerEmail: resolvedEmail } : {}),
+      projectId: nextFb.projectId,
+      firebaseConfig: nextFb,
+      totalUsers: getRealtimeOfficeUserCount('155-UASU', 48),
+      status: 'ACTIVE',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActive: nowIso,
+    };
+    cache['default__155-UASU'] = created155;
+    matchedRecord = created155;
+  }
+
   saveLocalMasterOfficesCache(cache);
 
   // Update Global User -> Office Map entries for this office
@@ -1448,32 +1644,41 @@ export async function reassignOfficeToCloudConfig(
   let mapModified = false;
   Object.keys(globalMap).forEach((bdKey) => {
     const entry = globalMap[bdKey];
-    if (entry && String(entry.officeCode || '').toUpperCase().trim() === code) {
-      entry.officeConfig = {
-        ...(entry.officeConfig || {
-          officeName: entry.officeName,
-          officeLogo: entry.officeLogo,
-          officeSlogan: entry.officeSlogan,
-          officeBase: entry.officeBase,
-          officeCode: code,
-          firebaseConfig: nextFb,
-        }),
-        firebaseConfig: {
-          ...(entry.officeConfig?.firebaseConfig || {}),
-          ...nextFb,
-        },
-      };
-      entry.updatedAt = nowIso;
-      mapModified = true;
+    if (entry) {
+      const eCode = String(entry.officeCode || '').toUpperCase().trim();
+      const normECode = eCode === '155UASU' || eCode === '155-UASU-BAF' ? '155-UASU' : eCode;
+      if (normECode === code) {
+        entry.officeConfig = {
+          ...(entry.officeConfig || {
+            officeName: entry.officeName,
+            officeLogo: entry.officeLogo,
+            officeSlogan: entry.officeSlogan,
+            officeBase: entry.officeBase,
+            officeCode: code,
+            firebaseConfig: nextFb,
+          }),
+          firebaseConfig: {
+            ...(entry.officeConfig?.firebaseConfig || {}),
+            ...nextFb,
+          },
+        };
+        entry.updatedAt = nowIso;
+        mapModified = true;
+      }
     }
   });
   if (mapModified) {
     saveGlobalUserOfficeMap(globalMap, true);
   }
 
-  // Update active custom office config if currently selected
+  // Update active custom office config if currently selected, or re-init default 155 office
   const activeCustom = getCustomOfficeConfig();
-  if (activeCustom && String(activeCustom.officeCode || '').toUpperCase().trim() === code) {
+  if (is155 && isDefault155UasuOffice()) {
+    initDynamicOfficeFirebase(activeCustom);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('baf_office_config_changed', { detail: activeCustom }));
+    }
+  } else if (activeCustom && String(activeCustom.officeCode || '').toUpperCase().trim() === code) {
     saveCustomOfficeConfig({
       ...activeCustom,
       firebaseConfig: {
@@ -1481,6 +1686,8 @@ export async function reassignOfficeToCloudConfig(
         ...nextFb,
       },
     });
+  } else if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('baf_office_config_changed'));
   }
 
   // Sync registered_offices document in masterDbInstance
@@ -1490,11 +1697,12 @@ export async function reassignOfficeToCloudConfig(
       const updates: Promise<any>[] = [];
       snap.forEach((docSnap) => {
         const d = docSnap.data() as RegisteredOfficeRecord;
-        const dCode = String(
+        const rawDCode = String(
           d?.officeCode || d?.firebaseConfig?.officeCode || generateOfficeCodeFromName(d?.officeName || '')
         )
           .toUpperCase()
           .trim();
+        const dCode = rawDCode === '155UASU' || rawDCode === '155-UASU-BAF' ? '155-UASU' : rawDCode;
         if (dCode === code) {
           updates.push(
             setDoc(
@@ -2599,19 +2807,27 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
 export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
   const cache = getLocalMasterOfficesCache();
   const removedCodes = getRemovedOfficeCodes();
+  const poolShards = getMasterCloudPoolLocal();
   const mergedMap = new Map<string, RegisteredOfficeRecord>();
 
   const defaultCode = '155-UASU';
   if (!removedCodes.includes(defaultCode)) {
     const defProf = getDefault155OfficeProfile();
+    const override155 = getPrimary155FirebaseOverride();
+    const fb155 = override155 || buildAutoCloudFirebaseConfig(defProf.officeName || '155 UASU BAF', defaultCode);
+    const owner155 = resolveFirebaseOwnerEmail(fb155, poolShards);
     mergedMap.set(defaultCode, {
       officeName: defProf.officeName || '155 UASU BAF',
       officeLogo: defProf.officeLogo || '/155-uasu-baf-logo.png',
       officeSlogan: defProf.officeSlogan || 'Intel • Surveillance • Strike',
       officeBase: defProf.officeBase || 'BAF BASE ZHR',
       officeCode: defaultCode,
-      projectId: firebaseConfigData.projectId || 'steady-weft-wf6jr',
-      firebaseConfig: buildAutoCloudFirebaseConfig(defProf.officeName || '155 UASU BAF', defaultCode),
+      ownerEmail: owner155 || PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+      projectId: fb155.projectId || firebaseConfigData.projectId || 'steady-weft-wf6jr',
+      firebaseConfig: {
+        ...fb155,
+        ownerEmail: owner155 || PRIMARY_DEFAULT_FIREBASE_OWNER_EMAIL,
+      },
       totalUsers: getRealtimeOfficeUserCount(defaultCode, 48),
       status: 'ACTIVE',
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -2632,9 +2848,22 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
           : rawCode.toUpperCase().trim();
       if (removedCodes.includes(code)) return;
       const prev = mergedMap.get(code);
+      const resolvedOwnerEmail = resolveFirebaseOwnerEmail(
+        rec.firebaseConfig || prev?.firebaseConfig,
+        poolShards,
+        rec
+      );
       mergedMap.set(code, {
         ...prev,
         ...rec,
+        ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
+        firebaseConfig: {
+          ...prev?.firebaseConfig,
+          ...rec.firebaseConfig,
+          apiKey: rec.firebaseConfig?.apiKey || prev?.firebaseConfig?.apiKey || firebaseConfigData.apiKey,
+          projectId: rec.firebaseConfig?.projectId || prev?.firebaseConfig?.projectId || rec.projectId || firebaseConfigData.projectId,
+          ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
+        },
         officeLogo: normalizeOfficeLogoUrl(rec.officeLogo || prev?.officeLogo, code === '155-UASU'),
         officeCode: code,
         joinPin: rec.joinPin || rec.firebaseConfig?.joinPin || prev?.joinPin,
@@ -2656,6 +2885,11 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
     const code = rawCode === '155-UASU-BAF' ? '155-UASU' : rawCode;
     if (!removedCodes.includes(code)) {
       const existing = mergedMap.get(code);
+      const resolvedOwnerEmail = resolveFirebaseOwnerEmail(
+        currentCustom.firebaseConfig,
+        poolShards,
+        existing
+      );
       mergedMap.set(code, {
         officeName: currentCustom.officeName,
         officeLogo: normalizeOfficeLogoUrl(currentCustom.officeLogo, code === '155-UASU'),
@@ -2663,8 +2897,12 @@ export function getRegisteredOfficesLocal(): RegisteredOfficeRecord[] {
         officeBase: currentCustom.officeBase,
         officeCode: code,
         joinPin: currentCustom.joinPin || currentCustom.firebaseConfig?.joinPin,
+        ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
         projectId: currentCustom.firebaseConfig?.projectId || firebaseConfigData.projectId,
-        firebaseConfig: currentCustom.firebaseConfig,
+        firebaseConfig: {
+          ...currentCustom.firebaseConfig,
+          ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
+        },
         status: existing?.status || 'ACTIVE',
         totalUsers: getRealtimeOfficeUserCount(code, existing?.totalUsers || 1),
         createdAt: currentCustom.configuredAt || existing?.createdAt || new Date().toISOString(),
@@ -2728,7 +2966,31 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
       }
 
       try {
+        const overrideSnap = await getDoc(doc(masterDbInstance!, 'app_settings', PRIMARY_155_FIREBASE_OVERRIDE_KEY));
+        if (overrideSnap.exists()) {
+          const od = overrideSnap.data();
+          if (od?.value) {
+            const parsedOv = typeof od.value === 'string' ? JSON.parse(od.value) : od.value;
+            if (parsedOv && parsedOv.apiKey && parsedOv.projectId) {
+              savePrimary155FirebaseOverride(parsedOv, false);
+              if (isDefault155UasuOffice()) {
+                initDynamicOfficeFirebase(getCustomOfficeConfig());
+              }
+            }
+          } else {
+            savePrimary155FirebaseOverride(null, false);
+          }
+        }
+      } catch (err) {
+        if (isQuotaExceededError(err)) {
+          setFirestoreQuotaExceeded(true, (err as any)?.message);
+          return getRegisteredOfficesLocal();
+        }
+      }
+
+      try {
         const snap = await getDocs(collection(masterDbInstance!, 'registered_offices'));
+        const poolShards = getMasterCloudPoolLocal();
         snap.forEach((docSnap) => {
           const d = docSnap.data() as RegisteredOfficeRecord;
           if (d && d.officeName) {
@@ -2748,9 +3010,22 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
             const prev = mergedMap.get(code);
             const resolvedStatus: 'ACTIVE' | 'DISABLED' =
               cloudStatus === 'DISABLED' || prev?.status === 'DISABLED' ? 'DISABLED' : 'ACTIVE';
+            const resolvedOwnerEmail = resolveFirebaseOwnerEmail(
+              d.firebaseConfig || prev?.firebaseConfig,
+              poolShards,
+              d
+            );
             const enriched: RegisteredOfficeRecord = {
               ...prev,
               ...d,
+              ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
+              firebaseConfig: {
+                ...prev?.firebaseConfig,
+                ...d.firebaseConfig,
+                apiKey: d.firebaseConfig?.apiKey || prev?.firebaseConfig?.apiKey || firebaseConfigData.apiKey,
+                projectId: d.firebaseConfig?.projectId || prev?.firebaseConfig?.projectId || d.projectId || firebaseConfigData.projectId,
+                ...(resolvedOwnerEmail ? { ownerEmail: resolvedOwnerEmail } : {}),
+              },
               officeLogo: normalizeOfficeLogoUrl(d.officeLogo || prev?.officeLogo, code === '155-UASU'),
               officeCode: code,
               status: resolvedStatus,
@@ -4349,6 +4624,147 @@ export const firebaseSignOut = async () => {
   }
 };
 export type FirebaseUser = FirebaseUserType;
+
+export interface DiscoveredFirebaseProject {
+  projectId: string;
+  displayName: string;
+  hasWebApp: boolean;
+  firebaseConfig?: OfficeFirebaseConfig;
+}
+
+export async function pickGmailViaGoogleAccountChooser(): Promise<{
+  email: string;
+  displayName: string;
+}> {
+  const targetAuth = masterAuthInstance || officeAuthInstance;
+  if (!targetAuth) {
+    throw new Error('Firebase Auth is not initialized.');
+  }
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const result = await signInWithPopup(targetAuth, provider);
+  const email = String(result.user?.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('No Gmail address was returned by Google Sign-In.');
+  }
+  return {
+    email,
+    displayName: String(result.user?.displayName || '').trim(),
+  };
+}
+
+export async function fetchFirebaseProjectsForGmailWithGoogle(
+  loginHintEmail?: string
+): Promise<{
+  email: string;
+  projects: DiscoveredFirebaseProject[];
+}> {
+  const targetAuth = masterAuthInstance || officeAuthInstance;
+  if (!targetAuth) {
+    throw new Error('Firebase Auth is not initialized.');
+  }
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/firebase.readonly');
+  const params: Record<string, string> = { prompt: 'select_account' };
+  if (loginHintEmail && loginHintEmail.trim()) {
+    params.login_hint = loginHintEmail.trim().toLowerCase();
+  }
+  provider.setCustomParameters(params);
+
+  const result = await signInWithPopup(targetAuth, provider);
+  const email = String(result.user?.email || loginHintEmail || '').trim().toLowerCase();
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  const accessToken = credential?.accessToken;
+  if (!accessToken) {
+    throw new Error('Google OAuth access token was not granted for reading Firebase projects.');
+  }
+
+  const listRes = await fetch('https://firebase.googleapis.com/v1beta1/projects?pageSize=50', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!listRes.ok) {
+    const errBody = await listRes.json().catch(() => null);
+    const apiMsg = errBody?.error?.message || `HTTP ${listRes.status}`;
+    throw new Error(
+      `Could not list Firebase projects via Google API (${apiMsg}). Please paste the firebaseConfig from Firebase Console once below.`
+    );
+  }
+
+  const listJson = await listRes.json();
+  const rawProjects: Array<{ projectId: string; displayName?: string; state?: string }> =
+    Array.isArray(listJson?.results) ? listJson.results : [];
+  const activeProjects = rawProjects
+    .filter((p) => p?.projectId && (!p.state || p.state === 'ACTIVE'))
+    .slice(0, 15);
+
+  const resolved = await Promise.all(
+    activeProjects.map(async (proj): Promise<DiscoveredFirebaseProject> => {
+      try {
+        const appsRes = await fetch(
+          `https://firebase.googleapis.com/v1beta1/projects/${encodeURIComponent(proj.projectId)}/webApps?pageSize=10`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!appsRes.ok) {
+          return {
+            projectId: proj.projectId,
+            displayName: proj.displayName || proj.projectId,
+            hasWebApp: false,
+          };
+        }
+        const appsJson = await appsRes.json();
+        const apps: Array<{ appId?: string }> = Array.isArray(appsJson?.apps) ? appsJson.apps : [];
+        const firstAppId = apps[0]?.appId;
+        if (!firstAppId) {
+          return {
+            projectId: proj.projectId,
+            displayName: proj.displayName || proj.projectId,
+            hasWebApp: false,
+          };
+        }
+        const cfgRes = await fetch(
+          `https://firebase.googleapis.com/v1beta1/projects/${encodeURIComponent(
+            proj.projectId
+          )}/webApps/${encodeURIComponent(firstAppId)}/config`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!cfgRes.ok) {
+          return {
+            projectId: proj.projectId,
+            displayName: proj.displayName || proj.projectId,
+            hasWebApp: true,
+          };
+        }
+        const cfgJson = await cfgRes.json();
+        if (cfgJson?.apiKey && cfgJson?.projectId) {
+          return {
+            projectId: proj.projectId,
+            displayName: proj.displayName || proj.projectId,
+            hasWebApp: true,
+            firebaseConfig: {
+              apiKey: String(cfgJson.apiKey).trim(),
+              authDomain: String(cfgJson.authDomain || `${cfgJson.projectId}.firebaseapp.com`).trim(),
+              projectId: String(cfgJson.projectId).trim(),
+              storageBucket: String(cfgJson.storageBucket || `${cfgJson.projectId}.appspot.com`).trim(),
+              messagingSenderId: String(cfgJson.messagingSenderId || '').trim(),
+              appId: String(cfgJson.appId || firstAppId).trim(),
+              ...(email ? { ownerEmail: email } : {}),
+            },
+          };
+        }
+      } catch {}
+      return {
+        projectId: proj.projectId,
+        displayName: proj.displayName || proj.projectId,
+        hasWebApp: false,
+      };
+    })
+  );
+
+  return {
+    email,
+    projects: resolved,
+  };
+}
 
 export const CLIENT_SESSION_ID: string = (() => {
   if (typeof window === 'undefined') return `srv_${Date.now()}`;

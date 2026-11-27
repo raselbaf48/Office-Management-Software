@@ -88,11 +88,11 @@ body, button, input, select, textarea, table, th, td {
   }
   @page duty-ratio-page-landscape {
     size: A4 landscape;
-    margin: 6mm 8mm;
+    margin: 12.7mm;
   }
   @page duty-ratio-page-portrait {
     size: A4 portrait;
-    margin: 8mm 8mm;
+    margin: 12.7mm;
   }
   .duty-ratio-print-landscape {
     page: duty-ratio-page-landscape;

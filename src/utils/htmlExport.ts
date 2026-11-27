@@ -168,14 +168,12 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
         
         body, table, td, th, div, span, p, li { 
           font-family: Arial, sans-serif !important; 
-          font-size: 10pt; 
+          font-size: 12pt !important; 
           color: black; 
         }
         
-        /* Keep headers slightly larger and bold */
-        h1, h2, h3, .text-lg, .text-xl, .text-base {
-          font-size: 14pt !important;
-          font-weight: bold !important;
+        h1, h2, h3, .text-lg, .text-xl, .text-base, .text-sm, .text-xs {
+          font-size: 12pt !important;
         }
         .text-center { text-align: center; }
         .text-left { text-align: left; }
@@ -186,14 +184,10 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
         .bg-slate-100 { background-color: #f1f5f9; }
         .bg-slate-200 { background-color: #e2e8f0; }
         .bg-white { background-color: #ffffff; }
-        .text-xs { font-size: 7pt !important; }
-        .text-sm { font-size: 9pt !important; }
-        .text-lg { font-size: 14pt; }
-        .text-xl { font-size: 16pt !important; }
 
-        .text-\[11px\] { font-size: 8pt !important; }
-        .text-\[12px\] { font-size: 9pt !important; }
-        .text-\[13px\] { font-size: 10pt !important; }
+        .text-\[11px\] { font-size: 12pt !important; }
+        .text-\[12px\] { font-size: 12pt !important; }
+        .text-\[13px\] { font-size: 12pt !important; }
 
         .mb-2 { margin-bottom: 8px; }
         .mb-4 { margin-bottom: 16px; }

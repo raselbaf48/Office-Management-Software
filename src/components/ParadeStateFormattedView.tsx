@@ -39,6 +39,7 @@ import {
 Settings,
  Tag,
  FileText,
+ FileSpreadsheet,
  Copy,
 } from 'lucide-react';
 import { DutyCellPopover } from './DutyCellPopover';
@@ -58,8 +59,10 @@ import {
  MultiParadeDayItem,
 } from '../utils/docxExport';
 import { exportElementToPdf } from '../utils/pdfExport';
+import { exportParadeStateMultiExcel } from '../utils/csvExport';
 import { PageSetupBar } from './PageSetupBar';
-import { PageSetupConfig, getPageDimensions } from '../utils/pageSetup';
+import { PageSetupConfig, getMarginSpec } from '../utils/pageSetup';
+import { PaginatedPaperPreview } from './PaginatedPaperPreview';
 import { DisposalCategoryDropdown } from './DisposalCategoryDropdown';
 import { saveCustomDisposal, getSavedCustomDisposals, removeSavedCustomDisposal } from '../utils/customDisposalStore';
 import { formatRank, formatAirmanName } from '../utils/rankFormatter';
@@ -182,7 +185,6 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  const exportDropdownRef = useRef<HTMLDivElement | null>(null);
  const flightDropdownRef = useRef<HTMLDivElement | null>(null);
  const hideEmptyColumns = true;
- const pageDims = getPageDimensions(pageSetup);
 
  useEffect(() => {
    if (!showExportMenu && !showFlightMenu) return;
@@ -456,6 +458,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  const datesInRange = getDatesInRange(fromDate, toDate);
  const isMultiDay = datesInRange.length > 1;
+ const activeMarginType = isMultiDay ? 'narrow' : 'normal';
+ const activeMarginSpec = getMarginSpec(activeMarginType);
+ const effectivePageSetup: PageSetupConfig = { ...pageSetup, margin: activeMarginType };
 
   // Single Day Fetch
   const fetchSingle = async (_showLoader = false) => {
@@ -874,6 +879,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
        fileName: `${getExportBaseFileName()}.pdf`,
        format: pageSetup.paperSize,
        orientation: pageSetup.orientation,
+       marginMm: activeMarginSpec.marginMm,
      });
    } catch (err) {
      console.error('Failed to export PDF:', err);
@@ -893,6 +899,211 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
    } finally {
      isExportingRef.current = false;
    }
+ };
+
+ const handleExportExcel = () => {
+   setShowExportMenu(false);
+   if (!isMultiDay) return;
+
+   const filterPersonnelForFlight = (rawPersonnel: any[]) =>
+     selectedFlight === 'Overall'
+       ? rawPersonnel
+       : rawPersonnel.filter((s) =>
+           officeHasFlights
+             ? s.airman.flightName === selectedFlight
+             : s.airman.trade === selectedFlight || s.airman.flightName === selectedFlight
+         );
+
+   const allCustomKeys = new Set<string>();
+   datesInRange.forEach((dStr) => {
+     const resData = multiDayStates[dStr];
+     const pList = filterPersonnelForFlight(resData?.personnelStatusList || []);
+     pList.forEach((item: any) => {
+       const codeUpper = (item.dutyCode || '').toUpperCase();
+       const statusCategory = item.statusCategory;
+       const notes = item.notes || '';
+       const notesLower = notes.toLowerCase();
+
+       const isDutyOff = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
+       const isBaseSec = !isDutyOff && (codeUpper === 'GD' || notesLower.includes('base sec'));
+       const isBtf = !isDutyOff && codeUpper === 'BTF';
+       const isNtf = !isDutyOff && codeUpper === 'NTF';
+       const isAirfield = !isDutyOff && (codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd'));
+       const isHalishahar = !isDutyOff && codeUpper === 'HALISHAHAR';
+       const isBakeBite = codeUpper === 'BAKE_BITE' || codeUpper === 'BAKE_N_BITE' || statusCategory === 'BAKE_N_BITE';
+       const isTdy = ['TDY', 'ATT', 'DETT'].includes(codeUpper);
+       const isLeave = codeUpper === 'LEAVE';
+       const isIda = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(codeUpper);
+       const isOnParadeFlag = codeUpper === 'ON_PARADE' || statusCategory === 'PARADE';
+
+       if (!isBaseSec && !isBtf && !isNtf && !isAirfield && !isHalishahar && !isBakeBite && !isTdy && !isLeave && !isIda && !isDutyOff && !isOnParadeFlag) {
+         let customKey = codeUpper === 'OTHERS' ? (notes || 'OTHER DISPOSAL') : (item.dutyName || item.dutyCode || 'OTHER DISPOSAL');
+         if (notes) {
+           if (!['LEAVE', 'ATT', 'TDY', 'DETT', 'BAKE_N_BITE', 'RECEPTION', 'ESSN', 'CMH', 'BNS', 'BSH', 'SICK_REPORT', 'ED', 'ADMIN_ORDER', 'CLASS_TRG', 'GAMES', 'ABSENT', 'CANTEEN'].includes(codeUpper)) {
+             customKey = notes;
+           }
+         }
+         if (isPtDocument && codeUpper === 'CANTEEN') customKey = 'Reception Duty';
+         if (isPtDocument && customKey === 'K/O & Reception') customKey = 'Reception Duty';
+         allCustomKeys.add(customKey);
+       }
+     });
+   });
+   const customKeysArray = Array.from(allCustomKeys);
+
+   const hasData = (dutyName: string) => {
+     if (!hideEmptyColumns) return true;
+     return datesInRange.some((dStr) => {
+       const resData = multiDayStates[dStr];
+       const pList = filterPersonnelForFlight(resData?.personnelStatusList || []);
+       if (dutyName === 'Halishahar Duty') return pList.some((s: any) => s.dutyCode === 'HALISHAHAR');
+       if (dutyName === 'Bake & Bite') return pList.some((s: any) => s.dutyCode === 'BAKE_BITE' || s.dutyCode === 'BAKE_N_BITE' || s.statusCategory === 'BAKE_N_BITE');
+       if (dutyName === 'Base Security Duty') return pList.some((s: any) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec')));
+       if (dutyName === 'Base Taskforce Duty') return pList.some((s: any) => s.dutyCode === 'BTF');
+       if (dutyName === 'Najirpara Taskforce Duty') return pList.some((s: any) => s.dutyCode === 'NTF');
+       if (dutyName === 'Airfield') return pList.some((s: any) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd')));
+       if (dutyName === 'Tdy') return pList.some((s: any) => ['TDY', 'ATT', 'DETT'].includes(s.dutyCode));
+       if (dutyName === 'Leave') return pList.some((s: any) => s.dutyCode === 'LEAVE');
+       return true;
+     });
+   };
+
+   const columns: Array<{ key: string; label: string; group?: string }> = [
+     { key: 'date', label: 'Date' },
+     { key: 'day', label: 'Day' },
+   ];
+   if (hasData('Base Security Duty')) columns.push({ key: 'baseSec', label: 'Base Security Duty' });
+   if (hasData('Base Taskforce Duty')) columns.push({ key: 'btf', label: 'Base Taskforce Duty' });
+   if (hasData('Najirpara Taskforce Duty')) columns.push({ key: 'ntf', label: 'Najirpara Taskforce Duty' });
+   if (hasData('Airfield')) columns.push({ key: 'airfield', label: 'Airfield Duty' });
+   if (hasData('Halishahar Duty')) columns.push({ key: 'halishahar', label: 'Halishahar Duty' });
+   if (hasData('Bake & Bite')) columns.push({ key: 'bakeBite', label: 'Bake & Bite' });
+   if (hasData('Tdy')) columns.push({ key: 'tdy', label: 'Tdy' });
+   customKeysArray.forEach((ck) => columns.push({ key: `custom:${ck}`, label: ck }));
+   if (hasData('Leave')) columns.push({ key: 'leave', label: 'Leave' });
+   columns.push({ key: 'idaMorning', label: 'Morning', group: 'IDA CENTER Duty' });
+   columns.push({ key: 'idaAfternoon', label: 'Afternoon', group: 'IDA CENTER Duty' });
+   columns.push({ key: 'idaNight', label: 'Night', group: 'IDA CENTER Duty' });
+   columns.push({ key: 'dutyOff', label: 'Duty Off' });
+   columns.push({ key: 'onParade', label: isPtDocument ? 'On PT' : 'On Parade' });
+
+   const formatCellList = (items: any[], isDutyOff = false, isLeaveCol = false) =>
+     items.length > 0
+       ? items
+           .map((it, idx) => {
+             let noteStr = '';
+             if (isDutyOff) {
+               noteStr = ' - ' + formatDutyOffShortName(it.previousDutyCode, it.previousDutyName, it.dutyName || it.notes);
+             } else if (isLeaveCol) {
+               noteStr = ` - ${formatLeaveShortName(it.dutyName, it.notes)}`;
+             }
+             return `${idx + 1}. ${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
+           })
+           .join('\n')
+       : '-';
+
+   const excelRows = datesInRange.map((dStr) => {
+     const resData = multiDayStates[dStr];
+     const pList = filterPersonnelForFlight(resData?.personnelStatusList || []);
+     const pParts = dStr.split('-');
+     const dateObj = new Date(parseInt(pParts[0]), parseInt(pParts[1]) - 1, parseInt(pParts[2]));
+     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+     const dayName = days[dateObj.getDay()];
+     const isWeekend = dateObj.getDay() === 5 || dateObj.getDay() === 6;
+
+     const baseSec = pList.filter((s: any) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'GD' || s.notes?.toLowerCase().includes('base sec')));
+     const btf = pList.filter((s: any) => s.dutyCode === 'BTF');
+     const ntf = pList.filter((s: any) => s.dutyCode === 'NTF');
+     const airfield = pList.filter((s: any) => s.dutyCode !== 'DUTY_OFF' && s.statusCategory !== 'OFF' && (s.dutyCode === 'AIRPORT' || s.dutyCode === 'AIR_FD' || s.notes?.toLowerCase().includes('airfield') || s.notes?.toLowerCase().includes('air fd')));
+     const halishahar = pList.filter((s: any) => s.dutyCode === 'HALISHAHAR');
+     const bakeBite = pList.filter((s: any) => s.dutyCode === 'BAKE_BITE' || s.dutyCode === 'BAKE_N_BITE' || s.statusCategory === 'BAKE_N_BITE');
+     const tdy = pList.filter((s: any) => ['TDY', 'ATT', 'DETT'].includes(s.dutyCode));
+     const leave = pList.filter((s: any) => s.dutyCode === 'LEAVE');
+     const idaMorn = pList.filter((s: any) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && (!s.idaShift || s.idaShift.trim() === 'Morning'));
+     const idaAft = pList.filter((s: any) => ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && s.idaShift?.trim() === 'Afternoon');
+     const idaNight = pList.filter(
+       (s: any) =>
+         (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(s.dutyCode?.trim()?.toUpperCase()) && (s.idaShift?.trim() === 'Night' || s.notes?.includes('IDAC Night'))) ||
+         ((s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF') && s.idaShift?.trim() === 'Night')
+     );
+     const dutyOff = pList.filter((s: any) => s.dutyCode === 'DUTY_OFF' || s.statusCategory === 'OFF');
+     const onParade = pList.filter((s: any) => s.dutyCode === 'ON_PARADE' || s.statusCategory === 'PARADE');
+
+     const dayCustomDisposals: Record<string, any[]> = {};
+     pList.forEach((item: any) => {
+       const codeUpper = (item.dutyCode || '').toUpperCase();
+       const statusCategory = item.statusCategory;
+       const notes = item.notes || '';
+       const notesLower = notes.toLowerCase();
+
+       const isDutyOffFlag = codeUpper === 'DUTY_OFF' || statusCategory === 'OFF';
+       const isBaseSec = !isDutyOffFlag && (codeUpper === 'GD' || notesLower.includes('base sec'));
+       const isBtf = !isDutyOffFlag && codeUpper === 'BTF';
+       const isNtf = !isDutyOffFlag && codeUpper === 'NTF';
+       const isAirfield = !isDutyOffFlag && (codeUpper === 'AIRPORT' || codeUpper === 'AIR_FD' || notesLower.includes('airfield') || notesLower.includes('air fd'));
+       const isHalishahar = !isDutyOffFlag && codeUpper === 'HALISHAHAR';
+       const isBakeBite = codeUpper === 'BAKE_BITE' || codeUpper === 'BAKE_N_BITE' || statusCategory === 'BAKE_N_BITE';
+       const isTdy = ['TDY', 'ATT', 'DETT'].includes(codeUpper);
+       const isLeave = codeUpper === 'LEAVE';
+       const isIda = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(codeUpper);
+       const isOnParadeFlag = codeUpper === 'ON_PARADE' || statusCategory === 'PARADE';
+
+       if (!isBaseSec && !isBtf && !isNtf && !isAirfield && !isHalishahar && !isBakeBite && !isTdy && !isLeave && !isIda && !isDutyOffFlag && !isOnParadeFlag) {
+         let customKey = codeUpper === 'OTHERS' ? (notes || 'OTHER DISPOSAL') : (item.dutyName || item.dutyCode || 'OTHER DISPOSAL');
+         if (notes) {
+           if (!['LEAVE', 'ATT', 'TDY', 'DETT', 'BAKE_N_BITE', 'RECEPTION', 'ESSN', 'CMH', 'BNS', 'BSH', 'SICK_REPORT', 'ED', 'ADMIN_ORDER', 'CLASS_TRG', 'GAMES', 'ABSENT', 'CANTEEN'].includes(codeUpper)) {
+             customKey = notes;
+           }
+         }
+         if (isPtDocument && codeUpper === 'CANTEEN') customKey = 'Reception Duty';
+         if (isPtDocument && customKey === 'K/O & Reception') customKey = 'Reception Duty';
+         if (!dayCustomDisposals[customKey]) dayCustomDisposals[customKey] = [];
+         dayCustomDisposals[customKey].push(item);
+       }
+     });
+
+     const values = columns.map((col) => {
+       if (col.key === 'date') return formatDateSuperShort(dStr);
+       if (col.key === 'day') return dayName;
+       if (col.key === 'baseSec') return formatCellList(baseSec);
+       if (col.key === 'btf') return formatCellList(btf);
+       if (col.key === 'ntf') return formatCellList(ntf);
+       if (col.key === 'airfield') return formatCellList(airfield);
+       if (col.key === 'halishahar') return formatCellList(halishahar);
+       if (col.key === 'bakeBite') return formatCellList(bakeBite);
+       if (col.key === 'tdy') return formatCellList(tdy);
+       if (col.key.startsWith('custom:')) {
+         const ck = col.key.slice(7);
+         return formatCellList(dayCustomDisposals[ck] || []);
+       }
+       if (col.key === 'leave') return formatCellList(leave, false, true);
+       if (col.key === 'idaMorning') return formatCellList(idaMorn);
+       if (col.key === 'idaAfternoon') return formatCellList(idaAft);
+       if (col.key === 'idaNight') return formatCellList(idaNight);
+       if (col.key === 'dutyOff') return formatCellList(dutyOff, true);
+       if (col.key === 'onParade') return formatCellList(onParade);
+       return '-';
+     });
+
+     return { isWeekend, values };
+   });
+
+   const unitHeader =
+     selectedFlight === 'Overall'
+       ? activeOfficeName
+       : (officeHasFlights
+           ? (/\b(flt|flight)\b/i.test(selectedFlight) ? selectedFlight.toUpperCase() : `${selectedFlight.toUpperCase()} FLT`)
+           : selectedFlight.toUpperCase());
+
+   exportParadeStateMultiExcel({
+     documentHeader,
+     unitHeader,
+     periodLabel: `Period: ${formatDateShort(fromDate)} To ${formatDateShort(toDate)}`,
+     columns,
+     rows: excelRows,
+     fileName: `${getExportBaseFileName()}.xlsx`,
+     orientation: pageSetup.orientation,
+   });
  };
 
  const buildCopyTextForDay = (dStr: string, dayData: ParadeStateResponse | null): string => {
@@ -1169,7 +1380,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  { name: p.name, rank: p.rank, desig: p.designation },
  { name: a.name, rank: a.rank, desig: a.designation },
  documentHeader,
- pageSetup
+ effectivePageSetup
  );
  } else {
  const stats = getFlightStats(selectedFlight);
@@ -1202,7 +1413,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  leftSig: { name: p.name, rank: p.rank, desig: p.designation },
  middleSig: { name: c.name, rank: c.rank, desig: c.designation },
  rightSig: { name: a.name, rank: a.rank, desig: a.designation },
- pageSetup,
+ pageSetup: effectivePageSetup,
     }, `${documentTitle} - ${selectedFlight === 'Overall' ? activeOfficeName : selectedFlight + ' Flt'} (${fromDate === toDate ? formatDateShort(fromDate).replace(/ \d{2}$/, '') : formatDateShort(fromDate).replace(/ \d{2}$/, '') + '-' + formatDateShort(toDate).replace(/ \d{2}$/, '')}).docx`);
  }
  };
@@ -1582,8 +1793,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <style>{`
  @media print {
  @page {
- size: A4 landscape;
- margin: 8mm;
+ size: ${pageSetup.paperSize} ${pageSetup.orientation};
+ margin: ${activeMarginSpec.cssMargin};
  }
  body {
  background: white !important;
@@ -1803,13 +2014,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
             <span>{copiedText ? 'Copied!' : 'Copy Text'}</span>
           </button>
 
-          {/* Export Dropdown Button (PDF / DOCX Direct Download) */}
+          {/* Export Dropdown Button (Single-Day: PDF / Word, Multi-Day: PDF / Excel) */}
           <div className="relative ml-2" ref={exportDropdownRef}>
             <button
               type="button"
               onClick={() => setShowExportMenu((prev) => !prev)}
               className="flex items-center space-x-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black text-sm shadow-lg shadow-emerald-900/20 transition-all cursor-pointer"
-              title="Export PDF or DOCX"
+              title={isMultiDay ? "Export PDF or Excel" : "Export PDF or Word"}
             >
               <Download className="w-4 h-4" />
               <span>Export</span>
@@ -1826,48 +2037,60 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
                   <FileText className="w-4 h-4 text-rose-500 shrink-0" />
                   <span>Pdf (.pdf)</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={handleExportDocx}
-                  className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-700/70"
-                >
-                  <FileDown className="w-4 h-4 text-blue-500 shrink-0" />
-                  <span>Docx (.docx)</span>
-                </button>
+                {isMultiDay ? (
+                  <button
+                    type="button"
+                    onClick={handleExportExcel}
+                    className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-700/70"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Excel (.xlsx)</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleExportDocx}
+                    className="w-full flex items-center space-x-2.5 px-4 py-2.5 text-left text-xs font-bold text-slate-800 dark:text-slate-100 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-700/70"
+                  >
+                    <FileDown className="w-4 h-4 text-blue-500 shrink-0" />
+                    <span>Word (.docx)</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
 
-          {/* Add Disposal Button - Right next to Export */}
-          <button
-            onClick={() => setShowAddDisposalModal(true)}
-            className="flex items-center space-x-1.5 px-6 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-black text-sm shadow-lg shadow-rose-900/20 transition-all cursor-pointer ml-3"
-            title={isPtDocument ? "Add PT Disposal" : (isOthersDocument ? "Add Others Disposal" : "Add Disposal")}
-          >
-            <UserMinus className="w-5 h-5" />
-            <span>{isPtDocument ? "Add PT Disposal" : "Add Disposal"}</span>
-          </button>
+          {/* Add Disposal Button - Right next to Export (Hidden in Multi-Day mode) */}
+          {!isMultiDay && (
+            <button
+              onClick={() => setShowAddDisposalModal(true)}
+              className="flex items-center space-x-1.5 px-6 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-black text-sm shadow-lg shadow-rose-900/20 transition-all cursor-pointer ml-3"
+              title={isPtDocument ? "Add PT Disposal" : (isOthersDocument ? "Add Others Disposal" : "Add Disposal")}
+            >
+              <UserMinus className="w-5 h-5" />
+              <span>{isPtDocument ? "Add PT Disposal" : "Add Disposal"}</span>
+            </button>
+          )}
  </div>
  </div>
 
  {/* PAGE SETUP BAR DIRECTLY ABOVE PREVIEW */}
  <PageSetupBar
-   value={pageSetup}
+   value={effectivePageSetup}
    onChange={setPageSetup}
-   defaultLabel="Default: A4 Landscape"
+   defaultLabel={isMultiDay ? 'Default: A4 Landscape • Narrow Margin' : 'Default: A4 Landscape • Normal Margin'}
  />
 
  {/* OFFICIAL PARADE DOCUMENT SHEET (ACTUAL PRINTABLE WHITE PAPER PREVIEW IN SELECTED PAGE SETUP) */}
- <div className="bg-slate-200/70 dark:bg-slate-950/60 border border-slate-300/70 dark:border-slate-800 rounded-2xl p-3 sm:p-5 overflow-x-auto print:bg-white print:border-none print:p-0">
- <div
- id="official-parade-document"
- className="bg-white text-black border border-slate-300 rounded-2xl shadow-xl p-6 sm:p-8 mx-auto overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none"
- style={{
-   width: '100%',
-   maxWidth: `${pageDims.widthPx}px`,
-   minHeight: `${Math.round(pageDims.heightPx * 0.72)}px`,
- }}
+ <PaginatedPaperPreview
+   elementId="official-parade-document"
+   paperSize={pageSetup.paperSize}
+   orientation={pageSetup.orientation}
+   marginType={activeMarginType}
+   marginMm={activeMarginSpec.marginMm}
+   refreshKey={`${isMultiDay}-${fromDate}-${toDate}-${selectedFlight}-${pageSetup.paperSize}-${pageSetup.orientation}-${loading}-${singleParadeData?.personnelStatusList?.length || 0}-${Object.keys(multiDayStates).length}`}
  >
+ <div className="w-full print:bg-white print:text-black">
  {loading && (isMultiDay ? Object.keys(multiDayStates).length === 0 : !singleParadeData) ? (
  <div className="py-20 text-center text-slate-500">
  <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-600" />
@@ -1879,13 +2102,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  <div>
  {/* DOCUMENT TOP HEADER */}
- <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <div className="text-center">
- <h1 className="font-bold tracking-wide text-black underline inline-block text-base uppercase">
+ <h1 className="font-bold tracking-wide text-black underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {documentHeader}
  </h1>
  <br />
- <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block text-sm uppercase">
+ <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {selectedFlight === 'Overall'
    ? activeOfficeName
    : (officeHasFlights
@@ -1893,7 +2116,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
        : selectedFlight.toUpperCase())}
  </h2>
  </div>
- <div className="text-right font-normal text-black pr-1 text-xs mt-1">
+ <div className="text-right font-normal text-black pr-1 mt-1" style={{ fontSize: '12pt' }}>
  Period: {formatDateShort(fromDate)} To {formatDateShort(toDate)}
  </div>
  </div>
@@ -1962,25 +2185,25 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  return (
  <div className="overflow-x-auto my-3">
 
- <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border-2 border-black text-[11px]">
+ <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border border-black" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <thead>
- <tr className="text-black font-bold border-b-2 border-black">
- <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Date</th>
- <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Day</th>
- {hasData('Base Security Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
- {hasData('Base Taskforce Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
- {hasData('Najirpara Taskforce Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
- {hasData('Airfield') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
- {hasData('Halishahar Duty') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
- {hasData('Bake & Bite') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
- {hasData('Tdy') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Tdy</th>}
- {customKeysArray.map(key => <th key={key} className="border border-black p-1.5 text-center align-middle" rowSpan={2}>{key}</th>)}
- {hasData('Leave') && <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Leave</th>}
- <th className="border border-black p-1.5 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
- <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>Duty Off</th>
- <th className="border border-black p-1.5 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
+ <tr className="text-black font-bold border-b border-black">
+ <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Date</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Day</th>
+ {hasData('Base Security Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
+ {hasData('Base Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
+ {hasData('Najirpara Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
+ {hasData('Airfield') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
+ {hasData('Halishahar Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
+ {hasData('Bake & Bite') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
+ {hasData('Tdy') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Tdy</th>}
+ {customKeysArray.map(key => <th key={key} className="border border-black p-1 text-center align-middle" rowSpan={2}>{key}</th>)}
+ {hasData('Leave') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Leave</th>}
+ <th className="border border-black p-1 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Duty Off</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
  </tr>
- <tr className="text-black font-bold border-b-2 border-black">
+ <tr className="text-black font-bold border-b border-black">
  <th className="border border-black p-1 text-center align-middle">Morning</th>
  <th className="border border-black p-1 text-center align-middle">Afternoon</th>
  <th className="border border-black p-1 text-center align-middle">Night</th>
@@ -2131,13 +2354,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  <div>
  {/* TOP DOCUMENT HEADER */}
- <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <div className="text-center">
- <h1 className="font-bold tracking-wide text-black underline inline-block text-base uppercase">
+ <h1 className="font-bold tracking-wide text-black underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {documentHeader}
  </h1>
  <br />
- <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block text-sm uppercase">
+ <h2 className="font-bold tracking-wide text-black mt-0.5 underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {selectedFlight === 'Overall'
    ? activeOfficeName
    : (officeHasFlights
@@ -2145,7 +2368,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
        : selectedFlight.toUpperCase())}
  </h2>
  </div>
- <div className="text-right font-normal pr-1 text-xs mt-1 text-black">
+ <div className="text-right font-normal pr-1 mt-1 text-black" style={{ fontSize: '12pt' }}>
  Date: {formatDateShort(fromDate)}
  </div>
  </div>
@@ -2153,65 +2376,65 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  {/* SUMMARY MATRIX TABLE: EXACT SINGLE-ROW FORMAT FOR SELECTED FLIGHT / OVERALL */}
  <div className="overflow-x-auto my-1">
  <table
- className="w-full text-center align-middle border-collapse border-2 border-black text-black"
- style={{ fontFamily: 'Arial, sans-serif', fontSize: '10px' }}
+ className="w-full text-center align-middle border-collapse border border-black text-black"
+ style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
  >
  <thead>
- <tr className="text-black font-bold border-b-2 border-black">
+ <tr className="text-black font-bold border-b border-black">
  <th className="border border-black p-1 align-middle text-center min-w-[70px] font-bold">Unit / Flight</th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Total Str</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Total Str</div>
  </th>
 
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Det/Tdy</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Det/Tdy</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Eff Str</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Eff Str</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Leave</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Leave</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Essn</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Essn</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">CMH/ BNS/ BSH</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">CMH/ BNS/ BSH</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Sick Report</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Sick Report</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Drill Cat-C</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Drill Cat-C</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Security Duty On/Off</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Security Duty On/Off</div>
  </th>
- {!isPtDocument && (<th className="border border-black p-0.5 align-middle text-center"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Canteen</div></th>)}
+ {!isPtDocument && (<th className="border border-black p-0.5 align-middle text-center"><div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Canteen</div></th>)}
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Bake & Bite</div>
- </th>
- <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Bake & Bite</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Guard of Honour</div>
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</div>
+ </th>
+ <th className="border border-black p-0.5 align-middle text-center">
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Guard of Honour</div>
  </th>
  {Object.keys(customDisposalsMap).map(key => (
  <th key={key} className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] font-bold leading-tight">
  {key}
  </div>
  </th>
  ))}
- <th className="border border-black p-0.5 align-middle text-center font-extrabold"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
- <th className="border border-black p-0.5 align-middle text-center font-extrabold">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <th className="border border-black p-0.5 align-middle text-center font-bold"><div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
+ <th className="border border-black p-0.5 align-middle text-center font-bold">
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center min-w-[35px]">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
  Rmk
  </div>
  </th>
@@ -2228,8 +2451,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
      : selectedFlight.toUpperCase());
 
  return (
- <tr className="font-bold text-black border-b-2 border-black">
- <td className="border border-black p-1.5 text-center font-black whitespace-nowrap align-middle">
+ <tr className="font-bold text-black border-b border-black">
+ <td className="border border-black p-1.5 text-center font-bold whitespace-nowrap align-middle">
  {unitLabel}
  </td>
  <td className="border border-black p-1 text-center align-middle">{stats.totalStr}</td>
@@ -2267,8 +2490,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* 2ND TABLE / BOTTOM DISPOSAL SECTION */}
  <div
- className="mt-2 pt-1 text-[11px]"
- style={{ fontFamily: 'Arial, sans-serif' }}
+ className="mt-2 pt-1"
+ style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
  >
  {(() => {
    const numOnParadeSubCols = onPtList.length > 30 ? 3 : onPtList.length > 15 ? 2 : 1;
@@ -2456,8 +2679,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  {/* OFFICIAL SIGNATURE FOOTER */}
  <div
  data-pdf-keep-together="true"
- className={`flex justify-between items-end pt-1 ${fromDate !== toDate ? 'hidden print:hidden' : ''} text-black text-xs`}
- style={{ fontFamily: 'Arial, sans-serif' }}
+ className={`flex justify-between items-end pt-1 ${fromDate !== toDate ? 'hidden print:hidden' : ''} text-black`}
+ style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
  >
  {/* LEFT SIGNATURE BLOCK (Prepared By) */}
  <div
@@ -2471,20 +2694,20 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Prepared By signature' : undefined}
  >
  {preparedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
+ <div className="mb-1 text-left italic text-black select-none" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <span className="font-bold underline">
  {preparedBy.digitalSignatureText || preparedBy.name}
  </span>
- <span className="block text-[8px] font-mono not-italic text-slate-600">
+ <span className="block not-italic text-slate-600" style={{ fontSize: '12pt' }}>
  [Digitally Signed • BAF Verified]
  </span>
  </div>
  )}
- <div className="pt-1.5">
- <div className="text-xs uppercase font-black">{preparedBy.name}</div>
- <div className="text-[11px] font-normal">{preparedBy.rank}</div>
- <div className="text-[11px] font-normal">{preparedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{preparedBy.unit || activeOfficeName}</div>
+ <div className="pt-1.5" style={{ fontSize: '12pt' }}>
+ <div className="uppercase font-bold">{preparedBy.name}</div>
+ <div className="font-normal">{preparedBy.rank}</div>
+ <div className="font-normal">{preparedBy.designation}</div>
+ <div className="uppercase font-bold">{preparedBy.unit || activeOfficeName}</div>
  </div>
  </div>
 
@@ -2500,20 +2723,20 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Checked By signature' : undefined}
  >
  {checkedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
+ <div className="mb-1 text-left italic text-black select-none" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <span className="font-bold underline">
  {checkedBy.digitalSignatureText || checkedBy.name}
  </span>
- <span className="block text-[8px] font-mono not-italic text-slate-600">
+ <span className="block not-italic text-slate-600" style={{ fontSize: '12pt' }}>
  [Digitally Signed • BAF Verified]
  </span>
  </div>
  )}
- <div className="pt-1.5">
- <div className="text-xs uppercase font-black">{checkedBy.name}</div>
- <div className="text-[11px] font-normal">{checkedBy.rank}</div>
- <div className="text-[11px] font-normal">{checkedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{checkedBy.unit || activeOfficeName}</div>
+ <div className="pt-1.5" style={{ fontSize: '12pt' }}>
+ <div className="uppercase font-bold">{checkedBy.name}</div>
+ <div className="font-normal">{checkedBy.rank}</div>
+ <div className="font-normal">{checkedBy.designation}</div>
+ <div className="uppercase font-bold">{checkedBy.unit || activeOfficeName}</div>
  </div>
  </div>
 
@@ -2529,20 +2752,20 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit Authorized By signature' : undefined}
  >
  {authorizedBy.signDigitally && (
- <div className="mb-1 text-left font-serif italic text-xs text-black select-none">
+ <div className="mb-1 text-left italic text-black select-none" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <span className="font-bold underline">
  {authorizedBy.digitalSignatureText || authorizedBy.name}
  </span>
- <span className="block text-[8px] font-mono not-italic text-slate-600">
+ <span className="block not-italic text-slate-600" style={{ fontSize: '12pt' }}>
  [Digitally Signed • BAF Verified]
  </span>
  </div>
  )}
- <div className="pt-1.5">
- <div className="text-xs uppercase font-black">{authorizedBy.name}</div>
- <div className="text-[11px] font-normal">{authorizedBy.rank}</div>
- <div className="text-[11px] font-normal">{authorizedBy.designation}</div>
- <div className="text-[10px] uppercase font-bold">{authorizedBy.unit || activeOfficeName}</div>
+ <div className="pt-1.5" style={{ fontSize: '12pt' }}>
+ <div className="uppercase font-bold">{authorizedBy.name}</div>
+ <div className="font-normal">{authorizedBy.rank}</div>
+ <div className="font-normal">{authorizedBy.designation}</div>
+ <div className="uppercase font-bold">{authorizedBy.unit || activeOfficeName}</div>
                   </div>
                 </div>
               </div>
@@ -2552,7 +2775,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  </div>
  )}
  </div>
- </div>
+ </PaginatedPaperPreview>
 
  {/* Row Edit Popover */}
  {activeEditCell && (

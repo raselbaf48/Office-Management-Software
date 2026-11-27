@@ -29,6 +29,7 @@ export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, def
         </span>
         <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
           {activePaperLabel} • {value.orientation === 'landscape' ? 'Landscape' : 'Portrait'}
+          {value.margin ? ` • Margin: ${value.margin === 'normal' ? 'Normal' : 'Narrow'}` : ''}
         </span>
         {defaultLabel && (
           <span className="hidden sm:inline text-[11px] font-medium text-slate-400 dark:text-slate-500">

@@ -16,7 +16,7 @@ import {
   TableLayoutType,
 } from 'docx';
 import { addAssignmentToMap, resolveAirmanDutyForDate } from '../data/rosterGenerator';
-import { saveAs } from 'file-saver';
+import { saveFileWithFeedback as saveAs } from './exportNotification';
 import { Airman, DutyAssignment, FlightName } from '../types';
 import { DutyRatioTable } from '../data/officialDutyRatioMatrix';
 
@@ -74,8 +74,9 @@ export async function exportDutyRosterDocx(
       children: [
         new TextRun({
           text: 'BASE DUTIES: AIRMEN',
+          font: 'Arial',
           bold: true,
-          size: 26, // 13pt
+          size: 24,
           underline: {},
         }),
       ],
@@ -86,8 +87,9 @@ export async function exportDutyRosterDocx(
       children: [
         new TextRun({
           text: `(${unitHeader})`,
+          font: 'Arial',
           bold: true,
-          size: 24, // 12pt
+          size: 24,
         }),
       ],
     }),
@@ -97,8 +99,9 @@ export async function exportDutyRosterDocx(
       children: [
         new TextRun({
           text: `(${dateRangeHeader})`,
+          font: 'Arial',
           bold: true,
-          size: 22, // 11pt
+          size: 24,
         }),
       ],
     }),
@@ -116,8 +119,9 @@ export async function exportDutyRosterDocx(
         children: [
           new TextRun({
             text: section.title,
+            font: 'Arial',
             bold: true,
-            size: 22,
+            size: 24,
             underline: {},
           }),
         ],
@@ -132,8 +136,9 @@ export async function exportDutyRosterDocx(
           children: [
             new TextRun({
               text: `(${section.subTitle})`,
+              font: 'Arial',
               bold: true,
-              size: 20,
+              size: 24,
             }),
           ],
         })
@@ -186,6 +191,16 @@ export async function exportDutyRosterDocx(
 
   const rosterPageSize = getDocxPageSize(pageSetup, 'portrait');
   const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: {
+            font: 'Arial',
+            size: 24,
+          },
+        },
+      },
+    },
     sections: [
       {
         properties: {
@@ -247,7 +262,7 @@ export async function exportIdacRosterDocx(
           text: `IDAC DUTY ROSTER : ${unitHeader.toUpperCase()}`,
           font: 'Arial',
           bold: true,
-          size: 26, // 13pt
+          size: 24,
           underline: {},
         }),
       ],
@@ -260,7 +275,7 @@ export async function exportIdacRosterDocx(
           text: isMonthFormat ? dateRangeHeader : `(${dateRangeHeader})`,
           font: 'Arial',
           bold: true,
-          size: 22, // 11pt
+          size: 24,
         }),
       ],
     }),
@@ -311,7 +326,7 @@ export async function exportIdacRosterDocx(
             font: 'Arial',
             italics: true,
             bold: true,
-            size: 20,
+            size: 24,
           }),
         ] : [],
       }),
@@ -322,7 +337,7 @@ export async function exportIdacRosterDocx(
             text: '____________________________',
             font: 'Arial',
             bold: true,
-            size: 20,
+            size: 24,
           }),
         ],
       }),
@@ -333,7 +348,7 @@ export async function exportIdacRosterDocx(
             text: authorizedBy.name.toUpperCase(),
             font: 'Arial',
             bold: true,
-            size: 20,
+            size: 24,
           }),
         ],
       }),
@@ -343,7 +358,7 @@ export async function exportIdacRosterDocx(
           new TextRun({
             text: authorizedBy.rank,
             font: 'Arial',
-            size: 19,
+            size: 24,
           }),
         ],
       }),
@@ -353,7 +368,7 @@ export async function exportIdacRosterDocx(
           new TextRun({
             text: authorizedBy.designation,
             font: 'Arial',
-            size: 19,
+            size: 24,
           }),
         ],
       }),
@@ -364,7 +379,7 @@ export async function exportIdacRosterDocx(
             text: authorizedBy.unit || getActiveOfficeIdentity().officeName || '155 UASU BAF',
             font: 'Arial',
             bold: true,
-            size: 18,
+            size: 24,
           }),
         ],
       }),
@@ -376,7 +391,7 @@ export async function exportIdacRosterDocx(
               text: rosterMonthShort,
               font: 'Arial',
               bold: true,
-              size: 19,
+              size: 24,
             }),
           ],
         }),
@@ -386,6 +401,16 @@ export async function exportIdacRosterDocx(
 
   const idacPageSize = getDocxPageSize(pageSetup, 'portrait');
   const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: {
+            font: 'Arial',
+            size: 24,
+          },
+        },
+      },
+    },
     sections: [
       {
         properties: {
@@ -426,7 +451,7 @@ export async function exportNominalRollDocx(
           text: 'NOMINAL ROLL : AIRMEN',
           font: 'Arial',
           bold: true,
-          size: 26,
+          size: 24,
           underline: {},
         }),
       ],
@@ -439,7 +464,7 @@ export async function exportNominalRollDocx(
           text: getActiveOfficeIdentity().officeName || '155 UASU BAF',
           font: 'Arial',
           bold: true,
-          size: 26,
+          size: 24,
           underline: {},
         }),
       ],
@@ -484,6 +509,16 @@ export async function exportNominalRollDocx(
   docChildren.push(table);
 
   const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: {
+            font: 'Arial',
+            size: 24,
+          },
+        },
+      },
+    },
     sections: [
       {
         properties: {
@@ -515,7 +550,7 @@ export async function exportDutyRatioDocx(
           text: `OFFICIAL DUTY RATIO & FLIGHT QUOTA MATRIX : ${(getActiveOfficeIdentity().officeName || '155 UASU BAF').toUpperCase()}`,
           font: 'Arial',
           bold: true,
-          size: 26,
+          size: 24,
           underline: {},
         }),
       ],
@@ -528,7 +563,7 @@ export async function exportDutyRatioDocx(
           text: 'Flight-wise Personnel Allocation Guidelines & Daily Shift Quota',
           font: 'Arial',
           bold: false,
-          size: 20,
+          size: 24,
         }),
       ],
     }),
@@ -544,7 +579,7 @@ export async function exportDutyRatioDocx(
             text: tableData.title,
             font: 'Arial',
             bold: true,
-            size: 22,
+            size: 24,
           }),
         ],
       })
@@ -605,6 +640,16 @@ export async function exportDutyRatioDocx(
   }
 
   const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: {
+            font: 'Arial',
+            size: 24,
+          },
+        },
+      },
+    },
     sections: [
       {
         properties: {
@@ -687,7 +732,7 @@ export async function exportParadeStateSingleDocx(
     pageSetup,
   } = params;
 
-  const singlePageSize = getDocxPageSize(pageSetup, 'landscape');
+  const singlePageSize = getDocxPageSize(pageSetup, 'landscape', 'normal');
   const usableDxa = singlePageSize.usableWidthDxa;
 
   const isPt = documentType === 'PT';
@@ -708,7 +753,7 @@ export async function exportParadeStateSingleDocx(
           text: finalTitle,
           font: 'Arial',
           bold: true,
-          size: 26,
+          size: 24,
           underline: {},
         }),
       ],
@@ -839,7 +884,7 @@ export async function exportParadeStateSingleDocx(
             new TextRun({
               text: `${idx + 1}. ${item.displayName}`,
               font: 'Arial',
-              size: 22,
+              size: 24,
             }),
           ],
         })
@@ -920,7 +965,7 @@ export async function exportParadeStateSingleDocx(
             new TextRun({
               text: `${idx + 1}. ${formatRank(a.rank)} ${formatRunningLetter(a.name)}`,
               font: 'Arial',
-              size: 22,
+              size: 24,
             }),
           ],
         })
@@ -929,7 +974,7 @@ export async function exportParadeStateSingleDocx(
   } else {
     const maxRows = Math.max(onParade1To15.length, onParade16To30.length, onParade31Plus.length);
     const innerRows: TableRow[] = [];
-    const subColWidth = 1920; // Increased from 1680 DXA so sub-columns have clear horizontal breathing room
+    const subColWidth = 2000;
     for (let i = 0; i < maxRows; i++) {
       const col1Item = onParade1To15[i];
       const col2Item = onParade16To30[i];
@@ -947,7 +992,7 @@ export async function exportParadeStateSingleDocx(
           children: [
             new Paragraph({
               spacing: { after: 15, line: 240 },
-              children: col1Text ? [new TextRun({ text: col1Text, font: 'Arial', size: 22 })] : [],
+              children: col1Text ? [new TextRun({ text: col1Text, font: 'Arial', size: 24 })] : [],
             }),
           ],
         }),
@@ -958,7 +1003,7 @@ export async function exportParadeStateSingleDocx(
           children: [
             new Paragraph({
               spacing: { after: 15, line: 240 },
-              children: col2Text ? [new TextRun({ text: col2Text, font: 'Arial', size: 22 })] : [],
+              children: col2Text ? [new TextRun({ text: col2Text, font: 'Arial', size: 24 })] : [],
             }),
           ],
         }),
@@ -973,7 +1018,7 @@ export async function exportParadeStateSingleDocx(
             children: [
               new Paragraph({
                 spacing: { after: 15, line: 240 },
-                children: col3Text ? [new TextRun({ text: col3Text, font: 'Arial', size: 22 })] : [],
+                children: col3Text ? [new TextRun({ text: col3Text, font: 'Arial', size: 24 })] : [],
               }),
             ],
           })
@@ -1385,7 +1430,12 @@ export async function exportParadeStateSingleDocx(
               height: singlePageSize.height,
               orientation: singlePageSize.orientation,
             },
-            margin: { top: 400, right: 400, bottom: 400, left: 400 },
+            margin: {
+              top: singlePageSize.marginDxa,
+              right: singlePageSize.marginDxa,
+              bottom: singlePageSize.marginDxa,
+              left: singlePageSize.marginDxa,
+            },
           },
         },
         children: docChildren,
@@ -1437,7 +1487,7 @@ export async function exportParadeStateMultiDocx(
           text: docTitle || 'PARADE STATE : AIRMEN',
           font: 'Arial',
           bold: true,
-          size: 20,
+          size: 24,
           underline: {
              type: 'single',
           },
@@ -1452,7 +1502,7 @@ export async function exportParadeStateMultiDocx(
           text: unitHeader,
           font: 'Arial',
           bold: true,
-          size: 20,
+          size: 24,
           underline: {
              type: 'single',
           },
@@ -1466,7 +1516,7 @@ export async function exportParadeStateMultiDocx(
         new TextRun({
           text: `Period: ${dateRangeHeader}`,
           font: 'Arial',
-          size: 16,
+          size: 24,
         }),
       ],
     }),
@@ -1584,7 +1634,7 @@ export async function exportParadeStateMultiDocx(
 
   docChildren.push(table);
 
-  const multiPageSize = getDocxPageSize(pageSetup, 'landscape');
+  const multiPageSize = getDocxPageSize(pageSetup, 'landscape', 'narrow');
   const doc = new Document({
     styles: {
       default: {
@@ -1605,7 +1655,12 @@ export async function exportParadeStateMultiDocx(
               height: multiPageSize.height,
               orientation: multiPageSize.orientation,
             },
-            margin: { top: 400, right: 400, bottom: 400, left: 400 },
+            margin: {
+              top: multiPageSize.marginDxa,
+              right: multiPageSize.marginDxa,
+              bottom: multiPageSize.marginDxa,
+              left: multiPageSize.marginDxa,
+            },
           },
         },
         children: docChildren,
@@ -1649,7 +1704,7 @@ export async function exportMonthlyDutyRegisterDocx(
           text: `MONTHLY ATTENDANCE REGISTER : ${(getActiveOfficeIdentity().officeName || '155 UASU BAF').toUpperCase()}`,
           font: 'Arial',
           bold: true,
-          size: 26,
+          size: 24,
           underline: {},
         }),
       ],

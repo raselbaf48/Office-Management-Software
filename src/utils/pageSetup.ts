@@ -2,10 +2,31 @@ import { PageOrientation } from 'docx';
 
 export type PaperSize = 'a4' | 'letter' | 'legal' | 'a3';
 export type PageOrientationType = 'landscape' | 'portrait';
+export type PageMarginType = 'normal' | 'narrow';
 
 export interface PageSetupConfig {
   paperSize: PaperSize;
   orientation: PageOrientationType;
+  margin?: PageMarginType;
+}
+
+export function getMarginSpec(margin: PageMarginType = 'normal') {
+  if (margin === 'narrow') {
+    return {
+      type: 'narrow' as PageMarginType,
+      label: 'Narrow',
+      marginMm: 12.7,
+      marginDxa: 720,
+      cssMargin: '12.7mm',
+    };
+  }
+  return {
+    type: 'normal' as PageMarginType,
+    label: 'Normal',
+    marginMm: 25.4,
+    marginDxa: 1440,
+    cssMargin: '25.4mm',
+  };
 }
 
 export const PAPER_SIZE_OPTIONS: { value: PaperSize; label: string }[] = [
@@ -58,6 +79,7 @@ const PAPER_SPECS: Record<
 export function getPageDimensions(setup?: Partial<PageSetupConfig>) {
   const paperSize: PaperSize = setup?.paperSize && PAPER_SPECS[setup.paperSize] ? setup.paperSize : 'a4';
   const orientation: PageOrientationType = setup?.orientation === 'portrait' ? 'portrait' : 'landscape';
+  const marginSpec = getMarginSpec(setup?.margin || 'narrow');
   const spec = PAPER_SPECS[paperSize];
 
   const widthPx = orientation === 'landscape' ? spec.longPxH : spec.shortPxW;
@@ -69,6 +91,7 @@ export function getPageDimensions(setup?: Partial<PageSetupConfig>) {
     paperSize,
     paperLabel: spec.label,
     orientation,
+    marginSpec,
     widthPx,
     heightPx,
     widthDxa,
@@ -80,19 +103,22 @@ export function getPageDimensions(setup?: Partial<PageSetupConfig>) {
 
 export function getDocxPageSize(
   setup?: Partial<PageSetupConfig>,
-  defaultOrientation: PageOrientationType = 'landscape'
+  defaultOrientation: PageOrientationType = 'landscape',
+  defaultMargin: PageMarginType = 'narrow'
 ) {
   const paperSize: PaperSize = setup?.paperSize && PAPER_SPECS[setup.paperSize] ? setup.paperSize : 'a4';
   const orientation: PageOrientationType = setup?.orientation || defaultOrientation;
+  const marginSpec = getMarginSpec(setup?.margin || defaultMargin);
   const spec = PAPER_SPECS[paperSize];
 
   return {
     width: spec.shortDxaW,
     height: spec.longDxaH,
+    marginDxa: marginSpec.marginDxa,
     orientation:
       orientation === 'landscape'
         ? PageOrientation.LANDSCAPE
         : PageOrientation.PORTRAIT,
-    usableWidthDxa: (orientation === 'landscape' ? spec.longDxaH : spec.shortDxaW) - 800,
+    usableWidthDxa: (orientation === 'landscape' ? spec.longDxaH : spec.shortDxaW) - marginSpec.marginDxa * 2,
   };
 }

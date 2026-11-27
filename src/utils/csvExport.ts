@@ -1,5 +1,5 @@
 import XLSX from 'xlsx-js-style';
-import { saveAs } from 'file-saver';
+import { saveFileWithFeedback as saveAs } from './exportNotification';
 import JSZip from 'jszip';
 import { Airman, DutyAssignment } from '../types';
 import { formatRank } from './rankFormatter';
@@ -503,8 +503,8 @@ export function exportDutyRatioMatrixExcel(
         cell.s = {
           border: thinBorder,
           font: {
-            name: 'Calibri',
-            sz: 11,
+            name: 'Arial',
+            sz: 12,
             bold: isHeader || isSummary || isTotalCol,
             color: { rgb: '000000' },
           },
@@ -652,8 +652,8 @@ export function exportAirmenExcel(
       cell.s = {
         border: thinBorder,
         font: {
-          name: 'Calibri',
-          sz: 11,
+          name: 'Arial',
+          sz: 12,
           bold: isHeader,
           color: { rgb: '000000' },
         },
@@ -821,8 +821,8 @@ export function exportAirmenTemplateExcel(
       cell.s = {
         border: thinBorder,
         font: {
-          name: 'Calibri',
-          sz: 11,
+          name: 'Arial',
+          sz: 12,
           bold: isHeader,
           color: { rgb: '000000' },
         },
@@ -927,6 +927,19 @@ export function exportManpowerAndNominalRollExcel(
   ];
 
   const wsMp = XLSX.utils.aoa_to_sheet(mpRows);
+  for (let r = 0; r <= 1; r++) {
+    const addr = XLSX.utils.encode_cell({ r, c: 0 });
+    if (wsMp[addr]) {
+      wsMp[addr].s = {
+        font: { name: 'Arial', sz: 12, bold: true, underline: r === 1 },
+        alignment: { vertical: 'center', horizontal: 'center' },
+      };
+    }
+  }
+  wsMp['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 3 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 3 } },
+  ];
   for (let r = 2; r < mpRows.length; r++) {
     for (let c = 0; c < 4; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
@@ -935,13 +948,13 @@ export function exportManpowerAndNominalRollExcel(
       const isTotal = r === mpRows.length - 1;
       wsMp[cellAddr].s = {
         border: thinBorder,
-        font: { name: 'Calibri', sz: 11, bold: isHeader || isTotal },
+        font: { name: 'Arial', sz: 12, bold: isHeader || isTotal },
         alignment: { vertical: 'center', horizontal: 'center' },
         ...(isHeader ? { fill: { fgColor: { rgb: 'E2E8F0' } } } : {}),
       };
     }
   }
-  wsMp['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 16 }, { wch: 14 }];
+  wsMp['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 16 }];
   XLSX.utils.book_append_sheet(wb, wsMp, 'Effective Manpower');
 
   // Sheet 2: Nominal Roll
@@ -963,6 +976,19 @@ export function exportManpowerAndNominalRollExcel(
   });
 
   const wsNr = XLSX.utils.aoa_to_sheet(nrRows);
+  for (let r = 0; r <= 1; r++) {
+    const addr = XLSX.utils.encode_cell({ r, c: 0 });
+    if (wsNr[addr]) {
+      wsNr[addr].s = {
+        font: { name: 'Arial', sz: 12, bold: true, underline: r === 1 },
+        alignment: { vertical: 'center', horizontal: 'center' },
+      };
+    }
+  }
+  wsNr['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } },
+  ];
   for (let r = 2; r < nrRows.length; r++) {
     for (let c = 0; c < 6; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
@@ -970,13 +996,13 @@ export function exportManpowerAndNominalRollExcel(
       const isHeader = r === 2;
       wsNr[cellAddr].s = {
         border: thinBorder,
-        font: { name: 'Calibri', sz: 11, bold: isHeader },
+        font: { name: 'Arial', sz: 12, bold: isHeader },
         alignment: { vertical: 'center', horizontal: 'center' },
         ...(isHeader ? { fill: { fgColor: { rgb: 'E2E8F0' } } } : {}),
       };
     }
   }
-  wsNr['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 20 }];
+  wsNr['!cols'] = [{ wch: 10 }, { wch: 14 }, { wch: 26 }, { wch: 18 }, { wch: 18 }, { wch: 22 }];
   XLSX.utils.book_append_sheet(wb, wsNr, 'Nominal Roll');
 
   const finalName = filename.replace(/\.(xlsx|csv)$/i, '') + '.xlsx';
@@ -1034,6 +1060,19 @@ export function exportFlightDutyScheduleExcel(
   rows.push(['DAILY TOTAL', ...dailyTotals.map(d => (d > 0 ? d : '')), monthTotal]);
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
+  for (let r = 0; r <= 1; r++) {
+    const addr = XLSX.utils.encode_cell({ r, c: 0 });
+    if (ws[addr]) {
+      ws[addr].s = {
+        font: { name: 'Arial', sz: 12, bold: true, underline: r === 1 },
+        alignment: { vertical: 'center', horizontal: 'center' },
+      };
+    }
+  }
+  ws['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 32 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 32 } },
+  ];
 
   // Apply styling with alternating Col & Row wise colors
   for (let r = 2; r < rows.length; r++) {
@@ -1066,8 +1105,8 @@ export function exportFlightDutyScheduleExcel(
       ws[cellAddr].s = {
         border: thinBorder,
         font: {
-          name: 'Calibri',
-          sz: 10,
+          name: 'Arial',
+          sz: 12,
           bold: isHeader || isTotalRow || isFirstCol || isTotalCol,
         },
         alignment: {
@@ -1079,7 +1118,7 @@ export function exportFlightDutyScheduleExcel(
     }
   }
 
-  const colWidths = [{ wch: 32 }, ...Array.from({ length: 31 }, () => ({ wch: 4.5 })), { wch: 8 }];
+  const colWidths = [{ wch: 34 }, ...Array.from({ length: 31 }, () => ({ wch: 5 })), { wch: 9 }];
   ws['!cols'] = colWidths;
 
   XLSX.utils.book_append_sheet(wb, ws, `${flightName} Schedule`);
@@ -1469,7 +1508,7 @@ function buildMonthlyAttendanceWorksheet(
 
   if (ws['A1']) {
     ws['A1'].s = {
-      font: { name: 'Arial', sz: 14, bold: true, color: { rgb: '000000' } },
+      font: { name: 'Arial', sz: 12, bold: true, color: { rgb: '000000' } },
       alignment: { horizontal: 'center', vertical: 'center' },
     };
   }
@@ -1698,5 +1737,224 @@ async function applyFreezePanesToWorkbook(
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
   }
+}
+
+export interface MultiParadeExcelParams {
+  documentHeader: string;
+  unitHeader: string;
+  periodLabel: string;
+  columns: Array<{
+    key: string;
+    label: string;
+    group?: string;
+  }>;
+  rows: Array<{
+    isWeekend?: boolean;
+    values: string[];
+  }>;
+  fileName: string;
+  orientation?: 'landscape' | 'portrait';
+}
+
+export function exportParadeStateMultiExcel({
+  documentHeader,
+  unitHeader,
+  periodLabel,
+  columns,
+  rows,
+  fileName,
+  orientation = 'landscape',
+}: MultiParadeExcelParams) {
+  const wb = XLSX.utils.book_new();
+  const totalCols = Math.max(columns.length, 3);
+
+  const titleRow = [documentHeader, ...Array(totalCols - 1).fill('')];
+  const unitRow = [unitHeader, ...Array(totalCols - 1).fill('')];
+  const periodRow = [...Array(totalCols - 1).fill(''), periodLabel];
+
+  const hasIdaGroup = columns.some((c) => c.group === 'IDA CENTER Duty');
+  const headerRow1 = columns.map((c, idx) => {
+    if (c.group === 'IDA CENTER Duty') {
+      const firstIdaIdx = columns.findIndex((col) => col.group === 'IDA CENTER Duty');
+      return idx === firstIdaIdx ? 'IDA CENTER Duty' : '';
+    }
+    return c.label;
+  });
+
+  const headerRow2 = columns.map((c) => {
+    if (c.group === 'IDA CENTER Duty') {
+      return c.label;
+    }
+    return '';
+  });
+
+  const aoa: any[][] = [titleRow, unitRow, periodRow, headerRow1];
+  if (hasIdaGroup) {
+    aoa.push(headerRow2);
+  }
+  const dataStartRow = aoa.length;
+  rows.forEach((r) => {
+    aoa.push(r.values.map((v) => (v && v.trim() !== '' ? v : '-')));
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  const merges: Array<{ s: { r: number; c: number }; e: { r: number; c: number } }> = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: totalCols - 1 } },
+  ];
+
+  if (totalCols >= 3) {
+    merges.push({ s: { r: 2, c: totalCols - 3 }, e: { r: 2, c: totalCols - 1 } });
+    // Put periodLabel in the first cell of the merged range on row 2
+    const mergeCellAddr = XLSX.utils.encode_cell({ r: 2, c: totalCols - 3 });
+    ws[mergeCellAddr] = { t: 's', v: periodLabel };
+    const oldPeriodAddr = XLSX.utils.encode_cell({ r: 2, c: totalCols - 1 });
+    if (oldPeriodAddr !== mergeCellAddr) {
+      ws[oldPeriodAddr] = { t: 's', v: '' };
+    }
+  }
+
+  if (hasIdaGroup) {
+    const firstIdaIdx = columns.findIndex((c) => c.group === 'IDA CENTER Duty');
+    let lastIdaIdx = firstIdaIdx;
+    for (let i = firstIdaIdx; i < columns.length; i++) {
+      if (columns[i].group === 'IDA CENTER Duty') lastIdaIdx = i;
+    }
+    if (lastIdaIdx > firstIdaIdx) {
+      merges.push({ s: { r: 3, c: firstIdaIdx }, e: { r: 3, c: lastIdaIdx } });
+    }
+    columns.forEach((c, idx) => {
+      if (c.group !== 'IDA CENTER Duty') {
+        merges.push({ s: { r: 3, c: idx }, e: { r: 4, c: idx } });
+      }
+    });
+  }
+  ws['!merges'] = merges;
+
+  const thinBorder = {
+    top: { style: 'thin', color: { rgb: '000000' } },
+    bottom: { style: 'thin', color: { rgb: '000000' } },
+    left: { style: 'thin', color: { rgb: '000000' } },
+    right: { style: 'thin', color: { rgb: '000000' } },
+  };
+
+  // Style Title, Unit & Period Rows
+  for (let c = 0; c < totalCols; c++) {
+    const tAddr = XLSX.utils.encode_cell({ r: 0, c });
+    if (ws[tAddr]) {
+      ws[tAddr].s = {
+        font: { name: 'Arial', sz: 12, bold: true, underline: true, color: { rgb: '000000' } },
+        alignment: { vertical: 'center', horizontal: 'center' },
+      };
+    }
+    const uAddr = XLSX.utils.encode_cell({ r: 1, c });
+    if (ws[uAddr]) {
+      ws[uAddr].s = {
+        font: { name: 'Arial', sz: 12, bold: true, underline: true, color: { rgb: '000000' } },
+        alignment: { vertical: 'center', horizontal: 'center' },
+      };
+    }
+    const pAddr = XLSX.utils.encode_cell({ r: 2, c });
+    if (ws[pAddr]) {
+      ws[pAddr].s = {
+        font: { name: 'Arial', sz: 12, bold: false, color: { rgb: '000000' } },
+        alignment: { vertical: 'center', horizontal: 'right' },
+      };
+    }
+  }
+
+  // Style Table Headers
+  for (let r = 3; r < dataStartRow; r++) {
+    for (let c = 0; c < totalCols; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+      ws[addr].s = {
+        border: thinBorder,
+        font: { name: 'Arial', sz: 12, bold: true, color: { rgb: '000000' } },
+        alignment: { vertical: 'center', horizontal: 'center', wrapText: true },
+        fill: { fgColor: { rgb: 'E2E8F0' } },
+      };
+    }
+  }
+
+  // Style Data Rows
+  const rowHeights: Array<{ hpt: number }> = [
+    { hpt: 22 },
+    { hpt: 22 },
+    { hpt: 20 },
+    { hpt: 30 },
+    ...(hasIdaGroup ? [{ hpt: 24 }] : []),
+  ];
+
+  rows.forEach((rowObj, idx) => {
+    const r = dataStartRow + idx;
+    let maxLines = 1;
+    for (let c = 0; c < totalCols; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) ws[addr] = { t: 's', v: '-' };
+      const valStr = String(ws[addr].v || '-');
+      const lines = valStr.split('\n').length;
+      if (lines > maxLines) maxLines = lines;
+
+      const isDateOrDay = c <= 1;
+      const isEmptyDash = valStr.trim() === '-';
+      ws[addr].s = {
+        border: thinBorder,
+        font: {
+          name: 'Arial',
+          sz: 12,
+          bold: (c === 0) || Boolean(rowObj.isWeekend),
+          color: { rgb: rowObj.isWeekend ? 'DC2626' : '000000' },
+        },
+        alignment: {
+          vertical: 'center',
+          horizontal: isDateOrDay || isEmptyDash ? 'center' : 'left',
+          wrapText: true,
+        },
+      };
+    }
+    rowHeights[r] = { hpt: Math.max(24, maxLines * 17 + 8) };
+  });
+
+  ws['!rows'] = rowHeights;
+  ws['!cols'] = columns.map((col, idx) => {
+    if (idx === 0) return { wch: 10 };
+    if (idx === 1) return { wch: 12 };
+    if (col.key === 'onParade') return { wch: 24 };
+    if (col.key === 'dutyOff') return { wch: 24 };
+    let maxLineLen = col.label.length + 2;
+    rows.forEach((r) => {
+      const cellStr = r.values[idx] || '';
+      cellStr.split('\n').forEach((line) => {
+        if (line.length + 2 > maxLineLen) maxLineLen = line.length + 2;
+      });
+    });
+    return { wch: Math.min(32, Math.max(14, maxLineLen)) };
+  });
+
+  // Narrow Page Margins (0.5 in)
+  ws['!margins'] = {
+    left: 0.5,
+    right: 0.5,
+    top: 0.5,
+    bottom: 0.5,
+    header: 0.3,
+    footer: 0.3,
+  };
+  ws['!pageSetup'] = {
+    orientation,
+    paperSize: 9, // A4
+    fitToWidth: 1,
+    fitToHeight: 0,
+  };
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Parade State');
+  const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const cleanName = fileName.replace(/\.(xlsx|csv|pdf|docx)$/i, '') + '.xlsx';
+  const blob = new Blob([wbout], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  saveAs(blob, cleanName);
 }
 
