@@ -5,7 +5,7 @@ import { Airman, DutyAssignment } from '../types';
 import { formatRank } from './rankFormatter';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { resolveAirmanDutyForDate, addAssignmentToMap, calculateDutyStats } from '../data/rosterGenerator';
-import { getActiveOfficeIdentity, doesOfficeHaveFlights } from '../firebase';
+import { getActiveOfficeIdentity, doesOfficeHaveFlights, isDefault155UasuOffice } from '../firebase';
 
 export function normalizeDateToISO(val: any): string {
   if (!val) return '';
@@ -1417,6 +1417,7 @@ function buildMonthlyAttendanceWorksheet(
   rows.push([`Month: ${monthName}`]);
   rows.push([]); // blank spacing row
 
+  const is155 = isDefault155UasuOffice();
   const tableHeaderRowIndex = rows.length;
   const headers = [
     'SER',
@@ -1431,9 +1432,7 @@ function buildMonthlyAttendanceWorksheet(
     'NTF',
     'HAL',
     'AFLD',
-    'IDAC "A"',
-    'IDAC "B"',
-    'IDAC "C"',
+    ...(is155 ? ['IDAC "A"', 'IDAC "B"', 'IDAC "C"'] : []),
     'Duty OFF',
     'Total Duty',
   ];
@@ -1467,7 +1466,7 @@ function buildMonthlyAttendanceWorksheet(
     const dateRange = `${dayStartCol}${excelRowNum}:${dayEndCol}${excelRowNum}`;
 
     const syColLetter = getExcelColName(7 + daysInMonth); // e.g. 'AL'
-    const idacCColLetter = getExcelColName(14 + daysInMonth); // e.g. 'AS'
+    const lastDutyColLetter = getExcelColName((is155 ? 14 : 11) + daysInMonth);
     const presentFormula = Array.from(presentLabelsSet)
       .map((lbl) => `COUNTIF(${dateRange}, "${lbl.replace(/"/g, '""')}")`)
       .join(' + ');
@@ -1485,11 +1484,15 @@ function buildMonthlyAttendanceWorksheet(
       { t: 'n', f: `COUNTIF(${dateRange}, "NTF")`, v: stat?.totalNTF || 0 },
       { t: 'n', f: `COUNTIF(${dateRange}, "HAL")`, v: stat?.totalHalishahar || 0 },
       { t: 'n', f: `COUNTIF(${dateRange}, "AFLD") + COUNTIF(${dateRange}, "APT") + COUNTIF(${dateRange}, "AIRPORT")`, v: stat?.totalAirport || 0 },
-      { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*A*")`, v: stat?.totalIDACMorning || 0 },
-      { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*B*")`, v: stat?.totalIDACAfternoon || 0 },
-      { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*C*") + COUNTIF(${dateRange}, "*IDAC*Nt*")`, v: stat?.totalIDACNight || 0 },
+      ...(is155
+        ? [
+            { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*A*")`, v: stat?.totalIDACMorning || 0 },
+            { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*B*")`, v: stat?.totalIDACAfternoon || 0 },
+            { t: 'n', f: `COUNTIF(${dateRange}, "*IDAC*C*") + COUNTIF(${dateRange}, "*IDAC*Nt*")`, v: stat?.totalIDACNight || 0 },
+          ]
+        : []),
       { t: 'n', f: `COUNTIF(${dateRange}, "*OFF*")`, v: dutyOffCount },
-      { t: 'n', f: `SUM(${syColLetter}${excelRowNum}:${idacCColLetter}${excelRowNum})`, v: stat?.totalDutyCount || 0 },
+      { t: 'n', f: `SUM(${syColLetter}${excelRowNum}:${lastDutyColLetter}${excelRowNum})`, v: stat?.totalDutyCount || 0 },
     ];
 
     rows.push(row);

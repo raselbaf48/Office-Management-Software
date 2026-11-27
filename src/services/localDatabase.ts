@@ -1305,9 +1305,14 @@ export class LocalDatabaseEngine {
       // Capture any in-memory local edits into PendingDeltaQueue before syncing
       this.captureCurrentDiffIntoPendingQueue();
 
-      // Skip duplicate background boot sync only if NOT an explicit login sync, NOT a force pull, and NOT quota recovery
+      const bundleRecoveryKey = getOfficeScopedStorageKey('baf_bundle_recovery_v4_done');
+      const hasDoneBundleRecoveryV4 =
+        typeof window !== 'undefined' && window.localStorage.getItem(bundleRecoveryKey) === 'true';
+
+      // Skip duplicate background boot sync only if v4 bundle recovery already completed and NOT an explicit login/force/quota sync
       const lastPullAgeMs = this.lastPullAt ? Date.now() - this.parseTimeMs(this.lastPullAt) : Infinity;
       if (
+        hasDoneBundleRecoveryV4 &&
         !options?.isLoginSync &&
         !options?.forceFullPull &&
         !options?.isQuotaRecovery &&
@@ -1403,6 +1408,7 @@ export class LocalDatabaseEngine {
       const manifestHash = extractManifestDataHash(manifest);
 
       const isExactFingerprintMatch = Boolean(
+        hasDoneBundleRecoveryV4 &&
         manifest &&
         manifestHash &&
         manifestHash === localFingerprint &&
@@ -1477,12 +1483,25 @@ export class LocalDatabaseEngine {
 
       const bundleRes = await fetchAllCollectionsViaBundles().catch(() => ({
         exists: false,
+        index: undefined,
         airmen: [],
         assignments: [],
         history: [],
         users: [],
         settingsMeta: {},
+        hasAirmenBundle: false,
+        hasUsersBundle: false,
+        hasHistoryBundle: false,
+        hasSettingsBundle: false,
+        repairedMonths: [] as string[],
+        rawIntegrityVerifiedV4: false,
       }));
+
+      let missingAirmenBundle = false;
+      let missingUsersBundle = false;
+      let missingHistoryBundle = false;
+      let missingAssignmentsBundle = false;
+      let repairedRawAirmen = false;
 
       if (bundleRes.exists) {
         usedBundles = true;
@@ -1491,6 +1510,54 @@ export class LocalDatabaseEngine {
         fbHistory = bundleRes.history;
         fbUsers = bundleRes.users;
         fbSettingsMeta = bundleRes.settingsMeta;
+
+        // Recover any missing individual collection bundles or orphaned/newer airmen from raw Firestore collections
+        missingAirmenBundle = !bundleRes.hasAirmenBundle;
+        missingUsersBundle = !bundleRes.hasUsersBundle;
+        missingHistoryBundle = !bundleRes.hasHistoryBundle;
+        missingAssignmentsBundle = bundleRes.assignments.length === 0;
+        const shouldCheckRawAirmenDiff = missingAirmenBundle || !bundleRes.rawIntegrityVerifiedV4;
+
+        if (shouldCheckRawAirmenDiff || missingUsersBundle || missingHistoryBundle || missingAssignmentsBundle) {
+          const [rawA, rawU, rawH, rawD] = await Promise.all([
+            shouldCheckRawAirmenDiff ? fetchAirmenFromFirebase().catch(() => []) : Promise.resolve(null),
+            missingUsersBundle ? fetchUserProfilesFromFirebase().catch(() => []) : Promise.resolve(null),
+            missingHistoryBundle ? fetchParadeStatesFromFirebase().catch(() => []) : Promise.resolve(null),
+            missingAssignmentsBundle ? fetchDutyAssignmentsFromFirebase(undefined).catch(() => []) : Promise.resolve(null),
+          ]);
+          if (rawA && rawA.length > 0) {
+            if (missingAirmenBundle || fbAirmen.length === 0) {
+              fbAirmen = rawA;
+            } else {
+              const bundleByKey = new Map<string, { idx: number; doc: any }>();
+              fbAirmen.forEach((a: any, idx: number) => {
+                const bk = String(a?.bdNo || a?.id || '').replace(/\D/g, '');
+                if (bk) bundleByKey.set(bk, { idx, doc: a });
+              });
+              rawA.forEach((ra: any) => {
+                if (!ra || ra?.remarks === '__DELETED__' || ra?.isDeleted === true) return;
+                const rk = String(ra?.bdNo || ra?.id || '').replace(/\D/g, '');
+                if (!rk) return;
+                const existing = bundleByKey.get(rk);
+                if (!existing) {
+                  fbAirmen.push(ra);
+                  bundleByKey.set(rk, { idx: fbAirmen.length - 1, doc: ra });
+                  repairedRawAirmen = true;
+                } else if (
+                  existing.doc?.remarks !== '__DELETED__' &&
+                  existing.doc?.isDeleted !== true &&
+                  this.parseTimeMs(ra.updatedAt) > this.parseTimeMs(existing.doc?.updatedAt)
+                ) {
+                  fbAirmen[existing.idx] = { ...existing.doc, ...ra };
+                  repairedRawAirmen = true;
+                }
+              });
+            }
+          }
+          if (rawU && rawU.length > 0) fbUsers = rawU;
+          if (rawH && rawH.length > 0) fbHistory = rawH;
+          if (rawD && rawD.length > 0) fbAssignments = rawD;
+        }
       } else {
         const legacyFetched = await fetchCollectionsFromFirebase(undefined);
         fbAirmen = legacyFetched.a;
@@ -1939,6 +2006,16 @@ export class LocalDatabaseEngine {
           Object.keys(newDb.assignments || {}).length > 0 ||
           (newDb.detailedUsers || []).length > 0);
 
+      const needsBundleRepair =
+        usedBundles &&
+        !isFirestoreQuotaExceeded() &&
+        (((missingAirmenBundle || repairedRawAirmen) && (newDb.airmen || []).length > 0) ||
+          (missingUsersBundle && (newDb.detailedUsers || []).length > 0) ||
+          (missingHistoryBundle && (newDb.activityHistory || []).length > 0) ||
+          (missingAssignmentsBundle && Object.keys(newDb.assignments || {}).length > 0) ||
+          (bundleRes.repairedMonths && bundleRes.repairedMonths.length > 0) ||
+          !bundleRes.rawIntegrityVerifiedV4);
+
       if (needsLegacyAutoMigration) {
         const settingsSnap = this.getSyncableSettingsSnapshot();
         const settingsMap: Record<string, { value: any; updatedAt?: string }> = {};
@@ -1954,11 +2031,13 @@ export class LocalDatabaseEngine {
           settingsMap,
           allActiveMonths: Object.keys(newDb.assignments || {}),
           updateIndex: true,
+          markIntegrityVerifiedV4: true,
           reason: 'legacy_to_bundle_migration',
         });
         Object.entries(settingsSnap).forEach(([k, v]) => lastSyncedSettingsMap.set(k, v));
         changedCollections.push('airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings');
       } else if (
+        needsBundleRepair ||
         pushBackAirmen.length > 0 ||
         pushBackMonths.size > 0 ||
         pushBackHistory.length > 0 ||
@@ -1969,23 +2048,29 @@ export class LocalDatabaseEngine {
         pushBackSettings.forEach((s) => {
           settingsMap[s.settingKey] = { value: s.value, updatedAt: s.updatedAt };
         });
+        const repairAllAssignments = missingAssignmentsBundle && Object.keys(newDb.assignments || {}).length > 0;
+        const repairMonths = repairAllAssignments
+          ? Object.keys(newDb.assignments || {})
+          : Array.from(pushBackMonths);
+
         await pushBundlesToFirebase({
-          airmen: pushBackAirmen.length > 0 ? newDb.airmen || [] : undefined,
-          assignmentsByMonth: pushBackMonths.size > 0 ? newDb.assignments || {} : undefined,
-          touchedMonths: pushBackMonths.size > 0 ? Array.from(pushBackMonths) : undefined,
+          airmen: (pushBackAirmen.length > 0 || ((missingAirmenBundle || repairedRawAirmen) && (newDb.airmen || []).length > 0)) ? newDb.airmen || [] : undefined,
+          assignmentsByMonth: repairMonths.length > 0 ? newDb.assignments || {} : undefined,
+          touchedMonths: repairMonths.length > 0 ? repairMonths : undefined,
           deletedAssignments: pushBackDeletedAssignments,
-          history: pushBackHistory.length > 0 ? newDb.activityHistory || [] : undefined,
-          users: pushBackUsers.length > 0 ? newDb.detailedUsers || [] : undefined,
+          history: (pushBackHistory.length > 0 || (missingHistoryBundle && (newDb.activityHistory || []).length > 0)) ? newDb.activityHistory || [] : undefined,
+          users: (pushBackUsers.length > 0 || (missingUsersBundle && (newDb.detailedUsers || []).length > 0)) ? newDb.detailedUsers || [] : undefined,
           settingsMap: pushBackSettings.length > 0 ? settingsMap : undefined,
           mergeExistingSettings: pushBackSettings.length > 0,
           allActiveMonths: Object.keys(newDb.assignments || {}),
-          updateIndex: pushBackMonths.size > 0 || pushBackSettings.length > 0,
-          reason: 'login_delta_merge',
+          updateIndex: true,
+          markIntegrityVerifiedV4: needsBundleRepair ? true : undefined,
+          reason: needsBundleRepair ? 'bundle_index_self_heal' : 'login_delta_merge',
         });
-        if (pushBackAirmen.length > 0) changedCollections.push('airmen');
-        if (pushBackMonths.size > 0) changedCollections.push('duty_assignments');
-        if (pushBackHistory.length > 0) changedCollections.push('parade_states');
-        if (pushBackUsers.length > 0) changedCollections.push('user_profiles');
+        if (pushBackAirmen.length > 0 || ((missingAirmenBundle || repairedRawAirmen) && (newDb.airmen || []).length > 0)) changedCollections.push('airmen');
+        if (repairMonths.length > 0 || needsBundleRepair) changedCollections.push('duty_assignments');
+        if (pushBackHistory.length > 0 || (missingHistoryBundle && (newDb.activityHistory || []).length > 0)) changedCollections.push('parade_states');
+        if (pushBackUsers.length > 0 || (missingUsersBundle && (newDb.detailedUsers || []).length > 0)) changedCollections.push('user_profiles');
         if (pushBackSettings.length > 0) {
           pushBackSettings.forEach((s) =>
             lastSyncedSettingsMap.set(s.settingKey, typeof s.value === 'string' ? s.value : JSON.stringify(s.value))
@@ -2024,9 +2109,15 @@ export class LocalDatabaseEngine {
           changedCollections.length > 0
             ? Array.from(new Set(changedCollections))
             : ['airmen', 'duty_assignments', 'parade_states', 'user_profiles', 'app_settings'],
-          options?.isQuotaRecovery ? 'quota_recovery_merge' : 'login_delta_merge',
+          options?.isQuotaRecovery ? 'quota_recovery_merge' : needsBundleRepair ? 'bundle_index_self_heal' : 'login_delta_merge',
           extraMeta
         );
+      }
+
+      if (!isFirestoreQuotaExceeded()) {
+        try {
+          window.localStorage.setItem(bundleRecoveryKey, 'true');
+        } catch {}
       }
 
       this.recordHandledRevision(manifest?.revision || Date.now());
@@ -2863,7 +2954,7 @@ export class LocalDatabaseEngine {
           users: userList.length > 0 ? this.db.detailedUsers || [] : undefined,
           settingsMap: settingsList.length > 0 ? settingsMap : undefined,
           mergeExistingSettings: settingsList.length > 0,
-          allActiveMonths: Object.keys(this.db.assignments || {}),
+          allActiveMonths: touchedMonths.length > 0 ? Object.keys(this.db.assignments || {}) : undefined,
           updateIndex: touchedMonths.length > 0 || settingsList.length > 0,
           reason,
         });
@@ -3349,11 +3440,16 @@ export class LocalDatabaseEngine {
     if (!this.db.activityHistory) {
       this.db.activityHistory = [];
     }
-    const air = this.db.airmen.find((a) => a.id === action.airmanId);
+    const air = this.db.airmen.find((a) => this.isSameAirmanId(a.id, action.airmanId));
+    const latestExistingTs = this.db.activityHistory.reduce((maxTs, h) => {
+      const t = h?.timestamp ? Date.parse(String(h.timestamp)) || 0 : 0;
+      return t > maxTs ? t : maxTs;
+    }, 0);
+    const monotonicMs = Math.max(Date.now(), latestExistingTs + 1);
     const item: ActivityHistoryItem = {
       ...action,
-      id: `hist_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: new Date().toISOString(),
+      id: `hist_${monotonicMs}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date(monotonicMs).toISOString(),
       airmanRank: air?.rank,
       airmanTrade: air?.trade,
     };
@@ -4707,8 +4803,8 @@ export class LocalDatabaseEngine {
     const history = this.db.activityHistory || [];
     if (history.length === 0 || validPrefixes.length === 0) return;
 
-    // Track explicit CLEAR_RANGE timestamps so cleared dates are never resurrected
-    const clearRanges: Array<{ airId: string; from: string; to: string; ts: number }> = [];
+    // Track explicit CLEAR_RANGE / DELETE_RANGE timestamps so cleared dates are never resurrected
+    const clearRanges: Array<{ id?: string; airId: string; from: string; to: string; dutyCode?: string; ts: number }> = [];
     history.forEach((h: any) => {
       const actType = String(h?.actionType || h?.type || '').toUpperCase();
       if (actType === 'CLEAR_RANGE' || actType === 'DELETE_RANGE') {
@@ -4716,10 +4812,13 @@ export class LocalDatabaseEngine {
         const from = h.fromDate || h.from_date || h.date;
         const to = h.toDate || h.to_date || from;
         if (airId && from && to) {
+          const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase().trim();
           clearRanges.push({
+            id: h.id,
             airId: normalizeCanonicalAirmanId(airId) || airId,
             from,
             to,
+            dutyCode: rawCode && rawCode !== 'ALL' ? rawCode : undefined,
             ts: h.timestamp ? Date.parse(h.timestamp) || 0 : 0,
           });
         }
@@ -4738,6 +4837,18 @@ export class LocalDatabaseEngine {
       const hScope = String(h.disposalScope || 'ALL').toUpperCase();
       if (hScope !== 'ALL' && hScope !== 'A') return;
       const actType = String(h.actionType || h.type || '').toUpperCase();
+      // NEVER synthesize removal / delete / system logs as active Leave or TDY!
+      if (
+        actType === 'CLEAR_RANGE' ||
+        actType === 'DELETE_RANGE' ||
+        actType === 'DELETE_ASSIGNMENT' ||
+        actType === 'SYSTEM_ACTION'
+      ) {
+        return;
+      }
+      const rawNotes = String(h.notes || h.description || '').trim();
+      if (/^Removed\s+/i.test(rawNotes)) return;
+
       const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase();
       if (actType !== 'GRANT_LEAVE' && rawCode !== 'LEAVE' && rawCode !== 'TDY') return;
 
@@ -4757,7 +4868,13 @@ export class LocalDatabaseEngine {
         if (existingKeys.has(dupCheck)) continue;
 
         const wasClearedAfter = clearRanges.some(
-          (c) => this.isSameAirmanId(c.airId, normAir) && c.from <= dStr && c.to >= dStr && c.ts > hTs
+          (c) =>
+            c.id !== h.id &&
+            this.isSameAirmanId(c.airId, normAir) &&
+            c.from <= dStr &&
+            c.to >= dStr &&
+            c.ts >= hTs &&
+            (!c.dutyCode || c.dutyCode === code)
         );
         if (wasClearedAfter) continue;
 
@@ -5154,9 +5271,17 @@ export class LocalDatabaseEngine {
     return { count: appliedCount, assignedDates: Array.from(allAssignedDatesSet).sort() };
   }
 
-  public deleteAssignment(airmanId: string, date: string, dutyCode?: DutyCategoryCode, idaShift?: any, disposalScope?: 'ALL' | 'PARADE' | 'PT' | 'NIGHT_COUNT'): boolean {
+  public deleteAssignment(
+    airmanId: string,
+    date: string,
+    dutyCode?: DutyCategoryCode,
+    idaShift?: any,
+    disposalScope?: 'ALL' | 'PARADE' | 'PT' | 'NIGHT_COUNT',
+    skipHistory: boolean = false
+  ): boolean {
     if (!this.db.assignments) return false;
     let removed = false;
+    const removedItems: any[] = [];
 
     const bucketKeys = Object.keys(this.db.assignments);
     for (const bKey of bucketKeys) {
@@ -5164,51 +5289,83 @@ export class LocalDatabaseEngine {
       if (!Array.isArray(list) || list.length === 0) continue;
       const initialLen = list.length;
 
-      if (dutyCode) {
-        this.db.assignments[bKey] = list.filter((a) => {
-          if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== date) return true; // keep others
-          const normScope = (!a.disposalScope || String(a.disposalScope).toUpperCase() === 'A') ? 'ALL' : a.disposalScope;
-          if (disposalScope && normScope !== disposalScope) return true; // keep if scope doesn't match
-          const isDep = (code: any) => code && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(code);
-          if (isDep(dutyCode)) {
-            return !isDep(a.dutyCode); // remove if matches
+      const shouldKeep = (a: any): boolean => {
+        if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== date) return true; // keep others
+        const normScope = (!a.disposalScope || String(a.disposalScope).toUpperCase() === 'A') ? 'ALL' : a.disposalScope;
+        if (disposalScope && normScope !== disposalScope) return true; // keep if scope doesn't match
+        if (!dutyCode) return false;
+
+        const isDep = (code: any) => code && ['ATT', 'BAKE_N_BITE', 'CANTEEN', 'DEPLOYMENT'].includes(code);
+        if (isDep(dutyCode)) {
+          return !isDep(a.dutyCode); // remove if matches
+        }
+        if (['ATT', 'AIRPORT', 'AIRFIELD_DUTY'].includes(dutyCode as string)) {
+          return !['ATT', 'AIRPORT', 'AIRFIELD_DUTY'].includes(a.dutyCode as string);
+        }
+        if (['GD', 'BASE_SECURITY'].includes(dutyCode as string)) {
+          return !(
+            a.dutyCode === 'GD' ||
+            (a.dutyCode as string) === 'BASE_SECURITY' ||
+            ((a as any).dutyName && String((a as any).dutyName).toUpperCase().includes('SECURITY'))
+          );
+        }
+        if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode as string)) {
+          const isIdacItem = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(a.dutyCode || '').toUpperCase());
+          if (!isIdacItem) return true;
+          if (idaShift) {
+            const resolvedShift = resolveCanonicalIdacShift(a);
+            return resolvedShift.toLowerCase() !== String(idaShift).trim().toLowerCase();
           }
-          if (['ATT', 'AIRPORT', 'AIRFIELD_DUTY'].includes(dutyCode as string)) {
-            return !['ATT', 'AIRPORT', 'AIRFIELD_DUTY'].includes(a.dutyCode as string);
-          }
-          if (['GD', 'BASE_SECURITY'].includes(dutyCode as string)) {
-            return !(
-              a.dutyCode === 'GD' ||
-              (a.dutyCode as string) === 'BASE_SECURITY' ||
-              ((a as any).dutyName && String((a as any).dutyName).toUpperCase().includes('SECURITY'))
-            );
-          }
-          if (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(dutyCode as string)) {
-            const isIdacItem = ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(a.dutyCode || '').toUpperCase());
-            if (!isIdacItem) return true;
-            if (idaShift) {
-              const resolvedShift = resolveCanonicalIdacShift(a);
-              return resolvedShift.toLowerCase() !== String(idaShift).trim().toLowerCase();
-            }
-            return false;
-          }
-          return a.dutyCode !== dutyCode;
-        });
-      } else {
-        this.db.assignments[bKey] = list.filter((a) => {
-          if (!this.isSameAirmanId(a.airmanId, airmanId) || a.date !== date) return true;
-          const normScope = (!a.disposalScope || String(a.disposalScope).toUpperCase() === 'A') ? 'ALL' : a.disposalScope;
-          if (disposalScope && normScope !== disposalScope) return true;
           return false;
-        });
+        }
+        return String(a.dutyCode || '').toUpperCase() !== String(dutyCode || '').toUpperCase();
+      };
+
+      const kept: any[] = [];
+      for (const a of list) {
+        if (shouldKeep(a)) {
+          kept.push(a);
+        } else {
+          removedItems.push(a);
+        }
       }
+      this.db.assignments[bKey] = kept;
 
       if (this.db.assignments[bKey].length < initialLen) {
         removed = true;
       }
     }
 
-    if (removed) {
+    if (
+      !skipHistory &&
+      (disposalScope || 'ALL') === 'ALL' &&
+      (removedItems.some((a) => a.dutyCode === 'LEAVE' || a.dutyCode === 'TDY') ||
+        dutyCode === 'LEAVE' ||
+        dutyCode === 'TDY')
+    ) {
+      const air = this.db.airmen.find((a) => this.isSameAirmanId(a.id, airmanId));
+      this.recordActivity({
+        actionType: 'CLEAR_RANGE',
+        airmanId,
+        airmanName: air ? `${air.rank} ${air.name}` : airmanId,
+        dutyCode: dutyCode || undefined,
+        idaShift,
+        fromDate: date,
+        toDate: date,
+        notes: `Removed ${dutyCode || 'entry'} on ${date}`,
+        previousAssignments: removedItems.map((a) => ({
+          airmanId: a.airmanId,
+          date: a.date,
+          dutyCode: a.dutyCode,
+          idaShift: a.idaShift,
+          notes: a.notes,
+        })),
+      });
+      this.saveToStorage();
+      return true;
+    }
+
+    if (removed && !skipHistory) {
       this.saveToStorage();
     }
 
@@ -5227,10 +5384,55 @@ export class LocalDatabaseEngine {
     const dates = getDatesInRange(fromDate, toDate);
     let count = 0;
 
+    // Capture previous assignments before deletion for history / undo
+    const prevStates: Array<{ airmanId: string; date: string; dutyCode?: any; idaShift?: any; notes?: string }> = [];
+    const dateSet = new Set(dates);
+    Object.values(this.db.assignments || {}).forEach((list) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((a) => {
+        if (!a || !dateSet.has(a.date) || !this.isSameAirmanId(a.airmanId, airmanId)) return;
+        const normScope = (!a.disposalScope || String(a.disposalScope).toUpperCase() === 'A') ? 'ALL' : a.disposalScope;
+        if (disposalScope && normScope !== disposalScope) return;
+        if (!dutyCode || a.dutyCode === dutyCode) {
+          prevStates.push({
+            airmanId: a.airmanId,
+            date: a.date,
+            dutyCode: a.dutyCode,
+            idaShift: a.idaShift,
+            notes: a.notes,
+          });
+        }
+      });
+    });
+
     for (const d of dates) {
-      if (this.deleteAssignment(airmanId, d, dutyCode, idaShift, disposalScope)) {
+      if (this.deleteAssignment(airmanId, d, dutyCode, idaShift, disposalScope, true)) {
         count++;
       }
+    }
+
+    const shouldRecordClear =
+      dates.length > 0 &&
+      (disposalScope || 'ALL') === 'ALL' &&
+      (count > 0 || !dutyCode || dutyCode === 'LEAVE' || dutyCode === 'TDY');
+
+    if (shouldRecordClear) {
+      const air = this.db.airmen.find((a) => this.isSameAirmanId(a.id, airmanId));
+      this.recordActivity({
+        actionType: 'CLEAR_RANGE',
+        airmanId,
+        airmanName: air ? `${air.rank} ${air.name}` : airmanId,
+        dutyCode: dutyCode || undefined,
+        idaShift,
+        fromDate,
+        toDate,
+        notes: `Removed ${dutyCode || 'entries'} (${fromDate} to ${toDate})`,
+        previousAssignments: prevStates,
+      });
+    }
+
+    if (count > 0 || shouldRecordClear) {
+      this.saveToStorage();
     }
 
     return count;
@@ -5468,20 +5670,62 @@ export class LocalDatabaseEngine {
       return scope === stateType;
     };
 
-    // 1. Synthesize active multi-day entries (Leave, TDY) only if explicitly active global Leave/TDY and not already tracked
+    // 1. Synthesize active multi-day entries (Leave, TDY) only if explicitly active global Leave/TDY and not cleared
+    const paradeClearRanges: Array<{ id?: string; airId: string; from: string; to: string; dutyCode?: string; ts: number }> = [];
+    (this.db.activityHistory || []).forEach((h: any) => {
+      const actType = String(h?.actionType || h?.type || '').toUpperCase();
+      if (actType === 'CLEAR_RANGE' || actType === 'DELETE_RANGE') {
+        const airId = h.airmanId || h.airman_id;
+        const from = h.fromDate || h.from_date || h.date;
+        const to = h.toDate || h.to_date || from;
+        if (airId && from && to && from <= date && to >= date) {
+          const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase().trim();
+          paradeClearRanges.push({
+            id: h.id,
+            airId: normalizeCanonicalAirmanId(airId) || airId,
+            from,
+            to,
+            dutyCode: rawCode && rawCode !== 'ALL' ? rawCode : undefined,
+            ts: h.timestamp ? Date.parse(h.timestamp) || 0 : 0,
+          });
+        }
+      }
+    });
+
     (this.db.activityHistory || []).forEach((h: any) => {
       const hScope = String(h.disposalScope || 'ALL').toUpperCase();
       if (hScope !== 'ALL' && hScope !== 'A') return;
+      const actType = String(h.actionType || h.type || '').toUpperCase();
+      if (
+        actType === 'CLEAR_RANGE' ||
+        actType === 'DELETE_RANGE' ||
+        actType === 'DELETE_ASSIGNMENT' ||
+        actType === 'SYSTEM_ACTION'
+      ) {
+        return;
+      }
+      const rawNotes = String(h.notes || h.description || '').trim();
+      if (/^Removed\s+/i.test(rawNotes)) return;
+
       const from = h.fromDate || h.from_date || h.date;
       const to = h.toDate || h.to_date || from;
       if (from && to && from <= date && to >= date) {
         const airId = h.airmanId || h.airman_id;
         if (!airId) return;
-        const actType = String(h.actionType || h.type || '').toUpperCase();
         const rawCode = String(h.dutyCode || h.duty_code || '').toUpperCase();
         // Routine daily guard duties (GD, BTF, NTF, IDAC, AIRPORT, etc.) must NEVER be synthesized from history log!
         if (actType === 'GRANT_LEAVE' || rawCode === 'LEAVE' || rawCode === 'TDY') {
           const code = rawCode === 'TDY' ? 'TDY' : 'LEAVE';
+          const hTs = h.timestamp ? Date.parse(h.timestamp) || 0 : 0;
+          const wasClearedAfter = paradeClearRanges.some(
+            (c) =>
+              c.id !== h.id &&
+              this.isSameAirmanId(c.airId, airId) &&
+              c.ts >= hTs &&
+              (!c.dutyCode || c.dutyCode === code)
+          );
+          if (wasClearedAfter) return;
+
           putIntoAssignmentMap(assignmentMap, {
             airmanId: airId,
             date: date,
@@ -6450,15 +6694,34 @@ export class LocalDatabaseEngine {
     if (idx === -1) return false;
 
     const item = this.db.activityHistory[idx];
+    const actType = String(item.actionType || item.type || '').toUpperCase();
+    const isDeleteLog = actType === 'CLEAR_RANGE' || actType === 'DELETE_RANGE' || actType === 'DELETE_ASSIGNMENT';
+    const isLeaveItem =
+      item.dutyCode === 'LEAVE' ||
+      actType === 'GRANT_LEAVE' ||
+      ((item.notes || '') + ' ' + (item.description || '')).toLowerCase().includes('leave');
+    const targetDutyCode: DutyCategoryCode | undefined = item.dutyCode || (isLeaveItem ? 'LEAVE' : undefined);
+
+    const from = item.fromDate || (item as any).date?.split('T')[0] || '';
+    const to = item.toDate || from;
+    const restoredNonSameDates = new Set<string>();
+
     if (Array.isArray(item.previousAssignments)) {
       for (const prev of item.previousAssignments) {
         const monthKey = prev.date.slice(0, 7);
         if (!this.db.assignments[monthKey]) continue;
 
         const list = this.db.assignments[monthKey];
-        const existingIdx = list.findIndex((a) => a.airmanId === prev.airmanId && a.date === prev.date);
+        const existingIdx = list.findIndex((a) => this.isSameAirmanId(a.airmanId, prev.airmanId) && a.date === prev.date);
 
-        if (prev.dutyCode) {
+        // When deleting a Leave/TDY/Duty log, do NOT re-apply an older Leave/TDY of the same type—cancel it completely
+        const shouldRestorePrev =
+          prev.dutyCode &&
+          (isDeleteLog ||
+            (String(prev.dutyCode).toUpperCase() !== String(targetDutyCode || '').toUpperCase() &&
+              !(isLeaveItem && prev.dutyCode === 'LEAVE')));
+
+        if (shouldRestorePrev && prev.dutyCode) {
           const restored: DutyAssignment = {
             airmanId: prev.airmanId,
             date: prev.date,
@@ -6469,19 +6732,82 @@ export class LocalDatabaseEngine {
           };
           if (existingIdx >= 0) list[existingIdx] = restored;
           else list.push(restored);
+          restoredNonSameDates.add(prev.date);
         } else {
-          if (item.dutyCode) {
-            const exactIdx = list.findIndex(a => a.airmanId === prev.airmanId && a.date === prev.date && a.dutyCode === item.dutyCode && (item.idaShift ? a.idaShift === item.idaShift : true));
+          if (targetDutyCode) {
+            const exactIdx = list.findIndex(
+              (a) =>
+                this.isSameAirmanId(a.airmanId, prev.airmanId) &&
+                a.date === prev.date &&
+                String(a.dutyCode || '').toUpperCase() === String(targetDutyCode).toUpperCase() &&
+                (item.idaShift ? a.idaShift === item.idaShift : true)
+            );
             if (exactIdx >= 0) list.splice(exactIdx, 1);
-            else if (existingIdx >= 0) list.splice(existingIdx, 1);
-          } else {
-            if (existingIdx >= 0) list.splice(existingIdx, 1);
+            else if (existingIdx >= 0 && !isDeleteLog) list.splice(existingIdx, 1);
+          } else if (existingIdx >= 0) {
+            list.splice(existingIdx, 1);
           }
         }
       }
     }
 
+    // Also cancel assignments on ALL dates in [from..to] even when previousAssignments is empty/missing (e.g. cloud-synced logs)
+    if (!isDeleteLog && actType !== 'SYSTEM_ACTION' && item.airmanId && from && to) {
+      const datesToCancel = getDatesInRange(from, to);
+      for (const dStr of datesToCancel) {
+        if (restoredNonSameDates.has(dStr)) continue;
+        this.deleteAssignment(item.airmanId, dStr, targetDutyCode, item.idaShift, 'ALL', true);
+      }
+    }
+
     this.db.activityHistory.splice(idx, 1);
+
+    // If a Leave/TDY log was removed, also remove/trim overlapping older Leave/TDY logs for the same airman
+    // so appendSynthesizedLeaveTdy / getParadeState never resurrects cancelled Leave/TDY dates
+    if (!isDeleteLog && (isLeaveItem || targetDutyCode === 'LEAVE' || targetDutyCode === 'TDY') && item.airmanId && from && to) {
+      const cancelCode = targetDutyCode === 'TDY' ? 'TDY' : 'LEAVE';
+      const nextHistory: ActivityHistoryItem[] = [];
+      for (const h of this.db.activityHistory) {
+        if (!h || !this.isSameAirmanId(h.airmanId, item.airmanId)) {
+          nextHistory.push(h);
+          continue;
+        }
+        const hAct = String(h.actionType || h.type || '').toUpperCase();
+        const hCode = String(h.dutyCode || '').toUpperCase();
+        const isPosSameKind =
+          hAct !== 'CLEAR_RANGE' &&
+          hAct !== 'DELETE_RANGE' &&
+          hAct !== 'DELETE_ASSIGNMENT' &&
+          hAct !== 'SYSTEM_ACTION' &&
+          ((cancelCode === 'LEAVE' && (hAct === 'GRANT_LEAVE' || hCode === 'LEAVE')) ||
+            (cancelCode === 'TDY' && hCode === 'TDY'));
+        if (!isPosSameKind) {
+          nextHistory.push(h);
+          continue;
+        }
+        const hFrom = h.fromDate || (h as any).date?.split('T')[0] || '';
+        const hTo = h.toDate || hFrom;
+        if (!hFrom || !hTo || hTo < from || hFrom > to) {
+          nextHistory.push(h);
+          continue;
+        }
+        // Overlapping positive LEAVE/TDY log: keep only portions outside [from..to]
+        if (hFrom < from) {
+          const leftEnd = new Date(Date.parse(from + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+          nextHistory.push({ ...h, toDate: leftEnd });
+        }
+        if (hTo > to) {
+          const rightStart = new Date(Date.parse(to + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+          nextHistory.push({
+            ...h,
+            id: hFrom < from ? `${h.id}_r` : h.id,
+            fromDate: rightStart,
+          });
+        }
+      }
+      this.db.activityHistory = nextHistory;
+    }
+
     this.saveToStorage();
     return true;
   }

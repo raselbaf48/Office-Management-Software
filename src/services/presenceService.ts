@@ -17,6 +17,7 @@ import {
   isDefault155UasuOffice,
 } from '../firebase';
 import { Rank, FlightName } from '../types';
+import { recordFirestoreQuotaUsage } from '../utils/firebaseQuotaTracker';
 
 export interface UserPresence {
   bdNo: string;
@@ -190,6 +191,13 @@ export async function pollPresenceFromCloudOnce(force: boolean = false) {
     lastPresencePollAt = now;
     const activeCodeBefore = getActiveOfficeCode();
     const presenceDocId = getPresenceBundleDocId();
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: 1,
+      reason: 'Poll Active Users Presence',
+      collection: 'app_settings',
+      officeCode: activeCodeBefore,
+    });
     const snap = await getDoc(doc(dbLite, 'app_settings', presenceDocId));
     if (getActiveOfficeCode() !== activeCodeBefore) return;
     const cloudUsers: UserPresence[] = [];
@@ -324,6 +332,12 @@ export const logUserLogin = async (
       try {
         const presenceDocId = getPresenceBundleDocId();
         const payloadUsers = sanitizePresencePayloadList(updated);
+        recordFirestoreQuotaUsage({
+          type: 'WRITE',
+          count: 1,
+          reason: 'Update Active User Presence (Login)',
+          collection: 'app_settings',
+        });
         await setDoc(doc(dbLite, 'app_settings', presenceDocId), {
           settingKey: presenceDocId,
           value: { users: payloadUsers },
@@ -408,6 +422,12 @@ export const updatePresence = async (
                 },
               ];
           const payloadUsers = sanitizePresencePayloadList(listForCloud);
+          recordFirestoreQuotaUsage({
+            type: 'WRITE',
+            count: 1,
+            reason: isLogout ? 'Update Active User Presence (Logout)' : 'Presence Heartbeat / Activity',
+            collection: 'app_settings',
+          });
           await setDoc(doc(dbLite, 'app_settings', presenceDocId), {
             settingKey: presenceDocId,
             value: { users: payloadUsers },
@@ -560,6 +580,13 @@ export const refreshLoginHistoryFromCloud = async (force: boolean = false): Prom
   const docId = getLoginHistoryDocId();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: 1,
+      reason: 'Refresh Office Login History',
+      collection: 'app_settings',
+      officeCode: activeCodeBefore,
+    });
     const snap = await Promise.race([
       getDoc(doc(dbLite, 'app_settings', docId)),
       new Promise<never>((_, reject) => {

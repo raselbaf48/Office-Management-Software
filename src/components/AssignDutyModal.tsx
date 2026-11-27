@@ -180,9 +180,13 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const isMultiDateMode = selectedPresetDays !== 1 && selectedPresetDays !== -1;
 
   // Active duty & flight filters
-  const [activeDutyCode, setActiveDutyCode] = useState<DutyCategoryCode | ''>(
-    onlyIdac ? 'IDAC' : (initialSavedDraft?.activeDutyCode || initialDutyCode || '')
-  );
+  const [activeDutyCode, setActiveDutyCode] = useState<DutyCategoryCode | ''>(() => {
+    const candidate = onlyIdac ? 'IDAC' : (initialSavedDraft?.activeDutyCode || initialDutyCode || '');
+    if (!is155Uasu && ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(candidate))) {
+      return '';
+    }
+    return candidate as DutyCategoryCode | '';
+  });
   const [selectionMode, setSelectionMode] = useState<'DutyFirst' | 'FlightFirst' | 'None'>(
     initialDutyCode ? 'DutyFirst' : (initialFlight !== 'All' ? 'FlightFirst' : 'None')
   );
@@ -434,10 +438,12 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       if (isAdmin && adminFlight) {
         setActiveFlight(adminFlight as FlightName);
       }
-      if (onlyIdac) {
+      if (onlyIdac && is155Uasu) {
         setActiveDutyCode('IDAC');
-      } else if (initialDutyCode) {
+      } else if (initialDutyCode && (is155Uasu || !['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(initialDutyCode)))) {
         setActiveDutyCode(initialDutyCode);
+      } else if (!is155Uasu && ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(String(activeDutyCode))) {
+        setActiveDutyCode('');
       }
     } else {
       lastAutoSelectedDateRef.current = '';
@@ -3190,8 +3196,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
             </div>
           )}
 
-          {/* IDAC Dynamic Shift Picker (Shows detailed airmen for each shift) */}
-          {(onlyIdac || ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) && (
+          {/* IDAC Dynamic Shift Picker (Shows detailed airmen for each shift — 155 UASU only) */}
+          {is155Uasu && (onlyIdac || ['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(activeDutyCode as string)) && (
             <div className="p-3 bg-teal-50/80 dark:bg-teal-950/40 rounded-xl border border-teal-200 dark:border-teal-800 space-y-2 animate-fadeIn">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-black text-teal-950 dark:text-teal-100 flex items-center space-x-1.5">

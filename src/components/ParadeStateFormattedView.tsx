@@ -991,9 +991,11 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
    if (hasData('Tdy')) columns.push({ key: 'tdy', label: 'Tdy' });
    customKeysArray.forEach((ck) => columns.push({ key: `custom:${ck}`, label: ck }));
    if (hasData('Leave')) columns.push({ key: 'leave', label: 'Leave' });
-   columns.push({ key: 'idaMorning', label: 'Morning', group: 'IDA CENTER Duty' });
-   columns.push({ key: 'idaAfternoon', label: 'Afternoon', group: 'IDA CENTER Duty' });
-   columns.push({ key: 'idaNight', label: 'Night', group: 'IDA CENTER Duty' });
+   if (isDefault155UasuOffice()) {
+     columns.push({ key: 'idaMorning', label: 'Morning', group: 'IDA CENTER Duty' });
+     columns.push({ key: 'idaAfternoon', label: 'Afternoon', group: 'IDA CENTER Duty' });
+     columns.push({ key: 'idaNight', label: 'Night', group: 'IDA CENTER Duty' });
+   }
    columns.push({ key: 'dutyOff', label: 'Duty Off' });
    columns.push({ key: 'onParade', label: isPtDocument ? 'On PT' : 'On Parade' });
 
@@ -2212,32 +2214,36 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  });
  };
  
+ const showIdacCols = isDefault155UasuOffice();
+
  return (
  <div className="overflow-x-auto my-1.5">
 
  <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border border-black" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <thead>
  <tr className="text-black font-bold border-b border-black">
- <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Date</th>
- <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Day</th>
- {hasData('Base Security Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Base Security Duty</th>}
- {hasData('Base Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
- {hasData('Najirpara Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
- {hasData('Airfield') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Airfield Duty</th>}
- {hasData('Halishahar Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
- {hasData('Bake & Bite') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Bake & Bite</th>}
- {hasData('Tdy') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Tdy</th>}
- {customKeysArray.map(key => <th key={key} className="border border-black p-1 text-center align-middle" rowSpan={2}>{key}</th>)}
- {hasData('Leave') && <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Leave</th>}
- <th className="border border-black p-1 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
- <th className="border border-black p-1 text-center align-middle" rowSpan={2}>Duty Off</th>
- <th className="border border-black p-1 text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Date</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Day</th>
+ {hasData('Base Security Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Base Security Duty</th>}
+ {hasData('Base Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Base Taskforce Duty</th>}
+ {hasData('Najirpara Taskforce Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Najirpara Taskforce Duty</th>}
+ {hasData('Airfield') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Airfield Duty</th>}
+ {hasData('Halishahar Duty') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Halishahar Duty</th>}
+ {hasData('Bake & Bite') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Bake & Bite</th>}
+ {hasData('Tdy') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Tdy</th>}
+ {customKeysArray.map(key => <th key={key} className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>{key}</th>)}
+ {hasData('Leave') && <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Leave</th>}
+ {showIdacCols && <th className="border border-black p-1 text-center align-middle" colSpan={3}>IDA CENTER Duty</th>}
+ <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Duty Off</th>
+ <th className="border border-black p-1 text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
  </tr>
+ {showIdacCols && (
  <tr className="text-black font-bold border-b border-black">
  <th className="border border-black p-1 text-center align-middle">Morning</th>
  <th className="border border-black p-1 text-center align-middle">Afternoon</th>
  <th className="border border-black p-1 text-center align-middle">Night</th>
  </tr>
+ )}
  </thead>
  <tbody>
  {datesInRange.map((dStr) => {
@@ -2351,6 +2357,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  {hasData('Leave') && <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(leave, false, true)}
  </td>}
+ {showIdacCols && (
+ <>
  <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaMorn)}
  </td>
@@ -2360,6 +2368,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaNight)}
  </td>
+ </>
+ )}
  <td className="border border-black p-1.5 text-center align-middle">
  {renderAirmanColumnList(dutyOff, true)}
  </td>

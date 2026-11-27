@@ -24,6 +24,7 @@ import {
 import firebaseConfigData from '../firebase-applet-config.json';
 import { getRawLocalStorageItem, setRawLocalStorageItem } from './utils/safeStorage';
 import { syncDynamicOfficePwaManifest, applyBrowserFaviconToHead, generateSizedPwaIcons } from './utils/dynamicPwaManifest';
+import { recordFirestoreQuotaUsage, markFirebaseQuotaExceededEvent } from './utils/firebaseQuotaTracker';
 
 // ============================================================================
 // 1. MASTER OWNER CONFIGURATION & CONSTANTS
@@ -31,12 +32,16 @@ import { syncDynamicOfficePwaManifest, applyBrowserFaviconToHead, generateSizedP
 // ============================================================================
 export const MASTER_USER_ID = '48456';
 export const MASTER_USER_PIN = 'YOUR_MASTER_PIN';
+export const DEFAULT_MASTER_NAME = 'System Master Owner';
+export const DEFAULT_MASTER_RANK = 'MWO';
 export const MASTER_CREDENTIALS_STORAGE_KEY = 'baf_master_credentials_v1';
 export const REMOVED_OFFICES_STORAGE_KEY = 'baf_removed_office_codes_v1';
 
 export interface MasterCredentials {
   masterUserId: string;
   masterPin: string;
+  masterName?: string;
+  masterRank?: string;
   isCustomPin?: boolean;
   updatedAt?: string;
 }
@@ -51,6 +56,8 @@ export function getMasterCredentials(): MasterCredentials {
           return {
             masterUserId: String(parsed.masterUserId).trim() || MASTER_USER_ID,
             masterPin: String(parsed.masterPin || '48456').trim() || '48456',
+            masterName: String(parsed.masterName || DEFAULT_MASTER_NAME).trim() || DEFAULT_MASTER_NAME,
+            masterRank: String(parsed.masterRank || DEFAULT_MASTER_RANK).trim() || DEFAULT_MASTER_RANK,
             isCustomPin: Boolean(parsed.isCustomPin),
             updatedAt: parsed.updatedAt,
           };
@@ -61,6 +68,8 @@ export function getMasterCredentials(): MasterCredentials {
   return {
     masterUserId: MASTER_USER_ID,
     masterPin: MASTER_USER_PIN === 'YOUR_MASTER_PIN' ? '48456' : MASTER_USER_PIN,
+    masterName: DEFAULT_MASTER_NAME,
+    masterRank: DEFAULT_MASTER_RANK,
     isCustomPin: false,
   };
 }
@@ -71,6 +80,14 @@ export function getMasterUserId(): string {
 
 export function getMasterUserPin(): string {
   return getMasterCredentials().masterPin || '48456';
+}
+
+export function getMasterDisplayName(): string {
+  return getMasterCredentials().masterName || DEFAULT_MASTER_NAME;
+}
+
+export function getMasterDisplayRank(): string {
+  return getMasterCredentials().masterRank || DEFAULT_MASTER_RANK;
 }
 
 export const MASTER_OWNER_CONFIG = {
@@ -436,6 +453,12 @@ export function savePrimary155FirebaseOverride(
   }
   if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: 'Save Primary 155 Firebase Override',
+      collection: 'app_settings',
+    });
     setDoc(
       doc(masterDbInstance, 'app_settings', PRIMARY_155_FIREBASE_OVERRIDE_KEY),
       {
@@ -1421,6 +1444,12 @@ export function saveMasterCloudPool(shards: CloudPoolShard[], syncToCloud: boole
   }
   if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: 'Save Master Cloud Pool Shards',
+      collection: 'app_settings',
+    });
     setDoc(
       doc(masterDbInstance, 'app_settings', MASTER_CLOUD_POOL_KEY),
       {
@@ -1450,6 +1479,12 @@ export async function fetchMasterCloudPoolFromCloud(force: boolean = false): Pro
   inFlightCloudPoolPromise = (async () => {
     try {
       lastCloudPoolFetchAt = markMasterCooldownTimestamp('baf_cd_cloud_pool');
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Fetch Master Cloud Pool Shards',
+        collection: 'app_settings',
+      });
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', MASTER_CLOUD_POOL_KEY));
       if (snap.exists()) {
         const d = snap.data();
@@ -1694,6 +1729,12 @@ export async function reassignOfficeToCloudConfig(
   if (masterDbInstance && !isFirestoreQuotaExceeded() && matchedRecord) {
     try {
       const snap = await getDocs(collection(masterDbInstance, 'registered_offices'));
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: Math.max(1, snap.size),
+        reason: 'Reassign Office Cloud Config Lookup',
+        collection: 'registered_offices',
+      });
       const updates: Promise<any>[] = [];
       snap.forEach((docSnap) => {
         const d = docSnap.data() as RegisteredOfficeRecord;
@@ -1704,6 +1745,12 @@ export async function reassignOfficeToCloudConfig(
           .trim();
         const dCode = rawDCode === '155UASU' || rawDCode === '155-UASU-BAF' ? '155-UASU' : rawDCode;
         if (dCode === code) {
+          recordFirestoreQuotaUsage({
+            type: 'WRITE',
+            count: 1,
+            reason: 'Update Office Firebase Config',
+            collection: 'registered_offices',
+          });
           updates.push(
             setDoc(
               doc(masterDbInstance!, 'registered_offices', docSnap.id),
@@ -2156,6 +2203,12 @@ export async function registerOfficeInMasterTelemetry(
           createdAt: record.createdAt,
           lastActive: record.lastActive,
         };
+        recordFirestoreQuotaUsage({
+          type: 'WRITE',
+          count: 1,
+          reason: 'Register Office Master Telemetry',
+          collection: 'registered_offices',
+        });
         await setDoc(doc(masterDbInstance, 'registered_offices', safeDocId), firestorePayload, { merge: true });
       } catch (err) {
         if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true, (err as any)?.message);
@@ -2186,7 +2239,9 @@ export async function updateOfficeTelemetryUserCount(totalUsers: number): Promis
 
 export async function saveMasterCredentials(
   newMasterUserId: string,
-  newMasterPin: string
+  newMasterPin: string,
+  newMasterName?: string,
+  newMasterRank?: string
 ): Promise<MasterCredentials> {
   const cleanId = String(newMasterUserId || '').replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
   const cleanPin = String(newMasterPin || '').trim();
@@ -2196,19 +2251,55 @@ export async function saveMasterCredentials(
   if (!cleanPin) {
     throw new Error('Master PIN cannot be empty.');
   }
+  const existing = getMasterCredentials();
+  const cleanName =
+    newMasterName !== undefined
+      ? String(newMasterName).trim() || DEFAULT_MASTER_NAME
+      : existing.masterName || DEFAULT_MASTER_NAME;
+  const cleanRank =
+    newMasterRank !== undefined
+      ? String(newMasterRank).trim() || DEFAULT_MASTER_RANK
+      : existing.masterRank || DEFAULT_MASTER_RANK;
+
   const nowIso = new Date().toISOString();
   const creds: MasterCredentials = {
     masterUserId: cleanId,
     masterPin: cleanPin,
+    masterName: cleanName,
+    masterRank: cleanRank,
     isCustomPin: true,
     updatedAt: nowIso,
   };
   if (typeof window !== 'undefined') {
     setRawLocalStorageItem(MASTER_CREDENTIALS_STORAGE_KEY, JSON.stringify(creds));
+    // Live-sync active session if Master Owner is currently signed in
+    try {
+      const rawSess = window.sessionStorage?.getItem('baf_user_session');
+      if (rawSess) {
+        const parsedSess = JSON.parse(rawSess);
+        if (parsedSess && (parsedSess.systemRole === 'master_owner' || parsedSess.isProtected === true)) {
+          const updatedSess = {
+            ...parsedSess,
+            userId: cleanId,
+            bdNo: cleanId,
+            name: cleanName,
+            rank: cleanRank,
+          };
+          window.sessionStorage.setItem('baf_user_session', JSON.stringify(updatedSess));
+          window.dispatchEvent(new CustomEvent('baf_user_session_changed', { detail: updatedSess }));
+        }
+      }
+    } catch {}
     window.dispatchEvent(new CustomEvent('baf_master_credentials_updated', { detail: creds }));
   }
   if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     try {
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: 1,
+        reason: 'Save Master Credentials & Profile',
+        collection: 'app_settings',
+      });
       await setDoc(
         doc(masterDbInstance, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY),
         {
@@ -2267,6 +2358,12 @@ export async function syncMasterCredentialsFromCloud(force = false): Promise<Mas
   inFlightMasterCredsPromise = (async () => {
     try {
       lastMasterCredsSyncAt = markMasterCooldownTimestamp('baf_cd_master_creds');
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Sync Master Credentials from Cloud',
+        collection: 'app_settings',
+      });
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', MASTER_CREDENTIALS_STORAGE_KEY));
       if (snap.exists()) {
         const data = snap.data();
@@ -2280,6 +2377,8 @@ export async function syncMasterCredentialsFromCloud(force = false): Promise<Mas
               const next: MasterCredentials = {
                 masterUserId: String(parsed.masterUserId).trim(),
                 masterPin: String(parsed.masterPin).trim(),
+                masterName: String(parsed.masterName || local.masterName || DEFAULT_MASTER_NAME).trim() || DEFAULT_MASTER_NAME,
+                masterRank: String(parsed.masterRank || local.masterRank || DEFAULT_MASTER_RANK).trim() || DEFAULT_MASTER_RANK,
                 isCustomPin: Boolean(parsed.isCustomPin ?? true),
                 updatedAt: parsed.updatedAt || new Date().toISOString(),
               };
@@ -2324,6 +2423,12 @@ function saveRemovedOfficeCodes(codes: string[], syncToCloud: boolean = true): v
   }
   if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: 'Save Removed Offices Registry',
+      collection: 'app_settings',
+    });
     setDoc(
       doc(masterDbInstance, 'app_settings', REMOVED_OFFICES_STORAGE_KEY),
       {
@@ -2415,6 +2520,12 @@ export async function toggleRegisteredOfficeStatus(
   if (masterDbInstance && !isFirestoreQuotaExceeded()) {
     getDocs(collection(masterDbInstance, 'registered_offices'))
       .then((snap) => {
+        recordFirestoreQuotaUsage({
+          type: 'READ',
+          count: Math.max(1, snap.size),
+          reason: 'Toggle Office Status Lookup',
+          collection: 'registered_offices',
+        });
         const updates: Promise<any>[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data() as RegisteredOfficeRecord;
@@ -2425,6 +2536,12 @@ export async function toggleRegisteredOfficeStatus(
             .trim();
           const dCode = rawDCode === '155-UASU-BAF' ? '155-UASU' : rawDCode;
           if (dCode === code || rawDCode === code) {
+            recordFirestoreQuotaUsage({
+              type: 'WRITE',
+              count: 1,
+              reason: 'Update Office Active/Disabled Status',
+              collection: 'registered_offices',
+            });
             updates.push(
               setDoc(
                 doc(masterDbInstance!, 'registered_offices', docSnap.id),
@@ -2513,6 +2630,12 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
     const nowIso = new Date().toISOString();
     getDocs(collection(masterDbInstance, 'registered_offices'))
       .then((snap) => {
+        recordFirestoreQuotaUsage({
+          type: 'READ',
+          count: Math.max(1, snap.size),
+          reason: 'Remove Office Telemetry Lookup',
+          collection: 'registered_offices',
+        });
         const updates: Promise<any>[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data() as RegisteredOfficeRecord;
@@ -2523,6 +2646,12 @@ export async function removeRegisteredOffice(officeCodeInput: string): Promise<v
             .trim();
           const normCode = dCode === '155-UASU-BAF' ? '155-UASU' : dCode;
           if (dCode === code || normCode === code) {
+            recordFirestoreQuotaUsage({
+              type: 'WRITE',
+              count: 1,
+              reason: 'Soft-Remove Registered Office',
+              collection: 'registered_offices',
+            });
             updates.push(
               setDoc(
                 doc(masterDbInstance!, 'registered_offices', docSnap.id),
@@ -2729,6 +2858,13 @@ export async function fetchOfficeLoginHistory(officeCodeInput?: string): Promise
   let cloudLogs: any[] = [];
   if (targetDb && !isFirestoreQuotaExceeded()) {
     try {
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Fetch Office Login History',
+        collection: 'app_settings',
+        officeCode: code,
+      });
       const snap = await getDoc(doc(targetDb, 'app_settings', cloudDocId));
       if (snap.exists()) {
         const d = snap.data() as any;
@@ -2788,6 +2924,13 @@ export async function clearOfficeLoginHistoryByCode(officeCodeInput?: string): P
     }
     const targetDb = resolveDbForOfficeCode(code);
     if (targetDb && !isFirestoreQuotaExceeded()) {
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: 1,
+        reason: 'Clear Office Login History',
+        collection: 'app_settings',
+        officeCode: code,
+      });
       setDoc(
         doc(targetDb, 'app_settings', cloudDocId),
         {
@@ -2944,6 +3087,12 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
       });
 
       try {
+        recordFirestoreQuotaUsage({
+          type: 'READ',
+          count: 1,
+          reason: 'Check Removed Offices List',
+          collection: 'app_settings',
+        });
         const remSnap = await getDoc(doc(masterDbInstance!, 'app_settings', REMOVED_OFFICES_STORAGE_KEY));
         if (remSnap.exists()) {
           const d = remSnap.data();
@@ -2966,6 +3115,12 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
       }
 
       try {
+        recordFirestoreQuotaUsage({
+          type: 'READ',
+          count: 1,
+          reason: 'Check Primary Office Firebase Override',
+          collection: 'app_settings',
+        });
         const overrideSnap = await getDoc(doc(masterDbInstance!, 'app_settings', PRIMARY_155_FIREBASE_OVERRIDE_KEY));
         if (overrideSnap.exists()) {
           const od = overrideSnap.data();
@@ -2990,6 +3145,12 @@ export async function fetchRegisteredOfficesFromMaster(force = false): Promise<R
 
       try {
         const snap = await getDocs(collection(masterDbInstance!, 'registered_offices'));
+        recordFirestoreQuotaUsage({
+          type: 'READ',
+          count: Math.max(1, snap.size),
+          reason: 'Fetch Registered Offices Directory',
+          collection: 'registered_offices',
+        });
         const poolShards = getMasterCloudPoolLocal();
         snap.forEach((docSnap) => {
           const d = docSnap.data() as RegisteredOfficeRecord;
@@ -3112,6 +3273,12 @@ export function saveGlobalUserOfficeMap(
 
   if (syncToCloud && !isUnchanged && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: 'Save Global User-Office Map',
+      collection: 'app_settings',
+    });
     setDoc(
       doc(masterDbInstance, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY),
       {
@@ -3831,6 +3998,12 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
       }
 
       // 2. Fetch single document app_settings/baf_global_user_office_map_v1 (1 read instead of N user_profiles reads)
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Fetch Global User-Office Map',
+        collection: 'app_settings',
+      });
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', GLOBAL_USER_OFFICE_MAP_KEY));
       if (snap.exists()) {
         const data = snap.data();
@@ -3860,6 +4033,12 @@ export async function syncGlobalUserOfficeMapFromCloud(force: boolean = false): 
           return null;
         });
         if (usersSnap) {
+          recordFirestoreQuotaUsage({
+            type: 'READ',
+            count: Math.max(1, usersSnap.size),
+            reason: 'Full Scan user_profiles Directory',
+            collection: 'user_profiles',
+          });
           usersSnap.forEach((docSnap) => {
             const docId = docSnap.id;
             const d = docSnap.data() as any;
@@ -4018,6 +4197,12 @@ export function savePendingOfficeRequestsLocal(
 
   if (syncToCloud && masterDbInstance && !isFirestoreQuotaExceeded()) {
     const nowIso = new Date().toISOString();
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: 'Save Pending Office Requests',
+      collection: 'app_settings',
+    });
     setDoc(
       doc(masterDbInstance, 'app_settings', PENDING_OFFICE_REQUESTS_KEY),
       {
@@ -4056,6 +4241,12 @@ export async function fetchPendingOfficeRequestsFromMaster(force: boolean = fals
 
     try {
       lastPendingRequestsFetchAt = markMasterCooldownTimestamp('baf_cd_pending_reqs');
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Fetch Pending Office Approval Requests',
+        collection: 'app_settings',
+      });
       const snap = await getDoc(doc(masterDbInstance!, 'app_settings', PENDING_OFFICE_REQUESTS_KEY));
       if (snap.exists()) {
         const data = snap.data();
@@ -4526,6 +4717,13 @@ export async function approveOfficeRegistrationRequest(
         changedCollections: ['airmen', 'user_profiles', 'app_settings'],
       };
 
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: 8,
+        reason: 'Seed Approved Office Cloud Workspace',
+        collection: 'office_bundles',
+        officeCode: safeCode,
+      });
       Promise.all([
         setDoc(doc(targetOfficeDb, 'airmen', safeAirmanDocId), firestoreAirmanPayload, { merge: true }),
         setDoc(doc(targetOfficeDb, 'user_profiles', safeUserDocId), firestoreUserPayload, { merge: true }),
@@ -4911,6 +5109,7 @@ export function setFirestoreQuotaExceeded(exceeded: boolean = false, errorMsg?: 
   const prev = quotaExceededMemory;
   quotaExceededMemory = exceeded;
   quotaExceededAtMemory = exceeded ? Date.now() : 0;
+  markFirebaseQuotaExceededEvent(exceeded, errorMsg);
 
   if (typeof window !== 'undefined') {
     try {
@@ -4979,6 +5178,12 @@ export async function testConnection(): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: 1,
+      reason: 'Connection Health Check',
+      collection: 'test',
+    });
     await Promise.race([
       getDoc(doc(officeDbInstance, 'test', 'connection')),
       new Promise<never>((_, reject) => {

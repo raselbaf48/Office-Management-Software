@@ -1635,6 +1635,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const showBakeBite = hasData('Bake & Bite');
  const showTdy = hasData('Tdy');
  const showLeave = hasData('Leave');
+ const showIdacCols = isDefault155UasuOffice();
 
  const flexColWeights: number[] = [
  ...(showBaseSec ? [1.0] : []),
@@ -1646,9 +1647,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  ...(showTdy ? [0.8] : []),
  ...customKeysArray.map(() => 0.9),
  ...(showLeave ? [0.95] : []),
- 0.85, // IDA Morning
- 0.85, // IDA Afternoon
- 0.85, // IDA Night
+ ...(showIdacCols ? [0.85, 0.85, 0.85] : []), // IDA Morning, Afternoon, Night
  1.4,  // Duty Off
  1.25, // On Parade
  ];
@@ -1681,26 +1680,28 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  </colgroup>
  <thead>
  <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-slate-600">
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Date</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Day</th>
- {showBaseSec && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Base Security Duty</th>}
- {showBtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Base Taskforce Duty</th>}
- {showNtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Najirpara Taskforce Duty</th>}
- {showAirfield && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Airfield Duty</th>}
- {showHalishahar && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Halishahar Duty</th>}
- {showBakeBite && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Bake & Bite</th>}
- {showTdy && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Tdy</th>}
- {customKeysArray.map(key => <th key={key} className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>{key}</th>)}
- {showLeave && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Leave</th>}
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" colSpan={3}>IDA CENTER Duty</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>Duty Off</th>
- <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={2}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Date</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Day</th>
+ {showBaseSec && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Base Security Duty</th>}
+ {showBtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Base Taskforce Duty</th>}
+ {showNtf && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Najirpara Taskforce Duty</th>}
+ {showAirfield && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Airfield Duty</th>}
+ {showHalishahar && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Halishahar Duty</th>}
+ {showBakeBite && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Bake & Bite</th>}
+ {showTdy && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Tdy</th>}
+ {customKeysArray.map(key => <th key={key} className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>{key}</th>)}
+ {showLeave && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Leave</th>}
+ {showIdacCols && <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" colSpan={3}>IDA CENTER Duty</th>}
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>Duty Off</th>
+ <th className="border border-slate-800 dark:border-slate-700 p-1.5 whitespace-normal break-words leading-tight text-center align-middle" rowSpan={showIdacCols ? 2 : 1}>{isPtDocument ? 'On PT' : 'On Parade'}</th>
  </tr>
+ {showIdacCols && (
  <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-slate-600">
  <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Morning</th>
  <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Afternoon</th>
  <th className="border border-slate-800 dark:border-slate-700 p-1 whitespace-normal break-words leading-tight text-center align-middle">Night</th>
  </tr>
+ )}
  </thead>
  <tbody>
  {datesInRange.map((dStr) => {
@@ -1812,6 +1813,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  {hasData('Leave') && <td className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle">
  {renderAirmanColumnList(leave)}
  </td>}
+ {showIdacCols && (
+ <>
  <td className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaMorn)}
  </td>
@@ -1821,6 +1824,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <td className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle">
  {renderAirmanColumnList(idaNight)}
  </td>
+ </>
+ )}
  <td className="border border-slate-800 dark:border-slate-700 p-1.5 text-center align-middle">
  {renderAirmanColumnList(dutyOff, true)}
  </td>

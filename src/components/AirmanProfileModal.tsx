@@ -471,18 +471,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
       finalNotes = destToUse;
       finalDutyCode = 'TDY';
     } else if (bucket === 'LEAVE') {
-      const fullTypeName =
-        editLeaveType === 'Casual'
-          ? 'Casual Leave'
-          : editLeaveType === 'Annual'
-          ? 'Annual Leave'
-          : editLeaveType === 'Sick'
-          ? 'Sick Leave'
-          : editLeaveType === 'Recreation'
-          ? 'Recreation Leave'
-          : 'Leave';
-      const f295Extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
-      finalNotes = f295Extra > 0 ? `${fullTypeName} (F-295: ${f295Extra} Free Days)` : fullTypeName;
+      // Final notes will be computed after merging overlapping/adjacent leave groups
       finalDutyCode = 'LEAVE';
     } else if (bucket === 'DEPL') {
       const destToUse = (editDepLocation === 'Custom' ? editDepCustomLocation : editDepLocation).trim();
@@ -502,21 +491,178 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
     setSavingEdit(true);
     setErrorMsg('');
     try {
-      const distinctCodes = Array.from(new Set(editingGroup.map((a) => a.dutyCode).filter(Boolean)));
-      for (const code of distinctCodes) {
-        await fetch('/api/roster/delete-range', {
+      const origFrom = editingGroup[0].date;
+      const origTo = editingGroup[editingGroup.length - 1].date;
+      const editingDateSet = new Set(editingGroup.map((a) => a.date));
+
+      let mergedFrom = editFromDate;
+      let mergedTo = editToDate;
+      const monthAssignmentsCache = new Map<string, DutyAssignment[]>();
+
+      const getMonthsBetween = (startIso: string, endIso: string): string[] => {
+        const resMonths: string[] = [];
+        const [sy, sm] = startIso.slice(0, 7).split('-').map(Number);
+        const [ey, em] = endIso.slice(0, 7).split('-').map(Number);
+        let cy = sy;
+        let cm = sm;
+        while (cy < ey || (cy === ey && cm <= em)) {
+          resMonths.push(`${cy}-${String(cm).padStart(2, '0')}`);
+          cm++;
+          if (cm > 12) {
+            cm = 1;
+            cy++;
+          }
+          if (resMonths.length > 24) break;
+        }
+        return resMonths;
+      };
+
+      const ensureMonthsLoaded = async (startIso: string, endIso: string) => {
+        const mList = getMonthsBetween(startIso, endIso);
+        const missing = mList.filter((m) => !monthAssignmentsCache.has(m));
+        if (missing.length === 0) return;
+        await Promise.all(
+          missing.map(async (mKey) => {
+            try {
+              const r = await fetch(`/api/roster?month=${mKey}`);
+              if (!r.ok) {
+                monthAssignmentsCache.set(mKey, []);
+                return;
+              }
+              const data = await r.json();
+              const rawList: DutyAssignment[] = Array.isArray(data?.assignments)
+                ? data.assignments
+                : Array.isArray(data)
+                ? data
+                : [];
+              const mine = rawList.filter(
+                (a) =>
+                  a &&
+                  a.date &&
+                  getGroupBucket(a.dutyCode) === bucket &&
+                  (matchAirmanId(a.airmanId, airman.id) || (airman.bdNo ? matchAirmanId(a.airmanId, airman.bdNo) : false))
+              );
+              monthAssignmentsCache.set(mKey, mine);
+            } catch {
+              monthAssignmentsCache.set(mKey, []);
+            }
+          })
+        );
+      };
+
+      // Find all contiguous/overlapping same-bucket groups (across months if needed) and merge into one unified span
+      const absorbedGroups: DutyAssignment[][] = [];
+      const absorbedKeys = new Set<string>();
+      let expanded = true;
+      let guard = 0;
+      while (expanded && guard < 10) {
+        guard++;
+        expanded = false;
+        const probeStart = addDaysToIso(mergedFrom, -1);
+        const probeEnd = addDaysToIso(mergedTo, 1);
+        await ensureMonthsLoaded(probeStart, probeEnd);
+
+        const candidateItems: DutyAssignment[] = [];
+        monthAssignmentsCache.forEach((items) => {
+          items.forEach((item) => {
+            if (!editingDateSet.has(item.date)) {
+              candidateItems.push(item);
+            }
+          });
+        });
+
+        const candidateGroups = getGroupedList(candidateItems);
+        for (const grp of candidateGroups) {
+          if (!grp || grp.length === 0) continue;
+          const gStart = grp[0].date;
+          const gEnd = grp[grp.length - 1].date;
+          const grpKey = `${gStart}_${gEnd}`;
+          if (absorbedKeys.has(grpKey)) continue;
+
+          if (gEnd >= probeStart && gStart <= probeEnd) {
+            absorbedKeys.add(grpKey);
+            absorbedGroups.push(grp);
+            if (gStart < mergedFrom) {
+              mergedFrom = gStart;
+              expanded = true;
+            }
+            if (gEnd > mergedTo) {
+              mergedTo = gEnd;
+              expanded = true;
+            }
+          }
+        }
+      }
+
+      if (bucket === 'LEAVE') {
+        const mergedCalendarDays = Math.max(
+          1,
+          Math.round((parseIsoToUtcMs(mergedTo) - parseIsoToUtcMs(mergedFrom)) / (1000 * 3600 * 24)) + 1
+        );
+        const effectiveLeaveType =
+          mergedCalendarDays > 10 && editLeaveType === 'Casual' ? 'Annual' : editLeaveType;
+        const fullTypeName =
+          effectiveLeaveType === 'Casual'
+            ? 'Casual Leave'
+            : effectiveLeaveType === 'Annual'
+            ? 'Annual Leave'
+            : effectiveLeaveType === 'Sick'
+            ? 'Sick Leave'
+            : effectiveLeaveType === 'Recreation'
+            ? 'Recreation Leave'
+            : 'Leave';
+        const f295Extra = editIncludeF295 ? (editF295Option === '2' ? 2 : editF295Option === '3' ? 3 : editF295CustomDays) : 0;
+        finalNotes = f295Extra > 0 ? `${fullTypeName} (F-295: ${f295Extra} Free Days)` : fullTypeName;
+      }
+
+      const deleteTargetRange = async (fromD: string, toD: string, code: string) => {
+        const delRes = await fetch('/api/roster/delete-range', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             airmanId: airman.id,
-            fromDate: editingGroup[0].date,
-            toDate: editingGroup[editingGroup.length - 1].date,
+            fromDate: fromD,
+            toDate: toD,
             dutyCode: code,
             disposalScope: 'ALL',
           }),
         });
+        if (!delRes.ok) {
+          const errJson = await delRes.json().catch(() => ({}));
+          throw new Error(errJson?.error || 'Failed to update entry');
+        }
+      };
+
+      // 1. Delete original edited group
+      const distinctCodes: string[] = Array.from(
+        new Set(editingGroup.map((a: DutyAssignment) => String(a.dutyCode || '')).filter(Boolean))
+      );
+      for (const code of distinctCodes) {
+        await deleteTargetRange(origFrom, origTo, code);
       }
 
+      // 2. Delete any absorbed adjacent/overlapping groups and clean entire merged span so old notes/F-295 don't remain
+      for (const grp of absorbedGroups) {
+        const grpCodes: string[] = Array.from(
+          new Set(grp.map((a: DutyAssignment) => String(a.dutyCode || '')).filter(Boolean))
+        );
+        for (const code of grpCodes) {
+          await deleteTargetRange(grp[0].date, grp[grp.length - 1].date, code);
+        }
+      }
+      const spanCleanupCodes =
+        bucket === 'DEPL'
+          ? DEPLOYMENT_DUTY_CODES
+          : bucket === 'LEAVE'
+          ? ['LEAVE']
+          : bucket === 'TDY'
+          ? ['TDY']
+          : [finalDutyCode];
+      for (const code of spanCleanupCodes) {
+        await deleteTargetRange(mergedFrom, mergedTo, code);
+      }
+
+      // 3. Assign unified merged range
       const res = await fetch('/api/roster/assign-range', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -524,13 +670,19 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
           airmanId: airman.id,
           dutyCode: finalDutyCode,
           idaShift: editingGroup[0].idaShift,
-          fromDate: editFromDate,
-          toDate: editToDate,
+          fromDate: mergedFrom,
+          toDate: mergedTo,
           notes: finalNotes,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to update entry');
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson?.error || 'Failed to update entry');
+      }
+
+      if (mergedFrom < fromDate) setFromDate(mergedFrom);
+      if (mergedTo > toDate) setToDate(mergedTo);
 
       setEditingGroup(null);
       setRefreshKey((prev) => prev + 1);
@@ -566,7 +718,10 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
             disposalScope: 'ALL',
           }),
         });
-        if (!res.ok) throw new Error('Failed to delete entry');
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson?.error || 'Failed to delete entry');
+        }
       }
 
       setEditingGroup(null);
@@ -938,7 +1093,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
 
           <div className="flex items-center space-x-2">
             
-            {allowEditDelete && onEditAirman && !historyOnly && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && (
+            {allowEditDelete && onEditAirman && !historyOnly && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER' || role === 'master_owner') && (
               <button
                 onClick={() => { onClose(); onEditAirman(airman); }}
                 className="p-2 rounded-xl text-emerald-400 hover:text-white hover:bg-slate-800 transition-colors"
@@ -948,7 +1103,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
               </button>
             )}
             
-            {allowEditDelete && onRemoveAirman && !historyOnly && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && (
+            {allowEditDelete && onRemoveAirman && !historyOnly && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER' || role === 'master_owner') && (
               <button
                 onClick={() => setShowDeleteConfirm(true)}
                 className="p-2 rounded-xl text-red-500 hover:text-white hover:bg-red-500/20 transition-colors ml-1"
@@ -1752,23 +1907,27 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                     </div>
                     
                     {showDeleteGroupConfirm && (
-                      <div className="absolute inset-0 bg-white/95 dark:bg-slate-800/95 z-20 flex flex-col items-center justify-center p-6 text-center rounded-xl backdrop-blur-sm shadow-xl">
-                        <Trash2 className="w-10 h-10 text-red-500 mb-3" />
-                        <h4 className="text-lg font-bold text-slate-900 dark:text-white mb-2">Remove Entry?</h4>
-                        <p className="text-slate-600 dark:text-slate-400 text-sm font-medium mb-6">Are you sure you want to completely remove this entry?</p>
-                        <div className="flex w-full space-x-3">
-                          <button
-                            onClick={() => setShowDeleteGroupConfirm(false)}
-                            className="flex-1 px-4 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-white rounded-lg text-sm font-bold transition-colors"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={confirmDeleteGroup}
-                            className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors shadow-sm"
-                          >
-                            Remove
-                          </button>
+                      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4">
+                        <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 max-w-sm w-full text-center shadow-2xl border border-slate-200 dark:border-slate-700">
+                          <Trash2 className="w-10 h-10 text-red-500 mx-auto mb-3" />
+                          <h4 className="text-lg font-bold text-slate-900 dark:text-white mb-2">Remove Entry?</h4>
+                          <p className="text-slate-600 dark:text-slate-400 text-sm font-medium mb-6">Are you sure you want to completely remove this entry?</p>
+                          <div className="flex w-full space-x-3">
+                            <button
+                              type="button"
+                              onClick={() => setShowDeleteGroupConfirm(false)}
+                              className="flex-1 px-4 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-white rounded-lg text-sm font-bold transition-colors cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={confirmDeleteGroup}
+                              className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors shadow-sm cursor-pointer"
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -2260,7 +2419,7 @@ export const AirmanProfileModal: React.FC<AirmanProfileModalProps> = ({ airman, 
                         <span className="font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
                           #{airman.seniority !== undefined ? airman.seniority : 'Auto'}
                         </span>
-                        {allowEditDelete && onEditAirman && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') && (
+                        {allowEditDelete && onEditAirman && (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER' || role === 'master_owner') && (
                           <button
                             type="button"
                             onClick={() => { onClose(); onEditAirman(airman); }}

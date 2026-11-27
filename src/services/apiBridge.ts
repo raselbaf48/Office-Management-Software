@@ -236,7 +236,7 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
         return { canAssign: true, canEdit: true, canDelete: true };
       }
       const role = (session?.assignedRole as any) || 'ADMIN';
-      if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') {
+      if (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER' || role === 'master_owner') {
         return { canAssign: true, canEdit: true, canDelete: true };
       }
       let flight = targetFlight;
@@ -310,7 +310,7 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
 
     if (pathname === '/api/roster/clear-all') {
       const session = getCurrentUserSession();
-      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN' && session?.assignedRole !== 'master_owner') {
         return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can clear all duties' }, 403);
       }
       localDb.resetToEmptyRoster();
@@ -319,7 +319,7 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
 
     if (pathname === '/api/roster/clear-month') {
       const session = getCurrentUserSession();
-      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN' && session?.assignedRole !== 'master_owner') {
         return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can clear monthly duties' }, 403);
       }
       const { monthKey } = body || {};
@@ -331,7 +331,7 @@ async function handleLocalApiRequest(urlStr: string, init?: RequestInit): Promis
 
     if (pathname === '/api/roster/reset-official') {
       const session = getCurrentUserSession();
-      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN') {
+      if (session?.assignedRole !== 'OWNER' && session?.assignedRole !== 'SUPER_ADMIN' && session?.assignedRole !== 'master_owner') {
         return jsonResponse({ error: 'Permission denied: Only Super Admin and Owner can reset official data' }, 403);
       }
       localDb.resetToOfficialData();

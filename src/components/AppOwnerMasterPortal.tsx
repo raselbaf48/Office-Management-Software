@@ -44,6 +44,10 @@ import {
   Pause,
   Mail,
   Pencil,
+  Gauge,
+  BarChart3,
+  User,
+  Award,
 } from 'lucide-react';
 import { Logo155UASU } from './Logo155UASU';
 import {
@@ -64,6 +68,8 @@ import {
   MASTER_USER_PIN,
   getMasterCredentials,
   getMasterUserId,
+  getMasterDisplayName,
+  getMasterDisplayRank,
   saveMasterCredentials,
   syncMasterCredentialsFromCloud,
   RegisteredOfficeTelemetry,
@@ -111,6 +117,13 @@ import {
 } from '../utils/authSession';
 import { localDb } from '../services/localDatabase';
 import { Airman } from '../types';
+import {
+  getFirebaseQuotaTelemetrySnapshot,
+  subscribeFirebaseQuotaTelemetry,
+  resetFirebaseQuotaTelemetry,
+  FIREBASE_DAILY_LIMITS,
+  FirebaseQuotaTelemetrySnapshot,
+} from '../utils/firebaseQuotaTracker';
 
 interface AppOwnerMasterPortalProps {
   isOpen: boolean;
@@ -166,7 +179,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     getRegisteredOfficesLocal()
   );
 
-  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'cloud_pool' | 'maintenance' | 'settings'>(() => {
+  const [activeTab, setActiveTab] = useState<'offices' | 'approvals' | 'cloud_pool' | 'cloud_quota' | 'maintenance' | 'settings'>(() => {
     const initialReqs = getPendingOfficeRequestsLocal();
     return initialReqs.some((r) => r.status === 'PENDING') ? 'approvals' : 'offices';
   });
@@ -237,8 +250,10 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [historySearch, setHistorySearch] = useState<string>('');
   const [confirmClearHistory, setConfirmClearHistory] = useState<boolean>(false);
 
-  // Master ID & PIN Settings Form State
+  // Master ID, Name, Rank & PIN Settings Form State
   const [newMasterIdDraft, setNewMasterIdDraft] = useState<string>(() => getMasterUserId());
+  const [newMasterNameDraft, setNewMasterNameDraft] = useState<string>(() => getMasterDisplayName());
+  const [newMasterRankDraft, setNewMasterRankDraft] = useState<string>(() => getMasterDisplayRank());
   const [currentMasterPinInput, setCurrentMasterPinInput] = useState<string>('');
   const [newMasterPinInput, setNewMasterPinInput] = useState<string>('');
   const [confirmMasterPinInput, setConfirmMasterPinInput] = useState<string>('');
@@ -246,6 +261,35 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
   const [masterSettingsError, setMasterSettingsError] = useState<string>('');
   const [masterSettingsSuccess, setMasterSettingsSuccess] = useState<string>('');
   const [isSavingMasterCreds, setIsSavingMasterCreds] = useState<boolean>(false);
+
+  // Real-Time Firebase Cloud Quota Telemetry State
+  const [quotaTelemetry, setQuotaTelemetry] = useState<FirebaseQuotaTelemetrySnapshot>(() =>
+    getFirebaseQuotaTelemetrySnapshot()
+  );
+  const [quotaNowMs, setQuotaNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const unsubscribe = subscribeFirebaseQuotaTelemetry((snap) => {
+      setQuotaTelemetry(snap);
+    });
+    const onCredsUpdated = () => {
+      setCurrentMasterCreds(getMasterCredentials());
+    };
+    window.addEventListener('baf_master_credentials_updated', onCredsUpdated);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('baf_master_credentials_updated', onCredsUpdated);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || !isOwnerAuthenticated || activeTab !== 'cloud_quota') return;
+    setQuotaNowMs(Date.now());
+    const timer = setInterval(() => {
+      setQuotaNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isOpen, isOwnerAuthenticated, activeTab]);
 
   // Auto-disappear approval/action success banner after 5 seconds
   useEffect(() => {
@@ -287,6 +331,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
       setOfficeRequests(reqList.filter((r) => r.status !== 'REJECTED'));
       setCurrentMasterCreds(syncedCreds);
       setNewMasterIdDraft(syncedCreds.masterUserId);
+      setNewMasterNameDraft(syncedCreds.masterName || getMasterDisplayName());
+      setNewMasterRankDraft(syncedCreds.masterRank || getMasterDisplayRank());
       setCloudPoolShards(poolList);
       if (!didInitialTabSelectRef.current) {
         didInitialTabSelectRef.current = true;
@@ -318,6 +364,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
         .then((creds) => {
           setCurrentMasterCreds(creds);
           setNewMasterIdDraft(creds.masterUserId);
+          setNewMasterNameDraft(creds.masterName || getMasterDisplayName());
+          setNewMasterRankDraft(creds.masterRank || getMasterDisplayRank());
         })
         .catch(() => {});
     }
@@ -667,6 +715,8 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
     setMasterSettingsSuccess('');
 
     const cleanNewId = newMasterIdDraft.replace(/^BD\/?/i, '').replace(/\s+/g, '').trim();
+    const cleanNewName = newMasterNameDraft.trim() || 'System Master Owner';
+    const cleanNewRank = newMasterRankDraft.trim() || 'MWO';
     const cleanCurPin = currentMasterPinInput.trim();
     const cleanNewPin = newMasterPinInput.trim();
     const cleanConfirmPin = confirmMasterPinInput.trim();
@@ -702,14 +752,16 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
     setIsSavingMasterCreds(true);
     try {
-      const updated = await saveMasterCredentials(cleanNewId, finalPin);
+      const updated = await saveMasterCredentials(cleanNewId, finalPin, cleanNewName, cleanNewRank);
       setCurrentMasterCreds(updated);
       setNewMasterIdDraft(updated.masterUserId);
+      setNewMasterNameDraft(updated.masterName || cleanNewName);
+      setNewMasterRankDraft(updated.masterRank || cleanNewRank);
       setCurrentMasterPinInput('');
       setNewMasterPinInput('');
       setConfirmMasterPinInput('');
       setMasterSettingsSuccess(
-        `Master Credentials updated! Active Master ID: ${updated.masterUserId}`
+        `Master Profile updated! ${updated.masterRank || cleanNewRank} ${updated.masterName || cleanNewName} (ID: ${updated.masterUserId})`
       );
     } catch {
       setMasterSettingsError('Failed to save Master Credentials.');
@@ -1478,10 +1530,10 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       APP OWNER PORTAL
                     </span>
                     <h1 className="text-sm font-black tracking-tight text-slate-900 dark:text-white truncate mt-0.5">
-                      Master Control
+                      {currentMasterCreds.masterName || 'Master Control'}
                     </h1>
-                    <p className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400">
-                      ID: {currentMasterCreds.masterUserId}
+                    <p className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400 truncate">
+                      {currentMasterCreds.masterRank || 'MWO'} • ID: {currentMasterCreds.masterUserId}
                     </p>
                   </div>
                 </div>
@@ -1592,6 +1644,34 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => setActiveTab('cloud_quota')}
+                  className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    activeTab === 'cloud_quota'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Gauge className="w-4 h-4 shrink-0" />
+                    <span>Firebase Quota</span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-black ${
+                      activeTab === 'cloud_quota'
+                        ? 'bg-white/20 text-white'
+                        : quotaTelemetry.serverQuotaExhausted || quotaTelemetry.overallPercent >= 90
+                        ? 'bg-rose-500 text-white animate-pulse'
+                        : quotaTelemetry.overallPercent >= 70
+                        ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                        : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                    }`}
+                  >
+                    {quotaTelemetry.overallPercent.toFixed(1)}%
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setActiveTab('maintenance')}
                   className={`w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
                     activeTab === 'maintenance'
@@ -1631,7 +1711,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                 >
                   <div className="flex items-center gap-2.5">
                     <KeyRound className="w-4 h-4 shrink-0" />
-                    <span>Master ID & PIN</span>
+                    <span>Master Profile & PIN</span>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 opacity-60 hidden md:block" />
                 </button>
@@ -1678,9 +1758,11 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                       ? 'New Office Approval Queue'
                       : activeTab === 'cloud_pool'
                       ? 'Auto Cloud Pool (Multi-Firebase Sharding)'
+                      : activeTab === 'cloud_quota'
+                      ? 'Firebase Cloud Daily Quota Monitor'
                       : activeTab === 'maintenance'
                       ? 'Global System Maintenance Mode'
-                      : 'Master Security & Credentials'}
+                      : 'Master Profile, Security & Credentials'}
                   </h2>
                   <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25">
                     <ShieldCheck className="w-3 h-3" />
@@ -1694,9 +1776,11 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                     ? 'Review and approve new office setup requests submitted from the login portal.'
                     : activeTab === 'cloud_pool'
                     ? 'Register free Firebase projects here. New offices automatically get separate clouds with zero user hassle.'
+                    : activeTab === 'cloud_quota'
+                    ? 'Live Firestore daily Spark quota %, detailed consumption causes, and automatic daily reset at Midnight PT.'
                     : activeTab === 'maintenance'
                     ? 'Activate, schedule, or deactivate global application maintenance mode across all offices.'
-                    : 'Manage your Master User ID and Master PIN for global workspace access.'}
+                    : 'Configure Master Rank, Name, User ID, and Master PIN for global workspace access.'}
                 </p>
               </div>
 
@@ -2813,7 +2897,337 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                 </div>
               )}
 
-              {/* TAB 3: MASTER ID & PIN CONFIGURATION */}
+              {/* TAB 2B: REAL-TIME FIREBASE CLOUD DAILY QUOTA MONITOR */}
+              {activeTab === 'cloud_quota' && (() => {
+                const resetTargetMs = quotaTelemetry.nextResetAtIso ? Date.parse(quotaTelemetry.nextResetAtIso) : NaN;
+                const remainingMs = !isNaN(resetTargetMs) ? Math.max(0, resetTargetMs - quotaNowMs) : 0;
+                const remHrs = Math.floor(remainingMs / 3600000);
+                const remMins = Math.floor((remainingMs % 3600000) / 60000);
+                const remSecs = Math.floor((remainingMs % 60000) / 1000);
+                const countdownText = !isNaN(resetTargetMs)
+                  ? `${String(remHrs).padStart(2, '0')}h ${String(remMins).padStart(2, '0')}m ${String(remSecs).padStart(2, '0')}s`
+                  : '--h --m --s';
+
+                let resetBdTimeText = '01:00 PM / 02:00 PM BST';
+                if (!isNaN(resetTargetMs)) {
+                  try {
+                    resetBdTimeText = new Intl.DateTimeFormat('en-US', {
+                      timeZone: 'Asia/Dhaka',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      hour12: true,
+                    }).format(new Date(resetTargetMs)) + ' (BST)';
+                  } catch {}
+                }
+
+                const statusTone = quotaTelemetry.serverQuotaExhausted || quotaTelemetry.overallPercent >= 90
+                  ? 'rose'
+                  : quotaTelemetry.overallPercent >= 70
+                  ? 'amber'
+                  : 'emerald';
+
+                const quotaCards = [
+                  {
+                    label: 'Daily Reads',
+                    used: quotaTelemetry.reads,
+                    limit: FIREBASE_DAILY_LIMITS.READ,
+                    pct: quotaTelemetry.readsPercent,
+                    barClass: quotaTelemetry.readsPercent >= 90 ? 'bg-rose-500' : quotaTelemetry.readsPercent >= 70 ? 'bg-amber-500' : 'bg-sky-500',
+                    badgeClass: 'bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30',
+                  },
+                  {
+                    label: 'Daily Writes',
+                    used: quotaTelemetry.writes,
+                    limit: FIREBASE_DAILY_LIMITS.WRITE,
+                    pct: quotaTelemetry.writesPercent,
+                    barClass: quotaTelemetry.writesPercent >= 90 ? 'bg-rose-500' : quotaTelemetry.writesPercent >= 70 ? 'bg-amber-500' : 'bg-emerald-500',
+                    badgeClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30',
+                  },
+                  {
+                    label: 'Daily Deletes',
+                    used: quotaTelemetry.deletes,
+                    limit: FIREBASE_DAILY_LIMITS.DELETE,
+                    pct: quotaTelemetry.deletesPercent,
+                    barClass: quotaTelemetry.deletesPercent >= 90 ? 'bg-rose-500' : quotaTelemetry.deletesPercent >= 70 ? 'bg-amber-500' : 'bg-purple-500',
+                    badgeClass: 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30',
+                  },
+                ];
+
+                return (
+                  <div className="space-y-5">
+                    {/* Top Live Overview + Auto-Reset Countdown */}
+                    <div className={`rounded-2xl p-5 border shadow-sm bg-white dark:bg-slate-950 ${
+                      statusTone === 'rose'
+                        ? 'border-rose-500/40'
+                        : statusTone === 'amber'
+                        ? 'border-amber-500/40'
+                        : 'border-emerald-500/30'
+                    }`}>
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        <div className="flex items-start gap-3.5">
+                          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border ${
+                            statusTone === 'rose'
+                              ? 'bg-rose-500/15 border-rose-500/30 text-rose-600 dark:text-rose-400'
+                              : statusTone === 'amber'
+                              ? 'bg-amber-500/15 border-amber-500/30 text-amber-600 dark:text-amber-400'
+                              : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
+                          }`}>
+                            <Gauge className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                Firebase Spark Daily Quota: {quotaTelemetry.overallPercent.toFixed(2)}% Used
+                              </h3>
+                              <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider border ${
+                                quotaTelemetry.serverQuotaExhausted
+                                  ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30 animate-pulse'
+                                  : statusTone === 'amber'
+                                  ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                  : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                              }`}>
+                                {quotaTelemetry.serverQuotaExhausted
+                                  ? '429 QUOTA EXHAUSTED'
+                                  : statusTone === 'amber'
+                                  ? 'ELEVATED USAGE'
+                                  : 'LIVE • HEALTHY'}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                              Active Quota Date (PT): <span className="font-mono font-bold text-slate-700 dark:text-slate-300">{quotaTelemetry.quotaDatePt}</span> •
+                              Auto-resets to <span className="font-bold text-emerald-600 dark:text-emerald-400">0%</span> when Firebase daily reset hits at Midnight PT (<span className="font-mono font-semibold">{resetBdTimeText}</span>)
+                            </p>
+                            {quotaTelemetry.serverQuotaExhausted && quotaTelemetry.serverQuotaErrorMsg && (
+                              <p className="mt-1.5 text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                                Server Notice: {quotaTelemetry.serverQuotaErrorMsg} (Hits: {quotaTelemetry.quotaExceededHits})
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-3 shrink-0">
+                          <div className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-right">
+                            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1 justify-end">
+                              <Clock className="w-3 h-3 text-emerald-500" />
+                              Auto Daily Reset In
+                            </p>
+                            <p className="text-sm font-mono font-black text-slate-900 dark:text-white mt-0.5">
+                              {countdownText}
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => resetFirebaseQuotaTelemetry(false)}
+                            className="px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer border border-slate-200 dark:border-slate-700 transition-colors"
+                            title="Clear local session quota log counters (restarts real-time count from 0 without reading Firestore)"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5 text-sky-500" />
+                            <span>Reset Counter</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Overall Peak Progress Bar */}
+                      <div className="mt-4">
+                        <div className="w-full h-2.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              statusTone === 'rose'
+                                ? 'bg-rose-500'
+                                : statusTone === 'amber'
+                                ? 'bg-amber-500'
+                                : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.max(quotaTelemetry.overallPercent > 0 ? 1.5 : 0, Math.min(100, quotaTelemetry.overallPercent))}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <span>Zero Firestore cost: telemetry is tracked locally in browser memory &amp; updates instantaneously on every cloud call.</span>
+                          {quotaTelemetry.lastUpdatedAt && (
+                            <span className="font-mono">
+                              Last Cloud Event: {new Date(quotaTelemetry.lastUpdatedAt).toLocaleTimeString()}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Reads / Writes / Deletes Quota Cards */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {quotaCards.map((card) => (
+                        <div
+                          key={card.label}
+                          className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-sm space-y-3"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                              {card.label}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-black border ${card.badgeClass}`}>
+                              {card.pct.toFixed(2)}%
+                            </span>
+                          </div>
+                          <div>
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-xl font-mono font-black text-slate-900 dark:text-white">
+                                {card.used.toLocaleString()}
+                              </span>
+                              <span className="text-xs font-mono font-bold text-slate-400">
+                                / {card.limit.toLocaleString()} day limit
+                              </span>
+                            </div>
+                            <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden mt-2">
+                              <div
+                                className={`h-full transition-all duration-300 ${card.barClass}`}
+                                style={{ width: `${Math.max(card.pct > 0 ? 2 : 0, Math.min(100, card.pct))}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Why & Where Quota Was Consumed Breakdown */}
+                    <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
+                        <div className="flex items-center gap-2.5">
+                          <BarChart3 className="w-4 h-4 text-emerald-500" />
+                          <div>
+                            <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                              Why Quota Was Used (Live Breakdown by Reason &amp; Collection)
+                            </h4>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                              Sorted from highest Firestore document consumption to lowest so you can see exactly what triggered cloud calls.
+                            </p>
+                          </div>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300">
+                          {quotaTelemetry.breakdown.length} Tracked Operations
+                        </span>
+                      </div>
+
+                      {quotaTelemetry.breakdown.length === 0 ? (
+                        <div className="py-8 text-center text-xs text-slate-500 dark:text-slate-400">
+                          No Firestore cloud operations recorded in this browser session yet today ({quotaTelemetry.quotaDatePt}). Sync, login, or save data to see real-time usage causes here.
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-200 dark:border-slate-800 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                <th className="py-2 pr-3">Type</th>
+                                <th className="py-2 pr-3">Reason / Trigger</th>
+                                <th className="py-2 pr-3">Collection</th>
+                                <th className="py-2 pr-3 text-right">Calls</th>
+                                <th className="py-2 pr-3 text-right">Units Used</th>
+                                <th className="py-2 pr-3 text-right">% of Daily Limit</th>
+                                <th className="py-2 text-right">Last Seen</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                              {quotaTelemetry.breakdown.map((row) => {
+                                const limit =
+                                  row.opType === 'READ'
+                                    ? FIREBASE_DAILY_LIMITS.READ
+                                    : row.opType === 'WRITE'
+                                    ? FIREBASE_DAILY_LIMITS.WRITE
+                                    : FIREBASE_DAILY_LIMITS.DELETE;
+                                const rowPct = ((row.count / limit) * 100).toFixed(3);
+                                return (
+                                  <tr key={row.key} className="hover:bg-slate-50 dark:hover:bg-slate-900/50">
+                                    <td className="py-2.5 pr-3">
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-black ${
+                                        row.opType === 'READ'
+                                          ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                                          : row.opType === 'WRITE'
+                                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                          : 'bg-purple-500/15 text-purple-600 dark:text-purple-400'
+                                      }`}>
+                                        {row.opType}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-bold text-slate-800 dark:text-slate-200">
+                                      {row.reason}
+                                      {row.officeCode && (
+                                        <span className="ml-2 text-[10px] font-mono text-slate-400">[{row.officeCode}]</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                      {row.collection}
+                                    </td>
+                                    <td className="py-2.5 pr-3 text-right font-mono text-slate-600 dark:text-slate-300">
+                                      {row.calls.toLocaleString()}
+                                    </td>
+                                    <td className="py-2.5 pr-3 text-right font-mono font-black text-slate-900 dark:text-white">
+                                      {row.count.toLocaleString()}
+                                    </td>
+                                    <td className="py-2.5 pr-3 text-right font-mono font-bold text-slate-600 dark:text-slate-300">
+                                      {rowPct}%
+                                    </td>
+                                    <td className="py-2.5 text-right font-mono text-[11px] text-slate-400">
+                                      {new Date(row.lastAt).toLocaleTimeString()}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Recent Real-Time Event Stream */}
+                    <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+                        <div className="flex items-center gap-2">
+                          <Activity className="w-4 h-4 text-sky-500" />
+                          <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                            Recent Live Cloud Activity Feed (Last 30 Events)
+                          </h4>
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-400">Real-Time</span>
+                      </div>
+                      {quotaTelemetry.recentEvents.length === 0 ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400 py-4 text-center">
+                          Waiting for live Firestore reads, writes, or deletes...
+                        </p>
+                      ) : (
+                        <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/70">
+                          {quotaTelemetry.recentEvents.map((ev) => (
+                            <div key={ev.id} className="py-2 flex items-center justify-between gap-3 text-xs">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black shrink-0 ${
+                                  ev.opType === 'READ'
+                                    ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                                    : ev.opType === 'WRITE'
+                                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                    : 'bg-purple-500/15 text-purple-600 dark:text-purple-400'
+                                }`}>
+                                  {ev.opType} +{ev.count}
+                                </span>
+                                <span className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                                  {ev.reason}
+                                </span>
+                                <span className="font-mono text-[10px] text-slate-400 shrink-0">
+                                  ({ev.collection})
+                                </span>
+                              </div>
+                              <span className="font-mono text-[10px] text-slate-400 shrink-0">
+                                {new Date(ev.at).toLocaleTimeString()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* TAB 3: MASTER PROFILE, ID & PIN CONFIGURATION */}
               {activeTab === 'settings' && (
                 <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-2xl space-y-5 shadow-sm">
                   <div className="flex items-start gap-3.5 border-b border-slate-200 dark:border-slate-800 pb-4">
@@ -2822,10 +3236,10 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                     </div>
                     <div>
                       <h3 className="text-base font-black text-slate-900 dark:text-white">
-                        Master User ID & PIN Configuration
+                        Master Profile, User ID &amp; PIN Configuration
                       </h3>
                       <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                        Update the Master User ID and Master PIN used for multi-office login and Master Control Center access.
+                        Set the Master Rank, Name, User ID, and Master PIN used across all offices and inside the Master Control Center.
                       </p>
                     </div>
                   </div>
@@ -2855,6 +3269,55 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
 
                   <form onSubmit={handleSaveMasterCredentials} className="space-y-4">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Master Rank
+                        </label>
+                        <div className="relative">
+                          <Award className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            list="master-rank-suggestions"
+                            value={newMasterRankDraft}
+                            onChange={(e) => {
+                              setNewMasterRankDraft(e.target.value);
+                              setMasterSettingsError('');
+                            }}
+                            placeholder="e.g. MWO, SWO, WO, Sgt"
+                            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                          />
+                          <datalist id="master-rank-suggestions">
+                            <option value="MWO" />
+                            <option value="SWO" />
+                            <option value="WO" />
+                            <option value="Sgt" />
+                            <option value="Cpl" />
+                            <option value="LAC" />
+                            <option value="AC" />
+                            <option value="Master" />
+                          </datalist>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                          Master Name
+                        </label>
+                        <div className="relative">
+                          <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={newMasterNameDraft}
+                            onChange={(e) => {
+                              setNewMasterNameDraft(e.target.value);
+                              setMasterSettingsError('');
+                            }}
+                            placeholder="e.g. Md Rasel Mia"
+                            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+
                       <div className="space-y-1.5">
                         <label className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
                           Master User ID (BD No)
@@ -2948,7 +3411,7 @@ export const AppOwnerMasterPortal: React.FC<AppOwnerMasterPortalProps> = ({
                         ) : (
                           <Save className="w-4 h-4" />
                         )}
-                        <span>Save Master ID & PIN</span>
+                        <span>Save Master Profile &amp; PIN</span>
                       </button>
                     </div>
                   </form>

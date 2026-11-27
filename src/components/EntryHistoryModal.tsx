@@ -106,6 +106,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
         setSuccessMsg(result.message || 'Successfully deleted entry.');
         fetchHistory();
         if (onRefreshData) onRefreshData();
+        window.dispatchEvent(new CustomEvent('baf_state_updated'));
       } else {
         setErrorMsg(result.error || 'Failed to delete entry.');
       }
@@ -196,6 +197,7 @@ export const EntryHistoryModal: React.FC<EntryHistoryModalProps> = ({
         setHistoryList((prev) => prev.filter((h) => h.id !== oldId));
         fetchHistory();
         if (onRefreshData) onRefreshData();
+        window.dispatchEvent(new CustomEvent('baf_state_updated'));
       } else {
         setErrorMsg(result.error || 'Failed to update entry.');
       }

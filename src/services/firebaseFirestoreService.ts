@@ -26,6 +26,7 @@ import {
   isDefault155UasuOffice,
   IS_AI_STUDIO_PRACTICE_MODE,
 } from '../firebase';
+import { recordFirestoreQuotaUsage } from '../utils/firebaseQuotaTracker';
 
 export interface FirebaseMigrationResult {
   success: boolean;
@@ -384,6 +385,12 @@ export async function probeFirebaseConnectionAndQuota(forceServerCheck = false):
     return { ok: false, quotaExceeded: true, errorMsg: 'Firestore daily quota exceeded' };
   }
   try {
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: 1,
+      reason: 'Connection & Quota Health Probe',
+      collection: 'test',
+    });
     await withFirestoreTimeout(getDoc(doc(dbLite, 'test', 'connection')), 6000, 'probe:connection');
     if (isFirestoreQuotaExceeded()) {
       setFirestoreQuotaExceeded(false);
@@ -573,7 +580,15 @@ async function runQueryRestFallback(
     }
 
     const rows = await res.json();
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) {
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: `REST Query (${collectionId})`,
+        collection: collectionId,
+      });
+      return [];
+    }
     const list: any[] = [];
     for (const row of rows) {
       if (row && row.document && row.document.fields) {
@@ -586,6 +601,12 @@ async function runQueryRestFallback(
         list.push(decoded);
       }
     }
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: Math.max(1, list.length),
+      reason: sinceIso ? `REST Incremental Sync (${collectionId})` : `REST Collection Sync (${collectionId})`,
+      collection: collectionId,
+    });
     return list;
   } catch (err: any) {
     if (err?.name === 'AbortError') {
@@ -704,6 +725,12 @@ async function queryCollectionDocs(
     snap.forEach((docSnap) => {
       list.push({ docId: docSnap.id, data: docSnap.data() });
     });
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: Math.max(1, list.length),
+      reason: sinceIso ? `Incremental Sync (${collectionId})` : `Collection Sync (${collectionId})`,
+      collection: collectionId,
+    });
     return filterAndUnscopeOfficeDocs(list);
   } catch (err: any) {
     if (isQuotaExceededError(err)) {
@@ -742,6 +769,12 @@ async function commitSetOps(
         batch.set(doc(dbLite, op.path, op.docId), op.data, { merge: true });
       }
       await withFirestoreTimeout(batch.commit(), 15000, `batch:${collectionLabel}`);
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: chunk.length,
+        reason: `Batch Write (${collectionLabel})`,
+        collection: collectionLabel,
+      });
       written += chunk.length;
     } catch (err: any) {
       if (isQuotaExceededError(err)) {
@@ -765,6 +798,12 @@ async function commitSetOps(
         for (let k = 0; k < results.length; k++) {
           const r = results[k];
           if (r.status === 'fulfilled') {
+            recordFirestoreQuotaUsage({
+              type: 'WRITE',
+              count: 1,
+              reason: `Doc Write (${collectionLabel})`,
+              collection: mini[k].path,
+            });
             written++;
           } else {
             const singleErr: any = r.reason;
@@ -824,6 +863,12 @@ export async function fetchSyncManifestFromFirebase(force: boolean = false): Pro
   lastManifestFetchDocId = manifestDocId;
   inFlightManifestPromise = (async () => {
     try {
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: 1,
+        reason: 'Poll Sync Manifest Heartbeat',
+        collection: 'system_meta',
+      });
       const snap = await withFirestoreTimeout(
         getDoc(doc(dbLite, 'system_meta', manifestDocId)),
         6000,
@@ -964,6 +1009,12 @@ export async function publishSyncManifest(
   };
 
   try {
+    recordFirestoreQuotaUsage({
+      type: 'WRITE',
+      count: 1,
+      reason: `Publish Sync Manifest (${reason || 'update'})`,
+      collection: 'system_meta',
+    });
     await withFirestoreTimeout(
       setDoc(doc(dbLite, 'system_meta', manifestDocId), nextManifest, { merge: true }),
       8000,
@@ -978,6 +1029,12 @@ export async function publishSyncManifest(
       return;
     }
     try {
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: 1,
+        reason: 'Publish Sync Manifest (Fallback)',
+        collection: 'system_meta',
+      });
       await withFirestoreTimeout(
         setDoc(doc(dbLite, 'system_meta', manifestDocId), coreManifest, { merge: true }),
         8000,
@@ -1189,6 +1246,14 @@ export async function deleteAirmanFromFirebase(airmanOrList: any | any[]): Promi
   }
   if (isFirestoreQuotaExceeded()) return;
   const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
+  if (scopedOps.length > 0) {
+    recordFirestoreQuotaUsage({
+      type: 'DELETE',
+      count: scopedOps.length,
+      reason: 'Delete Airman Documents',
+      collection: 'airmen',
+    });
+  }
   const delResults = await Promise.allSettled(
     scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
   );
@@ -1397,6 +1462,14 @@ export async function deleteUserProfileFromFirebase(userOrList: any | any[]): Pr
   }
   if (isFirestoreQuotaExceeded()) return;
   const scopedOps = scopeWriteOpsForActiveOffice(tombstoneOps);
+  if (scopedOps.length > 0) {
+    recordFirestoreQuotaUsage({
+      type: 'DELETE',
+      count: scopedOps.length,
+      reason: 'Delete User Profile Documents',
+      collection: 'user_profiles',
+    });
+  }
   const delResults = await Promise.allSettled(
     scopedOps.map((op) => deleteDoc(doc(dbLite, op.path, op.docId)))
   );
@@ -1619,6 +1692,7 @@ export interface BundleIndex {
   months: string[];
   monthChunks?: Record<string, string[]>;
   overflowSettingKeys?: string[];
+  rawIntegrityVerifiedV4?: boolean;
   updatedAt: string;
 }
 
@@ -1648,6 +1722,12 @@ export async function fetchSingleAppSettingDoc(settingKey: string, timeoutMs = 8
   }
   const scopedDocId = scopeAppSettingDocId(settingKey);
   try {
+    recordFirestoreQuotaUsage({
+      type: 'READ',
+      count: 1,
+      reason: `Fetch Bundle / Setting (${settingKey})`,
+      collection: 'app_settings',
+    });
     const snap = await withFirestoreTimeout(
       getDoc(doc(dbLite, 'app_settings', scopedDocId)),
       timeoutMs,
@@ -1749,6 +1829,7 @@ export async function fetchBundleIndexFromFirebase(): Promise<BundleIndex | null
     overflowSettingKeys: Array.isArray(val.overflowSettingKeys)
       ? val.overflowSettingKeys.map((k: any) => String(k)).filter(Boolean)
       : [],
+    rawIntegrityVerifiedV4: Boolean(val.rawIntegrityVerifiedV4),
     updatedAt: String(val.updatedAt || docData.updatedAt || ''),
   };
   cachedBundleIndexValue = idx;
@@ -1803,6 +1884,10 @@ export async function fetchSpecificBundlesFromFirebase(opts: {
   history: any[];
   users: any[];
   settingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>;
+  hasAirmenBundle: boolean;
+  hasUsersBundle: boolean;
+  hasHistoryBundle: boolean;
+  hasSettingsBundle: boolean;
 }> {
   syncBundleCachesPrefix();
   const index = opts.index !== undefined ? opts.index : await fetchBundleIndexFromFirebase();
@@ -1862,7 +1947,29 @@ export async function fetchSpecificBundlesFromFirebase(opts: {
     });
   }
 
-  return { index, airmen, assignments, history, users, settingsMeta };
+  return {
+    index,
+    airmen,
+    assignments,
+    history,
+    users,
+    settingsMeta,
+    hasAirmenBundle: Boolean(airmenDoc),
+    hasUsersBundle: Boolean(usersDoc),
+    hasHistoryBundle: Boolean(historyDoc),
+    hasSettingsBundle: Boolean(settingsBundleDoc),
+  };
+}
+
+function getRollingDiscoveryMonthWindow(monthsBack: number = 12, monthsAhead: number = 2): string[] {
+  const out: string[] = [];
+  const now = new Date();
+  for (let offset = -monthsBack; offset <= monthsAhead; offset++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1));
+    const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (!out.includes(ym)) out.push(ym);
+  }
+  return out;
 }
 
 export async function fetchAllCollectionsViaBundles(): Promise<{
@@ -1873,6 +1980,12 @@ export async function fetchAllCollectionsViaBundles(): Promise<{
   history: any[];
   users: any[];
   settingsMeta: Record<string, { valueStr: string; rawValue: any; updatedAt: string; updatedBy?: string }>;
+  hasAirmenBundle: boolean;
+  hasUsersBundle: boolean;
+  hasHistoryBundle: boolean;
+  hasSettingsBundle: boolean;
+  repairedMonths: string[];
+  rawIntegrityVerifiedV4: boolean;
 }> {
   const index = await fetchBundleIndexFromFirebase();
   if (!index) {
@@ -1883,16 +1996,68 @@ export async function fetchAllCollectionsViaBundles(): Promise<{
       history: [],
       users: [],
       settingsMeta: {},
+      hasAirmenBundle: false,
+      hasUsersBundle: false,
+      hasHistoryBundle: false,
+      hasSettingsBundle: false,
+      repairedMonths: [],
+      rawIntegrityVerifiedV4: false,
     };
   }
+
+  // Always include BOTH index.months AND any keys listed in index.monthChunks
+  const knownMonthsSet = new Set<string>([
+    ...(index.months || []),
+    ...Object.keys(index.monthChunks || {}),
+  ].filter((m) => /^\d{4}-\d{2}$/.test(m)));
+
+  const repairedMonths: string[] = [];
+  Object.keys(index.monthChunks || {}).forEach((m) => {
+    if (/^\d{4}-\d{2}$/.test(m) && !(index.months || []).includes(m)) {
+      repairedMonths.push(m);
+    }
+  });
+
   const fetched = await fetchSpecificBundlesFromFirebase({
     airmen: true,
     users: true,
     history: true,
     settings: true,
-    months: index.months,
+    months: Array.from(knownMonthsSet).sort(),
     index,
   });
+
+  // One-time v4 index rescue: recover any orphaned __bundle_asn_YYYY-MM docs dropped by earlier partial syncs
+  if (!index.rawIntegrityVerifiedV4 && !isFirestoreQuotaExceeded()) {
+    const missingCandidates = getRollingDiscoveryMonthWindow(18, 3).filter((ym) => !knownMonthsSet.has(ym));
+    if (missingCandidates.length > 0) {
+      const probedDocs = await Promise.all(
+        missingCandidates.map((ym) =>
+          fetchSingleAppSettingDoc(getMonthBundleKey(ym, 1), 5000).catch(() => null)
+        )
+      );
+      probedDocs.forEach((mDoc, i) => {
+        if (!mDoc) return;
+        const ym = missingCandidates[i];
+        const items = extractItemsArrayFromBundleDoc(mDoc);
+        if (items.length > 0) {
+          knownMonthsSet.add(ym);
+          repairedMonths.push(ym);
+          index.monthChunks = index.monthChunks || {};
+          if (!Array.isArray(index.monthChunks[ym]) || index.monthChunks[ym].length === 0) {
+            index.monthChunks[ym] = [getMonthBundleKey(ym, 1)];
+          }
+          items.forEach((d) => {
+            fetched.assignments.push(isCorruptedAssignmentRecord(d) ? { ...d, isDeleted: true } : d);
+          });
+        }
+      });
+    }
+  }
+
+  index.months = Array.from(knownMonthsSet).sort();
+  cachedBundleIndexValue = index;
+
   return {
     exists: true,
     index,
@@ -1901,6 +2066,12 @@ export async function fetchAllCollectionsViaBundles(): Promise<{
     history: fetched.history,
     users: fetched.users,
     settingsMeta: fetched.settingsMeta,
+    hasAirmenBundle: fetched.hasAirmenBundle,
+    hasUsersBundle: fetched.hasUsersBundle,
+    hasHistoryBundle: fetched.hasHistoryBundle,
+    hasSettingsBundle: fetched.hasSettingsBundle,
+    repairedMonths: Array.from(new Set(repairedMonths)),
+    rawIntegrityVerifiedV4: Boolean(index.rawIntegrityVerifiedV4),
   };
 }
 
@@ -1947,6 +2118,7 @@ export async function pushBundlesToFirebase(opts: {
   mergeExistingSettings?: boolean;
   allActiveMonths?: string[];
   updateIndex?: boolean;
+  markIntegrityVerifiedV4?: boolean;
   reason?: string;
 }): Promise<{ writtenOps: number; index: BundleIndex | null }> {
   syncBundleCachesPrefix();
@@ -1972,8 +2144,13 @@ export async function pushBundlesToFirebase(opts: {
   }
 
   const nextMonthChunks: Record<string, string[]> = { ...(baseIndex?.monthChunks || {}) };
+  // Always preserve existing cloud months + chunked months; NEVER drop months that weren't explicitly emptied
   const activeMonthsSet = new Set<string>(
-    opts.allActiveMonths ? opts.allActiveMonths : baseIndex?.months || []
+    [
+      ...(baseIndex?.months || []),
+      ...Object.keys(nextMonthChunks),
+      ...(opts.allActiveMonths || []),
+    ].filter((m) => /^\d{4}-\d{2}$/.test(m))
   );
   let overflowKeysSet = new Set<string>(baseIndex?.overflowSettingKeys || []);
 
@@ -2179,11 +2356,17 @@ export async function pushBundlesToFirebase(opts: {
     cachedBundleSettingsEntries = existingEntries;
   }
 
+  const nextRawIntegrityVerifiedV4 =
+    opts.markIntegrityVerifiedV4 !== undefined
+      ? Boolean(opts.markIntegrityVerifiedV4)
+      : Boolean(baseIndex?.rawIntegrityVerifiedV4);
+
   const nextIndex: BundleIndex = {
-    version: 1,
+    version: 2,
     months: Array.from(activeMonthsSet).sort(),
     monthChunks: nextMonthChunks,
     overflowSettingKeys: Array.from(overflowKeysSet),
+    rawIntegrityVerifiedV4: nextRawIntegrityVerifiedV4,
     updatedAt: nowIso,
   };
 
@@ -2203,12 +2386,23 @@ export async function pushBundlesToFirebase(opts: {
   let writtenOps = 0;
   if (ops.length > 0) {
     writtenOps = await commitSetOps(ops, `bundles:${opts.reason || 'sync'}`);
+    if (writtenOps > 0) {
+      cachedBundleIndexValue = nextIndex;
+    }
   }
 
   if (deleteDocIds.length > 0 && !isFirestoreQuotaExceeded()) {
     const scopedDels = scopeWriteOpsForActiveOffice(
       deleteDocIds.map((id) => ({ path: 'app_settings', docId: sanitizeDocId(id), data: {} }))
     );
+    if (scopedDels.length > 0) {
+      recordFirestoreQuotaUsage({
+        type: 'DELETE',
+        count: scopedDels.length,
+        reason: 'Cleanup Legacy Settings/Bundle Docs',
+        collection: 'app_settings',
+      });
+    }
     await Promise.allSettled(
       scopedDels.map((op) => deleteDoc(doc(dbLite!, 'app_settings', op.docId)))
     );
@@ -2269,6 +2463,12 @@ export async function purgeActiveCustomOfficeCloudData(options?: {
       const batch = writeBatch(dbLite);
       slice.forEach((id) => batch.delete(doc(dbLite, 'app_settings', id)));
       await withFirestoreTimeout(batch.commit(), 12000, 'purgeBatch:bundles');
+      recordFirestoreQuotaUsage({
+        type: 'DELETE',
+        count: slice.length,
+        reason: 'Purge Custom Office Cloud Bundles',
+        collection: 'app_settings',
+      });
     }
     cachedBundleIndexValue = null;
     cachedBundleSettingsEntries = {};
@@ -2300,6 +2500,12 @@ export async function purgeActiveCustomOfficeCloudData(options?: {
         10000,
         `purgeList:${colName}`
       );
+      recordFirestoreQuotaUsage({
+        type: 'READ',
+        count: Math.max(1, snap.size),
+        reason: `Purge Scan (${colName})`,
+        collection: colName,
+      });
       const docIdsToDelete: string[] = [];
       snap.forEach((docSnap) => {
         const docId = docSnap.id;
@@ -2330,6 +2536,12 @@ export async function purgeActiveCustomOfficeCloudData(options?: {
         const batch = writeBatch(dbLite);
         slice.forEach((id) => batch.delete(doc(dbLite, colName, id)));
         await withFirestoreTimeout(batch.commit(), 12000, `purgeBatch:${colName}`);
+        recordFirestoreQuotaUsage({
+          type: 'DELETE',
+          count: slice.length,
+          reason: `Purge Legacy Docs (${colName})`,
+          collection: colName,
+        });
       }
     } catch (err) {
       if (isQuotaExceededError(err)) {

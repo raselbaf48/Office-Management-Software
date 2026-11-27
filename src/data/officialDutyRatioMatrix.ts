@@ -1101,6 +1101,7 @@ export function getDailyQuotasFromMatrix(dateStr: string): FlightDutyQuota[] {
  * strictly based on whether IDAC quota > 0 for that specific shift in the Official Duty Ratio Matrix.
  */
 export function getIdacShiftsForDateAndFlight(dateStr: string, flight?: FlightName): IDAShift[] {
+  if (!isDefault155UasuOffice()) return [];
   if (!dateStr) return ['Morning', 'Afternoon', 'Night'];
 
   const dayNum = parseDayNumber(dateStr);

@@ -10,6 +10,8 @@ import {
   getMasterCredentials,
   getMasterUserId,
   getMasterUserPin,
+  getMasterDisplayName,
+  getMasterDisplayRank,
   isOfficeDisabled,
   getActiveOfficeCode,
   getOfficeScopedStorageKey,
@@ -22,6 +24,7 @@ import {
 import { fetchUserProfilesFromFirebase, pushUserProfilesToFirebase } from '../services/firebaseFirestoreService';
 import { localDb } from '../services/localDatabase';
 import { logUserLogin, updatePresence } from '../services/presenceService';
+import { recordFirestoreQuotaUsage } from './firebaseQuotaTracker';
 import { Airman, DetailedUserLogin, UserLoginRole, UserLoginStatus } from '../types';
 
 export interface UserLoginLog {
@@ -108,13 +111,15 @@ export function buildMasterOwnerUserRecord(): DetailedUserLogin {
   const staticIso = '2026-01-01T00:00:00.000Z';
   const activeMasterId = getMasterUserId();
   const activeMasterPin = getMasterUserPin();
+  const activeMasterName = getMasterDisplayName();
+  const activeMasterRank = getMasterDisplayRank();
   return {
     id: 'user-login-48456',
     userId: activeMasterId,
     airmanId: 'airman-48456',
     bdNo: activeMasterId,
-    rank: 'Master',
-    name: 'System Master Owner',
+    rank: activeMasterRank,
+    name: activeMasterName,
     flightName: 'Admin',
     trade: 'System Control',
     role: 'master_owner',
@@ -263,24 +268,25 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
     modified = true;
   }
 
-  // Enforce protected Master Owner 48456 record
+  // Enforce protected Master Owner record
   const masterRecord = buildMasterOwnerUserRecord();
-  const ownerIdx = parsed.findIndex(
-    (u) => (u.userId || u.bdNo || '').replace(/^BD\/?/i, '').trim() === MASTER_USER_ID
+  const ownerIdx = parsed.findIndex((u) =>
+    isMasterProtectedUser(u.userId || u.bdNo, u.role, u.isProtected)
   );
   if (ownerIdx >= 0) {
     const curr = parsed[ownerIdx];
     if (
       curr.role !== 'master_owner' ||
-      curr.name !== 'System Master Owner' ||
+      curr.name !== masterRecord.name ||
+      curr.rank !== masterRecord.rank ||
       curr.isProtected !== true ||
-      curr.userId !== MASTER_USER_ID
+      curr.userId !== masterRecord.userId
     ) {
       parsed[ownerIdx] = {
         ...curr,
         ...masterRecord,
-        pin: curr.pin && curr.pin !== '48456' ? curr.pin : MASTER_USER_PIN,
-        password: curr.password && curr.password !== '48456' ? curr.password : MASTER_USER_PIN,
+        pin: curr.pin && curr.pin !== '48456' ? curr.pin : masterRecord.pin,
+        password: curr.password && curr.password !== '48456' ? curr.password : masterRecord.password,
       };
       modified = true;
     }
@@ -348,15 +354,17 @@ export const getDetailedUsers = (nominalAirmen: Airman[] = []): DetailedUserLogi
 export async function provisionMasterOwnerInOffice(nominalAirmen: Airman[] = []): Promise<DetailedUserLogin> {
   const masterUser = buildMasterOwnerUserRecord();
   const users = getDetailedUsers(nominalAirmen);
-  const idx = users.findIndex(
-    (u) => (u.userId || u.bdNo || '').replace(/^BD\/?/i, '').trim() === MASTER_USER_ID
+  const idx = users.findIndex((u) =>
+    isMasterProtectedUser(u.userId || u.bdNo, u.role, u.isProtected)
   );
   if (idx >= 0) {
     const existing = users[idx];
     if (
       existing.role === 'master_owner' &&
       existing.pin === masterUser.pin &&
-      existing.userId === masterUser.userId
+      existing.userId === masterUser.userId &&
+      existing.name === masterUser.name &&
+      existing.rank === masterUser.rank
     ) {
       return existing;
     }
@@ -370,14 +378,16 @@ export async function provisionMasterOwnerInOffice(nominalAirmen: Airman[] = [])
 
 export function loginAsMasterOwnerSession(): UserSession {
   const masterUser = buildMasterOwnerUserRecord();
+  const masterRank = getMasterDisplayRank();
+  const masterName = getMasterDisplayName();
   const masterAirman: Airman = {
     id: 'airman-48456',
     serNo: 0,
     code: 'MST-OWN',
-    bdNo: MASTER_USER_ID,
-    rank: 'MWO',
-    name: 'System Master Owner',
-    fullName: 'System Master Owner',
+    bdNo: getMasterUserId(),
+    rank: masterRank as any,
+    name: masterName,
+    fullName: masterName,
     trade: 'Master Control',
     addressBlock: 'HQ',
     mobileNo: '',
@@ -549,14 +559,16 @@ export const validateUserLogin = async (
 
     if (isMasterPinMatch(rawProvided, storedPin)) {
       const masterDetail = buildMasterOwnerUserRecord();
+      const masterRank = getMasterDisplayRank();
+      const masterName = getMasterDisplayName();
       const masterAirman: Airman = {
         id: 'airman-48456',
         serNo: 0,
         code: 'MST-OWN',
         bdNo: getMasterUserId(),
-        rank: 'MWO',
-        name: 'System Master Owner',
-        fullName: 'System Master Owner',
+        rank: masterRank as any,
+        name: masterName,
+        fullName: masterName,
         trade: 'System Control',
         addressBlock: 'HQ',
         mobileNo: '',
@@ -570,7 +582,7 @@ export const validateUserLogin = async (
         success: true,
         airman: masterAirman,
         detailedUser: masterDetail,
-        message: 'Access granted for System Master Owner',
+        message: `Access granted for ${masterRank} ${masterName}`,
       };
     } else {
       return {
@@ -898,8 +910,8 @@ export const setUserSession = (airman: Airman, assignedRole: UserLoginRole = 'US
     userId: cleanBd,
     airmanId: airman.id,
     bdNo: cleanBd,
-    rank: airman.rank,
-    name: isMaster ? 'System Master Owner' : airman.name,
+    rank: isMaster ? getMasterDisplayRank() : airman.rank,
+    name: isMaster ? getMasterDisplayName() : airman.name,
     flightName: airman.flightName,
     trade: airman.trade,
     loginTimestamp: new Date().toISOString(),
@@ -1030,6 +1042,13 @@ export const recordLoginLog = async (airman: Airman, role: string = 'USER'): Pro
           const histRef = doc(db, 'app_settings', docId);
           const merged = cachedLoginHistory.slice(0, 100);
 
+          recordFirestoreQuotaUsage({
+            type: 'WRITE',
+            count: 1,
+            reason: 'Record User Login History',
+            collection: 'app_settings',
+            officeCode: activeCode,
+          });
           await setDoc(
             histRef,
             {
@@ -1066,6 +1085,12 @@ export const clearLoginHistory = async (): Promise<void> => {
       const nowIso = new Date().toISOString();
       const prefix = getOfficeFirestoreDocPrefix();
       const docId = prefix ? `${prefix}baf_user_login_history` : 'baf_user_login_history';
+      recordFirestoreQuotaUsage({
+        type: 'WRITE',
+        count: 1,
+        reason: 'Clear Office Login History',
+        collection: 'app_settings',
+      });
       await setDoc(
         doc(db, 'app_settings', docId),
         {

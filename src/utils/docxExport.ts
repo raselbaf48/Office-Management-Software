@@ -21,6 +21,7 @@ import { addAssignmentToMap, resolveAirmanDutyForDate } from '../data/rosterGene
 import { saveFileWithFeedback as saveAs } from './exportNotification';
 import { Airman, DutyAssignment, FlightName } from '../types';
 import { DutyRatioTable } from '../data/officialDutyRatioMatrix';
+import { isDefault155UasuOffice } from '../firebase';
 
 
 
@@ -1617,9 +1618,10 @@ export async function exportParadeStateMultiDocx(
   const hasBakeBite = rows.some((r) => r.bakeBite && r.bakeBite !== '-');
   const hasTdy = rows.some((r) => r.tdy && r.tdy !== '-');
   const hasLeave = rows.some((r) => r.leave && r.leave !== '-');
-  const hasIdaMorn = rows.some((r) => r.idaMorning && r.idaMorning !== '-');
-  const hasIdaAft = rows.some((r) => r.idaAfternoon && r.idaAfternoon !== '-');
-  const hasIdaNight = rows.some((r) => r.idaNight && r.idaNight !== '-');
+  const showIdacCols = isDefault155UasuOffice();
+  const hasIdaMorn = showIdacCols && rows.some((r) => r.idaMorning && r.idaMorning !== '-');
+  const hasIdaAft = showIdacCols && rows.some((r) => r.idaAfternoon && r.idaAfternoon !== '-');
+  const hasIdaNight = showIdacCols && rows.some((r) => r.idaNight && r.idaNight !== '-');
   const hasAnyIda = hasIdaMorn || hasIdaAft || hasIdaNight;
 
   const createCell = (text: string, width: number, vMerge?: 'restart' | 'continue', colSpan: number = 1) => {

@@ -1499,18 +1499,22 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                   <th className="py-3 px-1.5 text-center bg-blue-950 text-blue-300 w-9 border-l border-slate-800 font-bold" title="Airfield Duty (AFLD)">
                     AFLD
                   </th>
-                  <th className="py-2 px-1.5 text-center bg-sky-950 text-sky-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift A (Morning)">
-                    <span className="block">IDAC</span>
-                    <span className="block">"A"</span>
-                  </th>
-                  <th className="py-2 px-1.5 text-center bg-blue-950 text-blue-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift B (Afternoon)">
-                    <span className="block">IDAC</span>
-                    <span className="block">"B"</span>
-                  </th>
-                  <th className="py-2 px-1.5 text-center bg-indigo-950 text-indigo-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift C (Night)">
-                    <span className="block">IDAC</span>
-                    <span className="block">"C"</span>
-                  </th>
+                  {isDefault155UasuOffice() && (
+                    <>
+                      <th className="py-2 px-1.5 text-center bg-sky-950 text-sky-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift A (Morning)">
+                        <span className="block">IDAC</span>
+                        <span className="block">"A"</span>
+                      </th>
+                      <th className="py-2 px-1.5 text-center bg-blue-950 text-blue-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift B (Afternoon)">
+                        <span className="block">IDAC</span>
+                        <span className="block">"B"</span>
+                      </th>
+                      <th className="py-2 px-1.5 text-center bg-indigo-950 text-indigo-300 w-10 border-l border-slate-800 font-bold leading-tight" title="IDAC Shift C (Night)">
+                        <span className="block">IDAC</span>
+                        <span className="block">"C"</span>
+                      </th>
+                    </>
+                  )}
                   <th className="py-2 px-2 text-center bg-emerald-950 text-emerald-300 w-11 border-l border-slate-800 font-bold leading-tight" title="Total Duties Performed">
                     <span className="block">Total</span>
                     <span className="block">Duty</span>
@@ -1767,15 +1771,19 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                       <td className="py-2.5 px-1.5 text-center font-bold font-mono text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/20 border-l border-slate-200 dark:border-slate-800">
                         {stat?.totalAirport || 0}
                       </td>
-                      <td className="py-2.5 px-1.5 text-center font-bold font-mono text-sky-600 dark:text-sky-400 bg-sky-50/50 dark:bg-sky-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Morning">
-                        {stat?.totalIDACMorning || 0}
-                      </td>
-                      <td className="py-2.5 px-1.5 text-center font-bold font-mono text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Afternoon">
-                        {stat?.totalIDACAfternoon || 0}
-                      </td>
-                      <td className="py-2.5 px-1.5 text-center font-bold font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Night">
-                        {stat?.totalIDACNight || 0}
-                      </td>
+                      {isDefault155UasuOffice() && (
+                        <>
+                          <td className="py-2.5 px-1.5 text-center font-bold font-mono text-sky-600 dark:text-sky-400 bg-sky-50/50 dark:bg-sky-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Morning">
+                            {stat?.totalIDACMorning || 0}
+                          </td>
+                          <td className="py-2.5 px-1.5 text-center font-bold font-mono text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Afternoon">
+                            {stat?.totalIDACAfternoon || 0}
+                          </td>
+                          <td className="py-2.5 px-1.5 text-center font-bold font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-950/20 border-l border-slate-200 dark:border-slate-800" title="IDAC Night">
+                            {stat?.totalIDACNight || 0}
+                          </td>
+                        </>
+                      )}
                       <td className="py-2.5 px-2 text-center font-extrabold font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-50/50 dark:bg-emerald-950/20 border-l border-slate-200 dark:border-slate-800">
                         {stat?.totalDutyCount || 0}
                       </td>
@@ -2005,8 +2013,8 @@ export const MonthlyDutyRegister: React.FC<MonthlyDutyRegisterProps> = ({
                 </div>
               </div>
 
-              {/* IDAC Shift Picker (if IDAC / IDA selected) */}
-              {(['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(bulkDutyCode as string)) && (() => {
+              {/* IDAC Shift Picker (if IDAC / IDA selected — 155 UASU only) */}
+              {isDefault155UasuOffice() && (['IDAC', 'IDA', 'IDA C', 'IDA_C', 'IDAC CENTER', 'IDA CENTER'].includes(bulkDutyCode as string)) && (() => {
                 const availableShifts = getIdacShiftsForDateAndFlight(
                   bulkFromDate,
                   bulkFlight !== 'All' ? bulkFlight : undefined

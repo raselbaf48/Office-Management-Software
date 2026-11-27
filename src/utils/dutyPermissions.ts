@@ -24,8 +24,8 @@ export function checkDutyPermission(
   const session = getCurrentUserSession();
   const effectiveRole = (session?.assignedRole as UserRole) || role;
 
-  // 1. Super Admin and Owner have unrestricted access across all flights and dates
-  if (effectiveRole === 'OWNER' || effectiveRole === 'SUPER_ADMIN') {
+  // 1. Master Owner, Owner, and Super Admin have unrestricted access across all flights and dates
+  if (effectiveRole === 'master_owner' || effectiveRole === 'OWNER' || effectiveRole === 'SUPER_ADMIN') {
     return { canAssign: true, canEdit: true, canDelete: true };
   }
 
