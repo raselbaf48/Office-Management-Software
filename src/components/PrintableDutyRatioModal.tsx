@@ -673,7 +673,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
             @media print {
               @page { 
                 size: A4 ${pageOrientation} !important; 
-                margin: 12.7mm !important; 
+                margin: 5mm 10mm !important; 
               }
               html, body { 
                  background: white !important; 
@@ -748,7 +748,7 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
           `}</style>
 
           {/* MAIN DOCUMENT HEADER */}
-          <div data-pdf-repeat-header="true" className="text-center mb-5" style={{ fontFamily: 'Arial, sans-serif' }}>
+          <div data-pdf-repeat-header="true" className="text-center mb-2" style={{ fontFamily: 'Arial, sans-serif' }}>
             <h2 className="font-bold underline uppercase" style={{ fontSize: '12pt' }}>{getPageMainTitle()}</h2>
             <h3 className="font-bold uppercase mt-0.5" style={{ fontSize: '12pt' }}>{getActiveOfficeIdentity().officeName}</h3>
             {targetDate && <p className="font-bold text-black mt-0.5" style={{ fontSize: '12pt' }}>Date: {formatDisplayDate(targetDate)}</p>}

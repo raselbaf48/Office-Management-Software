@@ -1256,15 +1256,15 @@ export default function App() {
         </main>
 
         {/* Footer */}
-        <footer className="border-t border-slate-200 dark:border-slate-800/80 py-5 bg-white dark:bg-slate-900 text-center text-xs text-slate-500 dark:text-slate-400 mt-auto print:hidden">
-          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-            <div className="flex items-center space-x-2.5">
-              <Logo155UASU className="h-6 w-6" />
-              <span className="font-bold text-slate-700 dark:text-slate-300">
+        <footer className="border-t border-slate-200 dark:border-slate-800/80 py-5 bg-white dark:bg-slate-900 text-center text-sm text-slate-600 dark:text-slate-400 mt-auto print:hidden">
+          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <Logo155UASU className="h-10 w-10 sm:h-11 sm:w-11 shrink-0" />
+              <span className="font-bold text-sm sm:text-base text-slate-800 dark:text-slate-200">
                 {officeIdentity.officeName} • Office Management System
               </span>
             </div>
-            <p>© 2026 {officeIdentity.officeName} • Confidential Personnel Duty Register</p>
+            <p className="text-xs sm:text-sm font-medium">© 2026 {officeIdentity.officeName} • Confidential Personnel Duty Register</p>
           </div>
         </footer>
 

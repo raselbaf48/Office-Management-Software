@@ -1,4 +1,5 @@
 import { DateNavigator } from './DateNavigator';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -1047,6 +1048,18 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
     if (!list || list.length === 0) {
       return <div className="text-center text-slate-400 font-normal py-1 print:py-0">-</div>;
     }
+    if (list.length === 1) {
+      const item = list[0];
+      const shortOffNote = showNotes
+        ? formatDutyOffShortName(item.previousDutyCode, item.previousDutyName, item.dutyName || item.notes)
+        : '';
+      return (
+        <div className="text-[11px] print:text-[inherit] leading-snug print:leading-[1.15] font-normal text-center whitespace-nowrap print:whitespace-normal print:break-words">
+          {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
+          {shortOffNote ? ' - ' + shortOffNote : ''}
+        </div>
+      );
+    }
     return (
       <ol className="space-y-0.5 text-[11px] print:text-[inherit] leading-snug print:leading-[1.15] font-normal text-left">
         {list.map((item, idx) => {
@@ -1089,14 +1102,14 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  openEditDisposal(item.airman, effectiveCode, dutyName, noteText || item.note);
  }
  }}
- className={`truncate group flex items-center justify-between ${
+ className={`group flex items-center justify-between whitespace-nowrap ${
  (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER')
  ? 'cursor-pointer hover:text-purple-700 dark:hover:text-purple-300 hover:bg-purple-50/80 dark:hover:bg-purple-950/40 px-1 rounded transition-colors'
  : ''
  }`}
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit, change or remove disposal' : undefined}
  >
- <span className="truncate">
+ <span className="whitespace-nowrap">
  {i + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  {(isDutyOn || isDutyOff) && noteText ? (
  <span className="text-slate-800 dark:text-slate-200 font-medium"> - {noteText}</span>
@@ -1432,12 +1445,12 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <style>{`
             @page parade-state-landscape {
               size: A4 landscape;
-              margin: 5mm 6mm;
+              margin: 4mm 6mm;
             }
             @media print {
               @page {
                 size: A4 landscape;
-                margin: 5mm 6mm;
+                margin: 4mm 6mm;
               }
               #print-parade-state-content,
               #official-parade-document {
@@ -1457,6 +1470,10 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
               #official-parade-document div,
               #official-parade-document span {
                 color: #000000 !important;
+              }
+              #official-parade-document .print-conf-banner,
+              .print-conf-banner {
+                color: #64748b !important;
               }
               #official-parade-document tr.text-red-600,
               #official-parade-document tr.text-red-600 td,
@@ -1520,8 +1537,9 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  {/* OFFICIAL PARADE DOCUMENT SHEET */}
  <div
  id="official-parade-document"
- className="bg-white dark:bg-slate-900 text-black dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:bg-white print:text-black print:border-none print:rounded-none print:shadow-none print:p-0 print:overflow-visible print:w-full"
+ className="bg-white dark:bg-slate-900 text-black dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-4 overflow-x-auto print:bg-white print:text-black print:border-none print:rounded-none print:shadow-none print:p-0 print:overflow-visible print:w-full"
  >
+ <PrintConfidentialShell showOnScreen>
  {loading ? (
  <div className="py-20 text-center text-slate-400">
  <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-500" />
@@ -1639,7 +1657,11 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  const dayColPct = totalCols >= 15 ? 5.1 : 5.5;
  const remainingPct = 100 - dateColPct - dayColPct;
  const totalFlexWeight = flexColWeights.reduce((acc, w) => acc + w, 0) || 1;
- const flexColPcts = flexColWeights.map((w) => Number(((w / totalFlexWeight) * remainingPct).toFixed(2)));
+ const rawFlexPcts = flexColWeights.map((w) => Number(((w / totalFlexWeight) * remainingPct).toFixed(2)));
+ const sumExceptLast = rawFlexPcts.slice(0, -1).reduce((acc, v) => acc + v, 0);
+ const flexColPcts = rawFlexPcts.map((v, idx) =>
+   idx === rawFlexPcts.length - 1 ? Number(Math.max(1, remainingPct - sumExceptLast).toFixed(2)) : v
+ );
  const printTableFont = totalCols <= 12 ? '9px' : totalCols <= 15 ? '8px' : '7.5px';
  const printHeadFont = totalCols <= 12 ? '9px' : totalCols <= 15 ? '8px' : '7.2px';
 
@@ -1819,9 +1841,9 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  /* ========================================================================= */
  /* 2. SINGLE-DAY OFFICIAL BAF PARADE STATE SHEET */
  /* ========================================================================= */
- <div>
+ <div className="print:break-inside-avoid">
  {/* TOP DOCUMENT HEADER */}
- <div className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div className="relative mb-1.5 text-center" style={{ fontFamily: 'Arial, sans-serif' }}>
  <div className="text-center">
  <h1 className="font-bold tracking-wide text-slate-900 dark:text-white underline inline-block text-base uppercase">
  {customDocumentHeader || (isPtDocument ? 'PT STATE : AIRMEN' : isOthersDocument ? 'OTHERS STATE : AIRMEN' : 'PARADE STATE : AIRMEN')}
@@ -1831,7 +1853,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  {getActiveOfficeIdentity().officeName} {selectedFlight !== 'Overall' ? `(${selectedFlight.toUpperCase()} FLT)` : ''}
  </h2>
  </div>
- <div className="text-right font-normal pr-1 text-xs mt-1 text-slate-900 dark:text-white">
+ <div className="text-right font-normal pr-1 text-xs mt-0.5 text-slate-900 dark:text-white">
  Date: {formatDateShort(fromDate)}
  </div>
  </div>
@@ -1846,58 +1868,63 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  <tr className="text-slate-900 dark:text-white font-bold border-b-2 border-slate-900 dark:border-slate-600">
  <th className="border border-slate-800 dark:border-slate-700 p-1 align-middle text-center min-w-[70px] font-bold">Unit / Flight</th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Total Str</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Total Str</div>
  </th>
 
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Det/Tdy</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Det/Tdy</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Eff Str</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Eff Str</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Leave</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Leave</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Essn</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Essn</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">CMH/ BNS/ BSH</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight">CMH/<br />BNS/ BSH</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Sick Report</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px] whitespace-nowrap">Sick Report</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Drill Cat-C</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px] whitespace-nowrap">Drill Cat-C</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Security Duty On/Off</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px] whitespace-nowrap">Duty On/Off</div>
  </th>
- {!isPtDocument && (<th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Canteen</div></th>)}
+ {!isPtDocument && (<th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center"><div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px] whitespace-nowrap">Canteen</div></th>)}
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Bake & Bite</div>
- </th>
- <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px]">Bake &amp;<br />Bite</div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px]">Guard of Honour</div>
+ <div className={`w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px] ${isPtDocument ? 'whitespace-nowrap' : ''}`}>{isPtDocument ? 'Reception Duty' : (<>K/O &amp;<br />Reception</>)}</div>
  </th>
- {Object.keys(customDisposalsMap).map(key => (
+ <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight text-[9px]">Guard of<br />Honour</div>
+ </th>
+ {Object.keys(customDisposalsMap).map(key => {
+ const words = key.trim().split(/\s+/);
+ const isTwoWordsOrLess = words.length <= 2;
+ const splitAt = Math.ceil(words.length / 2);
+ return (
  <th key={key} className="border border-slate-800 dark:border-slate-700 border-black p-0.5 align-middle text-center">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">
- {key}
+ <div className={`w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center text-[9px] font-bold leading-tight ${isTwoWordsOrLess ? 'whitespace-nowrap' : ''}`}>
+ {isTwoWordsOrLess ? key : (<>{words.slice(0, splitAt).join(' ')}<br />{words.slice(splitAt).join(' ')}</>)}
  </div>
  </th>
- ))}
- <th className="border border-black p-0.5 align-middle text-center font-extrabold"><div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] text-[9px] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
+ );
+ })}
+ <th className="border border-black p-0.5 align-middle text-center font-extrabold"><div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center text-[9px] font-bold leading-tight">{isPtDocument ? (<>Total Out<br />PT</>) : (<>Total Out<br />Parade</>)}</div></th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center font-extrabold">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </div>
  </th>
  <th className="border border-slate-800 dark:border-slate-700 p-0.5 align-middle text-center min-w-[35px]">
- <div className="w-full h-28 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">
  Rmk
  </div>
  </th>
@@ -1956,52 +1983,38 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {(() => {
-   const numOnParadeSubCols = onPtList.length > 30 ? 3 : onPtList.length > 15 ? 2 : 1;
+   const numOnParadeSubCols = Math.max(1, Math.ceil(onPtList.length / 15));
    const hasColA = bakeBiteList.length > 0 || tdyList.length > 0 || canteenList.length > 0 || leaveList.length > 0 || essnList.length > 0;
    const hasColB = cmhList.length > 0 || sickReportList.length > 0 || drillCatCList.length > 0 || receptionList.length > 0 || gamesList.length > 0;
    const activeOtherDisposalCols = (hasColA ? 1 : 0) + (hasColB ? 1 : 0);
    const canPlaceDutyOffBeside = dutyOnList.length > 0 && dutyOffList.length > 0 && (numOnParadeSubCols + activeOtherDisposalCols <= 4);
 
    return (
- <div className="flex flex-wrap items-start justify-start gap-8">
- {/* 1ST COLUMN: ON PARADE / ON PT (1 TO 15 ON LEFT, 16+ ON RIGHT, NIL IF EMPTY) */}
- <div className="min-w-[200px] flex-shrink-0 pr-3">
+ <div className="flex flex-wrap items-start justify-start gap-10">
+ {/* 1ST COLUMN: ON PARADE / ON PT (STRICTLY MAX 15 PER COLUMN: 1-15, 16-30, 31-45, 46+, NIL IF EMPTY) */}
+ <div className="shrink-0 pr-2">
  <h3 className="font-bold underline text-slate-900 dark:text-white mb-1.5 capitalize tracking-wide">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </h3>
 
  {onPtList.length > 0 ? (
- <div className="flex items-start gap-8">
- {/* Left side: 1 to 15 */}
- <ol className="space-y-0.5 font-normal leading-tight">
- {onPtList.slice(0, 15).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${idx}`} className="whitespace-nowrap">
- {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
-
- {/* Right side: 16+ */}
- {onPtList.length > 15 && (
- <ol className="space-y-0.5 font-normal leading-tight">
- {onPtList.slice(15, 30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${16 + idx}`} className="whitespace-nowrap">
- {16 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
- )}
-
- {/* Extra column if > 30 */}
- {onPtList.length > 30 && (
- <ol className="space-y-0.5 font-normal leading-tight">
- {onPtList.slice(30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${31 + idx}`} className="whitespace-nowrap">
- {31 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
- )}
+ <div className="flex items-start gap-10">
+ {Array.from({ length: Math.ceil(onPtList.length / 15) }, (_, colIdx) => {
+   const start = colIdx * 15;
+   const chunk = onPtList.slice(start, start + 15);
+   return (
+     <ol key={colIdx} className="space-y-0.5 font-normal leading-tight">
+       {chunk.map((item, idx) => (
+         <li
+           key={`${item.airman.id || item.airman.bdNo || "pt"}-${start + idx}`}
+           className="whitespace-nowrap"
+         >
+           {start + idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
+         </li>
+       ))}
+     </ol>
+   );
+ })}
  </div>
  ) : (
  <div className="font-bold text-slate-900 dark:text-white">Nil</div>
@@ -2010,10 +2023,10 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
 
  
  {/* DISPOSALS (ONLY SHOWN IF NOT EMPTY / >0 AIRMEN, NO EMPTY HEADINGS) */}
- <div className="flex-1 flex flex-wrap items-start justify-start gap-7">
+ <div className="flex-1 flex flex-wrap items-start justify-start gap-10">
  {/* DISPOSAL COL A */}
  {hasColA && (
- <div className="min-w-[130px] max-w-[180px] flex flex-col space-y-3">
+ <div className="min-w-[140px] flex flex-col space-y-2.5">
  {bakeBiteList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white mb-1 capitalize tracking-wide">Bake & Bite</h3>
@@ -2051,7 +2064,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
 
  {/* DISPOSAL COL B */}
  {hasColB && (
- <div className="min-w-[135px] max-w-[185px] flex flex-col space-y-3">
+ <div className="min-w-[140px] flex flex-col space-y-2.5">
  {cmhList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-slate-900 dark:text-white mb-1 capitalize tracking-wide">
@@ -2133,8 +2146,8 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
  })()}
  </div>
  
-              {/* SPACER ROW: 0.9 INCH HEIGHT TO PROVIDE AMPLE SIGNATURE HEADROOM */}
- <div className="w-full" style={{ height: '0.9in' }} />
+              {/* GENEROUS SIGNATURE HEADROOM ABOVE NAMES */}
+ <div className="w-full" style={{ height: '0.68in' }} />
 
  {/* OFFICIAL SIGNATURE FOOTER */}
  <div
@@ -2204,6 +2217,7 @@ export const PrintableParadeStateModal: React.FC<PrintableParadeStateModalProps>
               
  </div>
  )}
+ </PrintConfidentialShell>
  </div>
 
  {/* Row Edit Popover */}

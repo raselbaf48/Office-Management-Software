@@ -118,6 +118,10 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
     el.parentNode?.removeChild(el);
   });
 
+  const hasConfBanner = Boolean(clone.querySelector('.print-conf-banner'));
+  const confHtml = '<div class="print-conf-banner">CONFIDENTIAL</div>';
+  const bodyHtml = hasConfBanner ? clone.innerHTML : `${confHtml}${clone.innerHTML}${confHtml}`;
+
   // A comprehensive CSS stylesheet that maps common Tailwind classes used in our print previews
   // to standard CSS that Microsoft Word understands.
   const html = `
@@ -138,17 +142,17 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
         @page {
           size: ${orientation === 'landscape' ? '841.9pt 595.3pt' : '595.3pt 841.9pt'}; /* A4 dimensions */
           ${orientation === 'landscape' ? 'mso-page-orientation: landscape;' : ''}
-          margin: 36.0pt 36.0pt 36.0pt 36.0pt;
-          mso-header-margin: 36.0pt;
-          mso-footer-margin: 36.0pt;
+          margin: 18.0pt 32.0pt 18.0pt 32.0pt;
+          mso-header-margin: 10.0pt;
+          mso-footer-margin: 10.0pt;
           mso-paper-source: 0;
         }
         @page Section1 {
           size: ${orientation === 'landscape' ? '841.9pt 595.3pt' : '595.3pt 841.9pt'};
           ${orientation === 'landscape' ? 'mso-page-orientation: landscape;' : ''}
-          margin: 36.0pt 36.0pt 36.0pt 36.0pt;
-          mso-header-margin: 36.0pt;
-          mso-footer-margin: 36.0pt;
+          margin: 18.0pt 32.0pt 18.0pt 32.0pt;
+          mso-header-margin: 10.0pt;
+          mso-footer-margin: 10.0pt;
           mso-paper-source: 0;
         }
         div.Section1 {
@@ -157,9 +161,9 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
         @page WordSection1 {
           size: ${orientation === 'landscape' ? '841.9pt 595.3pt' : '595.3pt 841.9pt'}; /* A4 dimensions */
           ${orientation === 'landscape' ? 'mso-page-orientation: landscape;' : ''}
-          margin: 36.0pt 36.0pt 36.0pt 36.0pt;
-          mso-header-margin: 36.0pt;
-          mso-footer-margin: 36.0pt;
+          margin: 18.0pt 32.0pt 18.0pt 32.0pt;
+          mso-header-margin: 10.0pt;
+          mso-footer-margin: 10.0pt;
           mso-paper-source: 0;
         }
         div.WordSection1 {
@@ -174,6 +178,15 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
         
         h1, h2, h3, .text-lg, .text-xl, .text-base, .text-sm, .text-xs {
           font-size: 12pt !important;
+        }
+        .print-conf-banner {
+          text-align: center !important;
+          font-weight: bold !important;
+          font-size: 11pt !important;
+          letter-spacing: 2px;
+          text-transform: uppercase;
+          color: #64748b !important;
+          margin: 2pt 0;
         }
         .text-center { text-align: center; }
         .text-left { text-align: left; }
@@ -201,7 +214,7 @@ export function exportHtmlToWord(elementId: string, filename: string, orientatio
     </head>
     <body>
       <div class="Section1 WordSection1">
-        ${clone.innerHTML}
+        ${bodyHtml}
       </div>
     </body>
     </html>

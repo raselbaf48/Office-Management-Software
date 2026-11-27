@@ -45,13 +45,44 @@ body, button, input, select, textarea, table, th, td {
   font-family: 'Noto Serif Bengali', 'Tiro Bangla', 'Hind Siliguri', 'SolaimanLipi', 'Kalpurush', 'Inter', system-ui, sans-serif !important;
 }
 
+@media screen {
+  .print-conf-table,
+  .print-conf-tbody,
+  .print-conf-row,
+  .print-conf-cell {
+    display: block !important;
+    width: 100% !important;
+  }
+  .print-conf-thead,
+  .print-conf-tfoot {
+    display: none !important;
+  }
+  .print-conf-thead.print-conf-show-screen,
+  .print-conf-tfoot.print-conf-show-screen {
+    display: block !important;
+    width: 100% !important;
+  }
+  .print-conf-banner {
+    display: block;
+    text-align: center;
+    font-family: Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #64748b;
+    line-height: 1.1;
+    user-select: none;
+  }
+}
+
 @media print {
   @page {
-    margin: 8mm 12mm;
+    margin: 4mm 8mm;
   }
   @page duty-register-page {
     size: landscape;
-    margin: 5mm;
+    margin: 4mm 5mm;
   }
   .duty-register-print {
     page: duty-register-page;
@@ -88,11 +119,11 @@ body, button, input, select, textarea, table, th, td {
   }
   @page duty-ratio-page-landscape {
     size: A4 landscape;
-    margin: 12.7mm;
+    margin: 5mm 10mm;
   }
   @page duty-ratio-page-portrait {
     size: A4 portrait;
-    margin: 12.7mm;
+    margin: 5mm 10mm;
   }
   .duty-ratio-print-landscape {
     page: duty-ratio-page-landscape;
@@ -109,6 +140,37 @@ body, button, input, select, textarea, table, th, td {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 100% !important;
+  }
+  .print-conf-table {
+    display: table !important;
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+  .print-conf-thead {
+    display: table-header-group !important;
+  }
+  .print-conf-tbody {
+    display: table-row-group !important;
+  }
+  .print-conf-tfoot {
+    display: table-footer-group !important;
+  }
+  .print-conf-row {
+    display: table-row !important;
+  }
+  .print-conf-cell {
+    display: table-cell !important;
+  }
+  .print-conf-banner {
+    display: block !important;
+    text-align: center !important;
+    font-family: Arial, sans-serif !important;
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.12em !important;
+    text-transform: uppercase !important;
+    color: #64748b !important;
+    line-height: 1.1 !important;
   }
   html, body {
     background: #ffffff !important;

@@ -195,6 +195,11 @@ function sanitizeDomStylesForHtml2Canvas(
       node.style.backgroundColor = '#000000';
       continue;
     }
+    if (node.getAttribute('data-conf-banner') === 'true' || node.classList.contains('print-conf-banner')) {
+      node.style.color = '#64748b';
+      node.style.backgroundColor = 'transparent';
+      continue;
+    }
     const cl = node.classList;
     const isRed = cl.contains('text-red-600') || Boolean(node.closest('tr.text-red-600'));
     const isLightRow =
@@ -306,9 +311,14 @@ function buildBaseCssRules(shouldPreserveColors: boolean): string {
       .pdf-export-sheet th,
       .pdf-export-sheet td,
       .pdf-export-sheet li,
-      .pdf-export-sheet div:not([data-pdf-border-line="true"]),
-      .pdf-export-sheet span {
+      .pdf-export-sheet div:not([data-pdf-border-line="true"]):not([data-conf-banner="true"]):not(.print-conf-banner),
+      .pdf-export-sheet span:not([data-conf-banner="true"]):not(.print-conf-banner) {
         color: #000000 !important;
+        background-color: transparent !important;
+      }
+      .pdf-export-sheet [data-conf-banner="true"],
+      .pdf-export-sheet .print-conf-banner {
+        color: #64748b !important;
         background-color: transparent !important;
       }
       .pdf-export-sheet [data-pdf-border-line="true"] {
@@ -446,7 +456,6 @@ export async function exportElementToPdf({
     const pageWidthMm = pdf.internal.pageSize.getWidth();
     const pageHeightMm = pdf.internal.pageSize.getHeight();
     const usableWidthMm = pageWidthMm - marginMm * 2;
-    const usableHeightMm = pageHeightMm - marginMm * 2;
     const pixelRatio = 2;
 
     // 1. Primary path: Capture discrete PaginatedPaperPreview page slots verbatim (1:1 Preview parity)
@@ -462,6 +471,10 @@ export async function exportElementToPdf({
       : [];
 
     if (previewHost && previewPages.length > 0) {
+      const verticalMarginMm =
+        Number(previewHost.getAttribute('data-paginated-vertical-margin-mm')) ||
+        Math.min(marginMm, 5);
+      const usableHeightMm = pageHeightMm - verticalMarginMm * 2;
       const contentWidthPx =
         Number(previewHost.getAttribute('data-paginated-content-width')) ||
         Math.max(340, getPageDimensions({ paperSize: format, orientation }).widthPx - Math.round((marginMm / 25.4) * 96) * 2);
@@ -547,7 +560,7 @@ export async function exportElementToPdf({
           pageCanvas.toDataURL('image/jpeg', 0.96),
           'JPEG',
           offsetX,
-          marginMm,
+          verticalMarginMm,
           drawWidthMm,
           drawHeightMm,
           undefined,
@@ -566,6 +579,16 @@ export async function exportElementToPdf({
     }
 
     // 2. Fallback path: Standalone elements not wrapped inside PaginatedPaperPreview
+    const fallbackVerticalMarginMm = Math.min(marginMm, 8);
+    const stampConfidentialHeaderFooter = (pageNum: number) => {
+      pdf.setPage(pageNum);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(8.5);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text('CONFIDENTIAL', pageWidthMm / 2, 4.5, { align: 'center' });
+      pdf.text('CONFIDENTIAL', pageWidthMm / 2, pageHeightMm - 2.5, { align: 'center' });
+    };
+    const usableHeightMm = pageHeightMm - fallbackVerticalMarginMm * 2;
     const pageDims = getPageDimensions({ paperSize: format, orientation });
     const marginPx = Math.round((marginMm / 25.4) * 96);
     const usablePaperWidthPx = Math.max(360, pageDims.widthPx - marginPx * 2);
@@ -679,12 +702,13 @@ export async function exportElementToPdf({
         canvas.toDataURL('image/jpeg', 0.96),
         'JPEG',
         marginMm,
-        marginMm,
+        fallbackVerticalMarginMm,
         usableWidthMm,
         totalHeightMm,
         undefined,
         'FAST'
       );
+      stampConfidentialHeaderFooter(1);
     } else {
       const borderThickness = Math.max(2, Math.round(1.0 * scaleY));
 
@@ -757,12 +781,13 @@ export async function exportElementToPdf({
           pageCanvas.toDataURL('image/jpeg', 0.96),
           'JPEG',
           marginMm,
-          marginMm,
+          fallbackVerticalMarginMm,
           usableWidthMm,
           pageSliceHeightMm,
           undefined,
           'FAST'
         );
+        stampConfidentialHeaderFooter(slice.pageIndex + 1);
       }
     }
 

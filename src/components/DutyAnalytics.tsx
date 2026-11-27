@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import { Airman, AirmanDutyStats, ConflictAlert, FlightName, DutyAssignment } from '../types';
 import { DUTY_TYPES, DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { BarChart3, ShieldCheck, AlertCircle, Award, Scale, Layers, RefreshCw, Calendar, X, ChevronLeft, ChevronRight, Printer } from 'lucide-react';
@@ -920,14 +921,17 @@ const DutyDetailsModal: React.FC<{
             </div>
           </div>
           <div className="flex-1 overflow-auto bg-slate-800 p-4 sm:p-8 flex justify-center print:bg-white print:p-0 print:block print:overflow-visible h-[calc(100vh-80px)]">
-            <div className="bg-white text-black p-8 sm:p-12 shadow-2xl max-w-[1200px] w-full mx-auto print:shadow-none print:p-0 print:w-full print:max-w-none print:m-0 h-max min-h-full">
-              <div className="text-center mb-6 border-b-2 border-black pb-4">
+            <style>{`@media print { @page { margin: 4mm 6mm; } }`}</style>
+            <div className="bg-white text-black p-4 sm:p-6 shadow-2xl max-w-[1200px] w-full mx-auto print:shadow-none print:p-0 print:w-full print:max-w-none print:m-0 h-max min-h-full">
+              <PrintConfidentialShell showOnScreen>
+              <div className="text-center mb-3 border-b-2 border-black pb-2">
                 <h1 className="text-2xl font-black">{dutyId} Duty Matrix</h1>
                 <p className="text-sm font-bold mt-1">Month: {currentMonth}/{currentYear}</p>
               </div>
               <div className="overflow-x-auto">
                 {renderTableContent()}
               </div>
+              </PrintConfidentialShell>
             </div>
           </div>
         </div>,

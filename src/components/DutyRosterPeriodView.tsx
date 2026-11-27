@@ -1058,7 +1058,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  {rosterMode === 'BASE_DUTIES' && (
  <div className="bg-white text-black" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  {/* Document Header */}
- <div data-pdf-repeat-header="true" className="text-center pb-4 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
+ <div data-pdf-repeat-header="true" className="text-center pb-2 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <h2 className="font-bold uppercase tracking-wider underline text-black" style={{ fontSize: '12pt' }}>
  BASE DUTY: AIRMEN
  </h2>
@@ -1071,7 +1071,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
 
  {/* Section Tables */}
- <div className="mt-6 space-y-8">
+ <div className="mt-3 space-y-6">
  {baseDutiesSections.map((sec, sIdx) => {
  if (sec.items.length === 0) return null;
 
@@ -1168,7 +1168,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  style={{ fontFamily: 'Arial, sans-serif' }}
  >
  {/* Document Header */}
- <div data-pdf-repeat-header="true" className="text-center pb-5 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif' }}>
+ <div data-pdf-repeat-header="true" className="text-center pb-2 border-b border-slate-300" style={{ fontFamily: 'Arial, sans-serif' }}>
  <h2 className="font-bold uppercase tracking-wide underline text-black" style={{ fontSize: '12pt' }}>
  IDAC DUTY ROSTER : {getActiveOfficeIdentity().officeName}
  </h2>
@@ -1178,7 +1178,7 @@ export const DutyRosterPeriodView: React.FC<DutyRosterPeriodViewProps> = ({
  </div>
 
  {/* IDA Center Duty Table */}
- <div className="mt-6 overflow-x-auto">
+ <div className="mt-3 overflow-x-auto">
  <table
  className="no-zebra w-full text-center border-collapse border border-black text-black"
  style={{

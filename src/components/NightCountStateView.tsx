@@ -1,4 +1,5 @@
 import { FlyingWingStateView } from './FlyingWingStateView';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import { DateNavigator } from './DateNavigator';
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -1065,6 +1066,14 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
     if (!list || list.length === 0) {
       return <div className="text-center text-slate-400 font-normal py-1">-</div>;
     }
+    if (list.length === 1) {
+      const item = list[0];
+      return (
+        <div className="text-[11px] leading-snug font-normal text-center whitespace-nowrap">
+          {formatAirmanName(item.airman.rank)} {formatAirmanName(item.airman.name)}
+        </div>
+      );
+    }
     return (
       <ol className="space-y-0.5 text-[11px] leading-snug font-normal text-left">
         {list.map((item, idx) => (
@@ -1135,7 +1144,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
         @media print {
           @page {
             size: A4 landscape;
-            margin: 8mm;
+            margin: 4mm 6mm;
           }
           body {
             background: white !important;
@@ -1276,7 +1285,8 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
         </button>
       </div>
       {activeTab === 'Flying Wing' ? (
-        <div id="official-parade-document" className={`bg-white dark:bg-slate-900 text-black dark:text-white print:text-black border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none ${(isFlgWgPrintOpen || isInternalPrintOpen) ? 'print:hidden' : ''}`}>
+        <div id="official-parade-document" className={`bg-white dark:bg-slate-900 text-black dark:text-white print:text-black border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-4 print:p-0 overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none ${(isFlgWgPrintOpen || isInternalPrintOpen) ? 'print:hidden' : ''}`}>
+          <PrintConfidentialShell showOnScreen>
           <FlyingWingStateView 
             isAddModalOpen={showFlyingWingAdd}
             onCloseAddModal={() => setShowFlyingWingAdd(false)}
@@ -1295,11 +1305,13 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
               driving: 0
             }} 
           />
+          </PrintConfidentialShell>
         </div>
       ) : (
       <>
       {/* OFFICIAL PARADE DOCUMENT SHEET (DISPLAYED ON SCREEN & IN PRINT) */}
-      <div id="official-parade-document" className={`bg-white dark:bg-slate-900 text-black dark:text-white print:text-black border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none ${(isFlgWgPrintOpen || isInternalPrintOpen) ? 'print:hidden' : ''}`}>
+      <div id="official-parade-document" className={`bg-white dark:bg-slate-900 text-black dark:text-white print:text-black border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-4 print:p-0 overflow-x-auto print:bg-white print:text-black print:border-none print:shadow-none ${(isFlgWgPrintOpen || isInternalPrintOpen) ? 'print:hidden' : ''}`}>
+        <PrintConfidentialShell showOnScreen>
         {loading && (isMultiDay ? Object.keys(multiDayStates).length === 0 : !singleParadeData) ? (
           <div className="py-20 text-center text-slate-400">
             <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-500" />
@@ -1835,6 +1847,7 @@ export const NightCountStateView: React.FC<NightCountStateViewProps> = ({
             )}
           </div>
         )}
+        </PrintConfidentialShell>
       </div>
       </>
       )}

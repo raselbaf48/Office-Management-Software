@@ -6,17 +6,20 @@ interface PageSetupBarProps {
   value: PageSetupConfig;
   onChange: (next: PageSetupConfig) => void;
   defaultLabel?: string;
+  lockOrientation?: PageOrientationType;
 }
 
-export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, defaultLabel }) => {
+export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, defaultLabel, lockOrientation }) => {
   const handlePaperChange = (paperSize: PaperSize) => {
     onChange({ ...value, paperSize });
   };
 
   const handleOrientationChange = (orientation: PageOrientationType) => {
+    if (lockOrientation && orientation !== lockOrientation) return;
     onChange({ ...value, orientation });
   };
 
+  const effectiveOrientation = lockOrientation || value.orientation;
   const activePaperLabel =
     PAPER_SIZE_OPTIONS.find((p) => p.value === value.paperSize)?.label || 'A4';
 
@@ -28,7 +31,7 @@ export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, def
           Page Setup
         </span>
         <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
-          {activePaperLabel} • {value.orientation === 'landscape' ? 'Landscape' : 'Portrait'}
+          {activePaperLabel} • {effectiveOrientation === 'landscape' ? 'Landscape' : 'Portrait'}
           {value.margin ? ` • Margin: ${value.margin === 'normal' ? 'Normal' : 'Narrow'}` : ''}
         </span>
         {defaultLabel && (
@@ -65,11 +68,14 @@ export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, def
         <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold space-x-1">
           <button
             type="button"
+            disabled={Boolean(lockOrientation && lockOrientation !== 'landscape')}
             onClick={() => handleOrientationChange('landscape')}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-              value.orientation === 'landscape'
-                ? 'bg-emerald-600 text-white shadow-xs font-black'
-                : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'
+            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg transition-all ${
+              lockOrientation && lockOrientation !== 'landscape'
+                ? 'opacity-40 cursor-not-allowed text-slate-400'
+                : effectiveOrientation === 'landscape'
+                ? 'bg-emerald-600 text-white shadow-xs font-black cursor-pointer'
+                : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 cursor-pointer'
             }`}
           >
             <RectangleHorizontal className="w-3.5 h-3.5 shrink-0" />
@@ -77,11 +83,15 @@ export const PageSetupBar: React.FC<PageSetupBarProps> = ({ value, onChange, def
           </button>
           <button
             type="button"
+            disabled={Boolean(lockOrientation && lockOrientation !== 'portrait')}
+            title={lockOrientation === 'landscape' ? 'Single-day format is fixed to Landscape (1 Page)' : undefined}
             onClick={() => handleOrientationChange('portrait')}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-              value.orientation === 'portrait'
-                ? 'bg-emerald-600 text-white shadow-xs font-black'
-                : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'
+            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg transition-all ${
+              lockOrientation && lockOrientation !== 'portrait'
+                ? 'opacity-40 cursor-not-allowed text-slate-400'
+                : effectiveOrientation === 'portrait'
+                ? 'bg-emerald-600 text-white shadow-xs font-black cursor-pointer'
+                : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 cursor-pointer'
             }`}
           >
             <RectangleVertical className="w-3.5 h-3.5 shrink-0" />

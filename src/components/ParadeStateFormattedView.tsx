@@ -458,9 +458,19 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  const datesInRange = getDatesInRange(fromDate, toDate);
  const isMultiDay = datesInRange.length > 1;
- const activeMarginType = isMultiDay ? 'narrow' : 'normal';
+ const effectiveOrientation: 'landscape' | 'portrait' = isMultiDay ? pageSetup.orientation : 'landscape';
+ useEffect(() => {
+   if (!isMultiDay && pageSetup.orientation !== 'landscape') {
+     setPageSetup((prev) => ({ ...prev, orientation: 'landscape' }));
+   }
+ }, [isMultiDay, pageSetup.orientation]);
+ const activeMarginType = 'narrow';
  const activeMarginSpec = getMarginSpec(activeMarginType);
- const effectivePageSetup: PageSetupConfig = { ...pageSetup, margin: activeMarginType };
+ const effectivePageSetup: PageSetupConfig = {
+   ...pageSetup,
+   orientation: effectiveOrientation,
+   margin: activeMarginType,
+ };
 
   // Single Day Fetch
   const fetchSingle = async (_showLoader = false) => {
@@ -878,7 +888,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
        elementId: 'official-parade-document',
        fileName: `${getExportBaseFileName()}.pdf`,
        format: pageSetup.paperSize,
-       orientation: pageSetup.orientation,
+       orientation: effectiveOrientation,
        marginMm: activeMarginSpec.marginMm,
      });
    } catch (err) {
@@ -997,7 +1007,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
              } else if (isLeaveCol) {
                noteStr = ` - ${formatLeaveShortName(it.dutyName, it.notes)}`;
              }
-             return `${idx + 1}. ${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
+             const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+             return `${prefix}${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
            })
            .join('\n')
        : '-';
@@ -1339,7 +1350,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
                } else if (isLeaveCol) {
                  noteStr = ` - ${formatLeaveShortName(it.dutyName, it.notes)}`;
                }
-               return `${idx + 1}. ${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
+               const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+               return `${prefix}${formatRank(it.airman.rank)} ${formatAirmanName(it.airman.name)}${noteStr}`;
             })
             .join('\n')
         : '-';
@@ -1710,6 +1722,22 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
     if (!list || list.length === 0) {
       return <div className="text-center text-slate-400 font-normal py-1">-</div>;
     }
+    if (list.length === 1) {
+      const item = list[0];
+      const shortOffNote = showNotes
+        ? formatDutyOffShortName(item.previousDutyCode, item.previousDutyName, item.dutyName || item.notes)
+        : '';
+      const shortLeaveNote = showLeaveType
+        ? formatLeaveShortName(item.dutyName, item.notes)
+        : '';
+      return (
+        <div className="text-[11px] leading-snug font-normal text-center whitespace-nowrap">
+          {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
+          {shortOffNote ? ' - ' + shortOffNote : ''}
+          {shortLeaveNote ? ` - ${shortLeaveNote}` : ''}
+        </div>
+      );
+    }
     return (
       <ol className="space-y-0.5 text-[11px] leading-snug font-normal text-left">
         {list.map((item, idx) => {
@@ -1756,14 +1784,14 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  openEditDisposal(item.airman, effectiveCode, dutyName, noteText || item.note);
  }
  }}
- className={`truncate group flex items-center justify-between ${
+ className={`group flex items-center justify-between whitespace-nowrap ${
  (role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER')
  ? 'cursor-pointer hover:text-purple-800 hover:bg-purple-50 px-1 rounded transition-colors'
  : ''
  }`}
  title={(role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'OWNER') ? 'Click to edit, change or remove disposal' : undefined}
  >
- <span className="truncate text-black">
+ <span className="whitespace-nowrap text-black">
  {i + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
  {(isDutyOn || isDutyOff) && noteText ? (
  <span className="text-slate-900 font-medium"> - {noteText}</span>
@@ -1793,8 +1821,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <style>{`
  @media print {
  @page {
- size: ${pageSetup.paperSize} ${pageSetup.orientation};
- margin: ${activeMarginSpec.cssMargin};
+ size: ${pageSetup.paperSize} ${effectiveOrientation};
+ margin: ${isMultiDay ? '4mm' : '3mm'} ${activeMarginSpec.cssMargin};
  }
  body {
  background: white !important;
@@ -2078,17 +2106,19 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <PageSetupBar
    value={effectivePageSetup}
    onChange={setPageSetup}
-   defaultLabel={isMultiDay ? 'Default: A4 Landscape • Narrow Margin' : 'Default: A4 Landscape • Normal Margin'}
+   lockOrientation={isMultiDay ? undefined : 'landscape'}
+   defaultLabel={isMultiDay ? 'Default: A4 Landscape • Narrow Margin' : 'Fixed: Landscape • 1 Page Fit'}
  />
 
  {/* OFFICIAL PARADE DOCUMENT SHEET (ACTUAL PRINTABLE WHITE PAPER PREVIEW IN SELECTED PAGE SETUP) */}
  <PaginatedPaperPreview
    elementId="official-parade-document"
    paperSize={pageSetup.paperSize}
-   orientation={pageSetup.orientation}
+   orientation={effectiveOrientation}
    marginType={activeMarginType}
    marginMm={activeMarginSpec.marginMm}
-   refreshKey={`${isMultiDay}-${fromDate}-${toDate}-${selectedFlight}-${pageSetup.paperSize}-${pageSetup.orientation}-${loading}-${singleParadeData?.personnelStatusList?.length || 0}-${Object.keys(multiDayStates).length}`}
+   forceSinglePage={!isMultiDay}
+   refreshKey={`${isMultiDay}-${fromDate}-${toDate}-${selectedFlight}-${pageSetup.paperSize}-${effectiveOrientation}-${loading}-${singleParadeData?.personnelStatusList?.length || 0}-${Object.keys(multiDayStates).length}`}
  >
  <div className="w-full print:bg-white print:text-black">
  {loading && (isMultiDay ? Object.keys(multiDayStates).length === 0 : !singleParadeData) ? (
@@ -2102,7 +2132,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  <div>
  {/* DOCUMENT TOP HEADER */}
- <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-2 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <div className="text-center">
  <h1 className="font-bold tracking-wide text-black underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {documentHeader}
@@ -2183,7 +2213,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  };
  
  return (
- <div className="overflow-x-auto my-3">
+ <div className="overflow-x-auto my-1.5">
 
  <table className="no-zebra w-full print:min-w-0 text-center align-middle border-collapse border border-black" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <thead>
@@ -2352,9 +2382,9 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  /* ========================================================================= */
  /* 2. SINGLE-DAY OFFICIAL BAF PARADE STATE SHEET */
  /* ========================================================================= */
- <div>
+ <div className="print:break-inside-avoid">
  {/* TOP DOCUMENT HEADER */}
- <div data-pdf-repeat-header="true" className="relative mb-3 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
+ <div data-pdf-repeat-header="true" className="relative mb-1 text-center" style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}>
  <div className="text-center">
  <h1 className="font-bold tracking-wide text-black underline inline-block uppercase" style={{ fontSize: '12pt' }}>
  {documentHeader}
@@ -2368,13 +2398,13 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
        : selectedFlight.toUpperCase())}
  </h2>
  </div>
- <div className="text-right font-normal pr-1 mt-1 text-black" style={{ fontSize: '12pt' }}>
+ <div className="text-right font-normal pr-1 mt-0.5 text-black" style={{ fontSize: '12pt' }}>
  Date: {formatDateShort(fromDate)}
  </div>
  </div>
 
  {/* SUMMARY MATRIX TABLE: EXACT SINGLE-ROW FORMAT FOR SELECTED FLIGHT / OVERALL */}
- <div className="overflow-x-auto my-1">
+ <div className="overflow-x-auto my-0.5">
  <table
  className="w-full text-center align-middle border-collapse border border-black text-black"
  style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
@@ -2383,58 +2413,63 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  <tr className="text-black font-bold border-b border-black">
  <th className="border border-black p-1 align-middle text-center min-w-[70px] font-bold">Unit / Flight</th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Total Str</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Total Str</div>
  </th>
 
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Det/Tdy</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Det/Tdy</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Eff Str</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Eff Str</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Leave</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Leave</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Essn</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Essn</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">CMH/ BNS/ BSH</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight">CMH/<br />BNS/ BSH</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Sick Report</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Sick Report</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Drill Cat-C</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Drill Cat-C</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Security Duty On/Off</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Duty On/Off</div>
  </th>
- {!isPtDocument && (<th className="border border-black p-0.5 align-middle text-center"><div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Canteen</div></th>)}
+ {!isPtDocument && (<th className="border border-black p-0.5 align-middle text-center"><div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">Canteen</div></th>)}
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Bake & Bite</div>
- </th>
- <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">{isPtDocument ? "Reception Duty" : "K/O & Reception"}</div>
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight">Bake &amp;<br />Bite</div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">Guard of Honour</div>
+ <div className={`w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight ${isPtDocument ? 'whitespace-nowrap' : ''}`}>{isPtDocument ? 'Reception Duty' : (<>K/O &amp;<br />Reception</>)}</div>
  </th>
- {Object.keys(customDisposalsMap).map(key => (
+ <th className="border border-black p-0.5 align-middle text-center">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight">Guard of<br />Honour</div>
+ </th>
+ {Object.keys(customDisposalsMap).map(key => {
+ const words = key.trim().split(/\s+/);
+ const isTwoWordsOrLess = words.length <= 2;
+ const splitAt = Math.ceil(words.length / 2);
+ return (
  <th key={key} className="border border-black p-0.5 align-middle text-center">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] font-bold leading-tight">
- {key}
+ <div className={`w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center font-bold leading-tight ${isTwoWordsOrLess ? 'whitespace-nowrap' : ''}`}>
+ {isTwoWordsOrLess ? key : (<>{words.slice(0, splitAt).join(' ')}<br />{words.slice(splitAt).join(' ')}</>)}
  </div>
  </th>
- ))}
- <th className="border border-black p-0.5 align-middle text-center font-bold"><div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)] font-bold leading-tight">{isPtDocument ? 'Total Out PT' : 'Total Out Parade'}</div></th>
+ );
+ })}
+ <th className="border border-black p-0.5 align-middle text-center font-bold"><div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center font-bold leading-tight">{isPtDocument ? (<>Total Out<br />PT</>) : (<>Total Out<br />Parade</>)}</div></th>
  <th className="border border-black p-0.5 align-middle text-center font-bold">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </div>
  </th>
  <th className="border border-black p-0.5 align-middle text-center min-w-[35px]">
- <div className="w-full h-36 flex items-center justify-center [writing-mode:vertical-lr] [transform:rotate(180deg)]">
+ <div className="w-full h-32 flex items-center justify-center [writing-mode:vertical-rl] [transform:rotate(180deg)] text-center leading-tight whitespace-nowrap">
  Rmk
  </div>
  </th>
@@ -2490,56 +2525,44 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* 2ND TABLE / BOTTOM DISPOSAL SECTION */}
  <div
- className="mt-2 pt-1"
+ className="mt-1.5 pt-0.5"
  style={{ fontFamily: 'Arial, sans-serif', fontSize: '12pt' }}
  >
  {(() => {
-   const numOnParadeSubCols = onPtList.length > 30 ? 3 : onPtList.length > 15 ? 2 : 1;
+   const numOnParadeSubCols = Math.max(1, Math.ceil(onPtList.length / 15));
    const hasColA = bakeBiteList.length > 0 || tdyList.length > 0 || canteenList.length > 0 || leaveList.length > 0 || essnList.length > 0;
    const hasColB = cmhList.length > 0 || sickReportList.length > 0 || drillCatCList.length > 0 || receptionList.length > 0 || gamesList.length > 0;
    const activeOtherDisposalCols = (hasColA ? 1 : 0) + (hasColB ? 1 : 0);
    const canPlaceDutyOffBeside = dutyOnList.length > 0 && dutyOffList.length > 0 && (numOnParadeSubCols + activeOtherDisposalCols <= 4);
 
    return (
- <div className="flex flex-wrap items-start justify-start gap-8">
- {/* 1ST COLUMN: ON PARADE / ON PT (1 TO 15 ON LEFT, 16+ ON RIGHT, NIL IF EMPTY) */}
- <div className="min-w-[200px] flex-shrink-0 pr-3">
- <h3 className="font-bold underline text-black mb-1.5 capitalize tracking-wide">
+ <div className="flex flex-wrap items-start justify-start gap-10">
+ {/* 1ST COLUMN: ON PARADE / ON PT (STRICTLY MAX 15 PER COLUMN: 1-15, 16-30, 31-45, 46+, NIL IF EMPTY) */}
+ <div className="shrink-0 pr-2">
+ <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">
  {isPtDocument ? 'On PT' : 'On Parade'}
  </h3>
 
  {onPtList.length > 0 ? (
- <div className="flex items-start gap-8">
- {/* Left side: 1 to 15 */}
- <ol className="space-y-0.5 font-normal leading-tight text-black">
- {onPtList.slice(0, 15).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
- {idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
-
- {/* Right side: 16+ */}
- {onPtList.length > 15 && (
- <ol className="space-y-0.5 font-normal leading-tight text-black">
- {onPtList.slice(15, 30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${16 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
- {16 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
- )}
-
- {/* Extra column if > 30 */}
- {onPtList.length > 30 && (
- <ol className="space-y-0.5 font-normal leading-tight text-black">
- {onPtList.slice(30).map((item, idx) => (
-                      <li key={`${item.airman.id || item.airman.bdNo || "pt"}-${31 + idx}`} className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors" onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')} title="Click to edit, change or remove disposal">
- {31 + idx}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
- </li>
- ))}
- </ol>
- )}
+ <div className="flex items-start gap-10">
+ {Array.from({ length: Math.ceil(onPtList.length / 15) }, (_, colIdx) => {
+   const start = colIdx * 15;
+   const chunk = onPtList.slice(start, start + 15);
+   return (
+     <ol key={colIdx} className="space-y-0.5 font-normal leading-tight text-black">
+       {chunk.map((item, idx) => (
+         <li
+           key={`${item.airman.id || item.airman.bdNo || "pt"}-${start + idx}`}
+           className="whitespace-nowrap cursor-pointer hover:text-emerald-800 hover:bg-emerald-50 px-1 rounded transition-colors"
+           onClick={() => openEditDisposal(item.airman, 'ON_PARADE', 'On Parade')}
+           title="Click to edit, change or remove disposal"
+         >
+           {start + idx + 1}. {formatRank(item.airman.rank)} {formatAirmanName(item.airman.name)}
+         </li>
+       ))}
+     </ol>
+   );
+ })}
  </div>
  ) : (
  <div className="font-bold text-black">Nil</div>
@@ -2548,10 +2571,10 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  
  {/* DISPOSALS (ONLY SHOWN IF NOT EMPTY / >0 AIRMEN, NO EMPTY HEADINGS) */}
- <div className="flex-1 flex flex-wrap items-start justify-start gap-7">
+ <div className="flex-1 flex flex-wrap items-start justify-start gap-10">
  {/* DISPOSAL COL A */}
  {hasColA && (
- <div className="min-w-[130px] max-w-[180px] flex flex-col space-y-3">
+ <div className="min-w-[140px] flex flex-col space-y-2">
  {bakeBiteList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Bake & Bite</h3>
@@ -2589,7 +2612,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* DISPOSAL COL B */}
  {hasColB && (
- <div className="min-w-[135px] max-w-[185px] flex flex-col space-y-3">
+ <div className="min-w-[140px] flex flex-col space-y-2">
  {cmhList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">
@@ -2627,7 +2650,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* DISPOSAL COL C: DUTY ON (+ DUTY OFF BELOW ONLY IF NO HORIZONTAL ROOM) */}
  {(dutyOnList.length > 0 || (!canPlaceDutyOffBeside && dutyOffList.length > 0) || Object.keys(customDisposalsMap).length > 0) && (
- <div className="min-w-[175px] flex flex-col space-y-3">
+ <div className="min-w-[165px] flex flex-col space-y-2">
  {dutyOnList.length > 0 && (
  <div>
  <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Duty On</h3>
@@ -2658,7 +2681,7 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
 
  {/* DISPOSAL COL D: DUTY OFF BESIDE DUTY ON WHEN HORIZONTAL SPACE IS AVAILABLE */}
  {canPlaceDutyOffBeside && dutyOffList.length > 0 && (
- <div className="min-w-[160px] flex flex-col space-y-3">
+ <div className="min-w-[155px] flex flex-col space-y-2">
  <div>
  <h3 className="font-bold underline text-black mb-1 capitalize tracking-wide">Duty Off</h3>
  {renderDisposalAirmenList(dutyOffList, 'DUTY_OFF', 'Duty Off')}
@@ -2673,8 +2696,8 @@ export const ParadeStateFormattedView: React.FC<ParadeStateFormattedViewProps> =
  
               {selectedFlight === 'Overall' && (
               <>
-              {/* SPACER ROW: 0.9 INCH HEIGHT TO PROVIDE AMPLE SIGNATURE HEADROOM */}
- <div className="w-full" style={{ height: '0.9in' }} />
+              {/* GENEROUS SIGNATURE HEADROOM ABOVE NAMES WHILE FITTING ON 1 LANDSCAPE PAGE */}
+ <div className="w-full" style={{ height: '0.68in' }} />
 
  {/* OFFICIAL SIGNATURE FOOTER */}
  <div

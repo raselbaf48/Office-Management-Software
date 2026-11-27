@@ -83,7 +83,7 @@ export const Logo155UASU: React.FC<LogoProps> = ({
         src={activeLogoSrc}
         alt={`${identity.officeName} Crest`}
         onError={() => setImgError(true)}
-        className="h-full w-full aspect-square object-contain drop-shadow-md rounded-xl"
+        className="h-full w-full object-contain drop-shadow-md"
       />
     </div>
   );

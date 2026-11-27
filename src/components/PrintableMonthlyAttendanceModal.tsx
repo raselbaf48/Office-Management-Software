@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import { Airman, DutyAssignment } from '../types';
 import { DUTY_TYPE_MAP } from '../data/dutyTypes';
 import { resolveAirmanDutyForDate, addAssignmentToMap, calculateDutyStats } from '../data/rosterGenerator';
@@ -919,12 +920,13 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
       </div>
 
       {/* Printable Sheet (Standard clean white document landscape format, A4 fit) */}
-      <div className="attendance-register-print w-full max-w-[1400px] bg-white text-slate-900 rounded-xl shadow-2xl p-3 sm:p-6 print:p-0 print:shadow-none print:w-full print:max-w-none print:rounded-none">
+      <div className="attendance-register-print w-full max-w-[1400px] bg-white text-slate-900 rounded-xl shadow-2xl p-3 sm:p-4 print:p-0 print:shadow-none print:w-full print:max-w-none print:rounded-none">
+        <PrintConfidentialShell showOnScreen>
         {/* Document Header as requested:
             Heading: 155 UASU, BAF (BOLD)
             Attendance Register
             Month underneath */}
-        <div className="text-center pb-2 mb-3 border-b-2 border-slate-900">
+        <div className="text-center pb-1.5 mb-2 border-b-2 border-slate-900">
           <h1 className="text-xl sm:text-2xl font-black uppercase tracking-wider text-slate-900 print:text-base">
             {getActiveOfficeIdentity().officeName}
           </h1>
@@ -1097,6 +1099,7 @@ export const PrintableMonthlyAttendanceModal: React.FC<PrintableMonthlyAttendanc
             </tbody>
           </table>
         </div>
+        </PrintConfidentialShell>
       </div>
     </div>,
     document.body

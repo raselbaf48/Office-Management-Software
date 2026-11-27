@@ -1899,6 +1899,7 @@ export function exportParadeStateMultiExcel({
 
       const isDateOrDay = c <= 1;
       const isEmptyDash = valStr.trim() === '-';
+      const isSingleLine = lines === 1;
       ws[addr].s = {
         border: thinBorder,
         font: {
@@ -1909,7 +1910,7 @@ export function exportParadeStateMultiExcel({
         },
         alignment: {
           vertical: 'center',
-          horizontal: isDateOrDay || isEmptyDash ? 'center' : 'left',
+          horizontal: isDateOrDay || isEmptyDash || isSingleLine ? 'center' : 'left',
           wrapText: true,
         },
       };

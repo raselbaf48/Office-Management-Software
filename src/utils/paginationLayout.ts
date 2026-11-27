@@ -391,9 +391,17 @@ export function computePageSlices(
             (tbl) => tbl.topPx >= heading.bottomPx && tbl.topPx - heading.bottomPx < Math.round(35 * scaleY)
           );
           const firstRowBottom = nextTable?.rows[0]?.bottomPx ?? heading.bottomPx + Math.round(60 * scaleY);
+          const firstRowFitsComfortably =
+            nextTable && nextTable.rows[0]
+              ? firstRowBottom - heading.topPx <= availableBodyPx * 0.7
+              : true;
+          const headingThresholdY =
+            nextTable && !firstRowFitsComfortably
+              ? Math.min(firstRowBottom, nextTable.tbodyTopPx + Math.round(32 * scaleY))
+              : firstRowBottom;
           if (
             sliceEndPx > heading.topPx &&
-            sliceEndPx < firstRowBottom &&
+            sliceEndPx < headingThresholdY &&
             heading.topPx > sliceStartPx + minBlockLeadPx
           ) {
             sliceEndPx = Math.max(sliceStartPx + Math.round(4 * scaleY), heading.topPx - Math.round(4 * scaleY));
@@ -405,16 +413,20 @@ export function computePageSlices(
         // Prevent leaving an orphaned table <thead> at the bottom of a page without its first row
         for (const tbl of tableInfos) {
           const firstRowBottom = tbl.rows[0]?.bottomPx;
-          if (
-            tbl.hasThead &&
-            firstRowBottom !== undefined &&
-            sliceEndPx > tbl.topPx + Math.round(2 * scaleY) &&
-            sliceEndPx < firstRowBottom &&
-            tbl.topPx > sliceStartPx + minBlockLeadPx
-          ) {
-            sliceEndPx = Math.max(sliceStartPx + Math.round(4 * scaleY), tbl.topPx - Math.round(4 * scaleY));
-            nextSliceStartPx = Math.max(sliceEndPx, tbl.topPx - Math.round(2 * scaleY));
-            break;
+          if (tbl.hasThead && firstRowBottom !== undefined) {
+            const firstRowFitsComfortably = firstRowBottom - tbl.topPx <= availableBodyPx * 0.7;
+            const orphanThresholdY = firstRowFitsComfortably
+              ? firstRowBottom
+              : Math.min(firstRowBottom, tbl.tbodyTopPx + Math.round(32 * scaleY));
+            if (
+              sliceEndPx > tbl.topPx + Math.round(2 * scaleY) &&
+              sliceEndPx < orphanThresholdY &&
+              tbl.topPx > sliceStartPx + minBlockLeadPx
+            ) {
+              sliceEndPx = Math.max(sliceStartPx + Math.round(4 * scaleY), tbl.topPx - Math.round(4 * scaleY));
+              nextSliceStartPx = Math.max(sliceEndPx, tbl.topPx - Math.round(2 * scaleY));
+              break;
+            }
           }
         }
       }
@@ -431,7 +443,7 @@ export function computePageSlices(
         leftPx: tbl.leftPx,
         rightPx: tbl.rightPx,
         closeTop: pageIndex > 0 && sliceStartPx > tbl.topPx && sliceStartPx < tbl.bottomPx,
-        closeBottom: sliceEndPx < tbl.bottomPx - Math.round(2 * scaleY),
+        closeBottom: sliceEndPx < tbl.bottomPx - 1,
       });
     }
 

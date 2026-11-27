@@ -5,6 +5,7 @@ import {
   measureDomLayoutGeometry,
   PageSliceSpec,
 } from '../utils/paginationLayout';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import { FileText } from 'lucide-react';
 
 interface PaginatedPaperPreviewProps {
@@ -14,18 +15,21 @@ interface PaginatedPaperPreviewProps {
   marginType?: PageMarginType;
   marginMm?: number;
   preserveColors?: boolean;
+  /** Force entire document to stay proportionally fitted on 1 single page */
+  forceSinglePage?: boolean;
   /** Any dependency key(s) that when changed should recompute page slices immediately */
   refreshKey?: string | number;
   children: React.ReactNode;
 }
 
 const INTERACTIVE_SELECTOR = 'button, a, [role="button"], li[title], div[title], td[title]';
+const CONF_BAND_VISUAL_PX = 16;
 
 function buildSyncedRepeatedThead(
   origTbl: HTMLTableElement,
   origThead: HTMLTableSectionElement,
   srcEl: HTMLElement
-): HTMLDivElement {
+): { tblWrap: HTMLDivElement; colWidths: number[]; tblWidth: number } {
   const srcRect = srcEl.getBoundingClientRect();
   const rectScaleX =
     srcEl.offsetWidth > 0 && srcRect.width > 0 ? srcRect.width / srcEl.offsetWidth : 1;
@@ -39,12 +43,17 @@ function buildSyncedRepeatedThead(
   // Build 2D cell grid across all rows of origTbl to measure true column widths accurately
   const occupied: boolean[][] = [];
   let totalCols = 0;
-  const colWidths: number[] = [];
+  const tbodyColWidths: number[] = [];
+  const theadColWidths: number[] = [];
+  const tbodyRowSet = new Set<HTMLTableRowElement>(
+    Array.from(origTbl.tBodies).flatMap((tb) => Array.from(tb.rows))
+  );
   const allRows = Array.from(origTbl.rows);
 
   allRows.forEach((tr, rIdx) => {
     if (!occupied[rIdx]) occupied[rIdx] = [];
     let cIdx = 0;
+    const isTbodyRow = tbodyRowSet.has(tr);
     Array.from(tr.cells).forEach((cell) => {
       while (occupied[rIdx][cIdx]) cIdx++;
       const cs = Math.max(1, cell.colSpan || 1);
@@ -55,10 +64,15 @@ function buildSyncedRepeatedThead(
           occupied[r][c] = true;
         }
       }
-      if (cs === 1 && !colWidths[cIdx]) {
+      if (cs === 1) {
         const cr = cell.getBoundingClientRect();
         if (cr.width > 0) {
-          colWidths[cIdx] = cr.width / rectScaleX;
+          const measuredW = cr.width / rectScaleX;
+          if (isTbodyRow && !tbodyColWidths[cIdx]) {
+            tbodyColWidths[cIdx] = measuredW;
+          } else if (!isTbodyRow && !theadColWidths[cIdx]) {
+            theadColWidths[cIdx] = measuredW;
+          }
         }
       }
       totalCols = Math.max(totalCols, cIdx + cs);
@@ -66,16 +80,14 @@ function buildSyncedRepeatedThead(
     });
   });
 
-  // Fallback pass if any column only appeared inside colSpan > 1 cells
+  const colWidths: number[] = [];
   for (let c = 0; c < totalCols; c++) {
-    if (!colWidths[c] || colWidths[c] <= 0) {
-      colWidths[c] = tblWidth / Math.max(1, totalCols);
-    }
+    colWidths[c] = tbodyColWidths[c] || theadColWidths[c] || tblWidth / Math.max(1, totalCols);
   }
 
-  // Normalize sum(colWidths) to exact rendered tblWidth to prevent cumulative border-collapse drift
+  // Normalize sum(colWidths) unconditionally to exact rendered tblWidth to prevent cumulative border-collapse drift
   const sumW = colWidths.reduce((acc, w) => acc + w, 0);
-  if (sumW > 0 && Math.abs(sumW - tblWidth) > 0.25) {
+  if (sumW > 0) {
     const ratio = tblWidth / sumW;
     for (let c = 0; c < colWidths.length; c++) {
       colWidths[c] *= ratio;
@@ -85,7 +97,7 @@ function buildSyncedRepeatedThead(
   const tblWrap = document.createElement('div');
   tblWrap.style.width = `${tblWidth}px`;
   tblWrap.style.marginLeft = `${tblLeftOffset}px`;
-  tblWrap.style.overflow = 'hidden';
+  tblWrap.style.overflow = 'visible';
 
   const clonedTbl = origTbl.cloneNode(false) as HTMLTableElement;
   clonedTbl.style.width = `${tblWidth}px`;
@@ -109,32 +121,43 @@ function buildSyncedRepeatedThead(
   const clonedThead = origThead.cloneNode(true) as HTMLTableSectionElement;
   const origHeadRows = Array.from(origThead.rows);
   const clonedHeadRows = Array.from(clonedThead.rows);
+  const headOccupied: boolean[][] = [];
   origHeadRows.forEach((origRow, rIdx) => {
     const clonedRow = clonedHeadRows[rIdx];
     if (!clonedRow) return;
+    if (!headOccupied[rIdx]) headOccupied[rIdx] = [];
     const origRowH = origRow.getBoundingClientRect().height / rectScaleY;
     if (origRowH > 0) {
       clonedRow.style.height = `${origRowH.toFixed(2)}px`;
     }
     const origCells = Array.from(origRow.cells);
     const clonedCells = Array.from(clonedRow.cells);
+    let cIdx = 0;
     origCells.forEach((origCell, cellIdx) => {
+      while (headOccupied[rIdx][cIdx]) cIdx++;
+      const cs = Math.max(1, origCell.colSpan || 1);
+      const rs = Math.max(1, origCell.rowSpan || 1);
+      for (let r = rIdx; r < rIdx + rs; r++) {
+        if (!headOccupied[r]) headOccupied[r] = [];
+        for (let c = cIdx; c < cIdx + cs; c++) {
+          headOccupied[r][c] = true;
+        }
+      }
+
       const clonedCell = clonedCells[cellIdx];
-      if (!clonedCell) return;
-      const cr = origCell.getBoundingClientRect();
-      clonedCell.style.boxSizing = 'border-box';
-      if ((origCell.colSpan || 1) === 1 && cr.width > 0) {
-        clonedCell.style.width = `${(cr.width / rectScaleX).toFixed(3)}px`;
+      if (clonedCell) {
+        const cr = origCell.getBoundingClientRect();
+        if (cr.height > 0) {
+          clonedCell.style.height = `${(cr.height / rectScaleY).toFixed(2)}px`;
+        }
       }
-      if (cr.height > 0) {
-        clonedCell.style.height = `${(cr.height / rectScaleY).toFixed(2)}px`;
-      }
+      cIdx += cs;
     });
   });
 
   clonedTbl.appendChild(clonedThead);
   tblWrap.appendChild(clonedTbl);
-  return tblWrap;
+  return { tblWrap, colWidths, tblWidth };
 }
 
 export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
@@ -144,6 +167,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
   marginType = 'narrow',
   marginMm,
   preserveColors = false,
+  forceSinglePage = false,
   refreshKey,
   children,
 }) => {
@@ -158,17 +182,23 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
   const resolvedMarginType: PageMarginType = marginType === 'normal' ? 'normal' : 'narrow';
   const marginSpec = getMarginSpec(resolvedMarginType);
   const effectiveMarginMm = marginMm ?? marginSpec.marginMm;
+  const verticalMarginMm = forceSinglePage ? Math.min(effectiveMarginMm, 3.5) : Math.min(effectiveMarginMm, 5);
   const pageDims = getPageDimensions({ paperSize, orientation, margin: resolvedMarginType });
 
   const pageWidthPx = pageDims.widthPx;
   const pageHeightPx = pageDims.heightPx;
-  const marginPx = Math.round((effectiveMarginMm / 25.4) * 96);
-  const usableWidthPx = Math.max(340, pageWidthPx - marginPx * 2);
-  const usableHeightPx = Math.max(340, pageHeightPx - marginPx * 2);
+  const horizontalMarginPx = Math.round((effectiveMarginMm / 25.4) * 96);
+  const verticalMarginPx = Math.round((verticalMarginMm / 25.4) * 96);
+  const usableWidthPx = Math.max(340, pageWidthPx - horizontalMarginPx * 2);
+  const sheetInnerHeightPx = Math.max(340, pageHeightPx - verticalMarginPx * 2);
+  const usableHeightPx = Math.max(300, sheetInnerHeightPx - CONF_BAND_VISUAL_PX * 2);
 
   const effectiveContentWidthPx = Math.max(usableWidthPx, contentWidthPx || usableWidthPx);
-  const contentScale =
+  const scaleX =
     effectiveContentWidthPx > usableWidthPx + 2 ? usableWidthPx / effectiveContentWidthPx : 1;
+  const scaleY =
+    forceSinglePage && contentHeightPx > usableHeightPx + 2 ? usableHeightPx / contentHeightPx : 1;
+  const contentScale = Math.min(1, scaleX, scaleY);
 
   // Measure outer stage width for crisp proportional Portrait vs Landscape scaling
   useEffect(() => {
@@ -196,12 +226,29 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
 
     const raw = measureDomLayoutGeometry(srcEl);
     const measuredMaxTableRight = raw.tables.reduce((mx, t) => Math.max(mx, Math.ceil(t.right)), 0);
-    const nextContentWidth = Math.max(usableWidthPx, Math.ceil(srcEl.scrollWidth), measuredMaxTableRight);
+    const maxRightNeeded = Math.max(Math.ceil(srcEl.scrollWidth), measuredMaxTableRight);
+    const nextContentWidth = maxRightNeeded >= usableWidthPx ? maxRightNeeded + 4 : usableWidthPx;
     const nextContentScale = nextContentWidth > usableWidthPx + 2 ? usableWidthPx / nextContentWidth : 1;
     const nextEffectiveUsableHeight = Math.floor(usableHeightPx / nextContentScale);
 
     setContentHeightPx(raw.totalHeight);
     setContentWidthPx(nextContentWidth);
+    if (forceSinglePage) {
+      setSlices([
+        {
+          pageIndex: 0,
+          sliceStartPx: 0,
+          sliceEndPx: raw.totalHeight,
+          bodySliceHeightPx: raw.totalHeight,
+          repeatDocHeader: false,
+          activeTableAtStart: null,
+          repeatedTopHeightPx: 0,
+          headerGapPx: 0,
+          tableBorders: [],
+        },
+      ]);
+      return;
+    }
     const nextSlices = computePageSlices(
       raw,
       nextEffectiveUsableHeight,
@@ -210,7 +257,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
       nextContentWidth
     );
     setSlices(nextSlices);
-  }, [usableHeightPx, usableWidthPx]);
+  }, [usableHeightPx, usableWidthPx, forceSinglePage]);
 
   // Recompute whenever content, orientation, paperSize, or refreshKey changes
   useLayoutEffect(() => {
@@ -266,23 +313,61 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
       const pageInner = document.createElement('div');
       pageInner.setAttribute('data-paginated-export-page', String(idx));
       pageInner.style.width = `${effectiveContentWidthPx}px`;
+      pageInner.style.minHeight = `${Math.floor(sheetInnerHeightPx / contentScale)}px`;
+      pageInner.style.display = 'flex';
+      pageInner.style.flexDirection = 'column';
+      pageInner.style.justifyContent = 'space-between';
       pageInner.style.position = 'relative';
       pageInner.style.background = '#ffffff';
       pageInner.style.fontFamily = 'Arial, sans-serif';
 
+      const confFontSize = `${(11 / contentScale).toFixed(2)}px`;
+      const confPadPx = `${(4 / contentScale).toFixed(2)}px`;
+
+      const topConfBanner = document.createElement('div');
+      topConfBanner.className = 'print-conf-banner';
+      topConfBanner.setAttribute('data-conf-banner', 'true');
+      topConfBanner.textContent = 'CONFIDENTIAL';
+      topConfBanner.style.textAlign = 'center';
+      topConfBanner.style.fontWeight = '700';
+      topConfBanner.style.fontSize = confFontSize;
+      topConfBanner.style.lineHeight = '1.1';
+      topConfBanner.style.letterSpacing = '0.12em';
+      topConfBanner.style.paddingBottom = confPadPx;
+      topConfBanner.style.color = '#64748b';
+      topConfBanner.style.userSelect = 'none';
+      pageInner.appendChild(topConfBanner);
+
+      const contentStack = document.createElement('div');
+      contentStack.style.flex = '1 1 auto';
+      contentStack.style.width = `${effectiveContentWidthPx}px`;
+
+      let syncedTableMeta: { tableIndex: number; colWidths: number[]; tblWidth: number } | null = null;
       if (slice.activeTableAtStart) {
         const origTbl = sourceTables[slice.activeTableAtStart.tableIndex];
         const origThead = origTbl?.querySelector('thead');
         if (origTbl && origThead) {
-          const tblWrap = buildSyncedRepeatedThead(origTbl, origThead, srcEl);
-          pageInner.appendChild(tblWrap);
+          const built = buildSyncedRepeatedThead(origTbl, origThead, srcEl);
+          contentStack.appendChild(built.tblWrap);
+          syncedTableMeta = {
+            tableIndex: slice.activeTableAtStart.tableIndex,
+            colWidths: built.colWidths,
+            tblWidth: built.tblWidth,
+          };
         }
       }
+
+      const bodyFrame = document.createElement('div');
+      bodyFrame.style.width = `${effectiveContentWidthPx}px`;
+      bodyFrame.style.height = `${slice.bodySliceHeightPx}px`;
+      bodyFrame.style.position = 'relative';
+      bodyFrame.style.overflow = 'visible';
 
       const bodyViewport = document.createElement('div');
       bodyViewport.style.width = `${effectiveContentWidthPx}px`;
       bodyViewport.style.height = `${slice.bodySliceHeightPx}px`;
-      bodyViewport.style.overflow = 'hidden';
+      bodyViewport.style.overflowX = 'visible';
+      bodyViewport.style.overflowY = 'hidden';
       bodyViewport.style.position = 'relative';
 
       const bodyClone = srcEl.cloneNode(true) as HTMLElement;
@@ -290,6 +375,31 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
       bodyClone.style.width = `${usableWidthPx}px`;
       bodyClone.style.marginTop = `${-slice.sliceStartPx}px`;
       bodyClone.style.pointerEvents = 'auto';
+
+      // Lock the cloned body table to the exact same colgroup + width + fixed layout as the repeated thead
+      if (syncedTableMeta) {
+        const cloneTables = Array.from(bodyClone.querySelectorAll('table')) as HTMLTableElement[];
+        const targetBodyTbl = cloneTables[syncedTableMeta.tableIndex];
+        if (targetBodyTbl) {
+          const existingColgroup = targetBodyTbl.querySelector('colgroup');
+          if (existingColgroup) existingColgroup.remove();
+          const bodyColgroup = document.createElement('colgroup');
+          for (let c = 0; c < syncedTableMeta.colWidths.length; c++) {
+            const col = document.createElement('col');
+            const wStr = `${syncedTableMeta.colWidths[c].toFixed(3)}px`;
+            col.style.width = wStr;
+            col.style.minWidth = wStr;
+            col.style.maxWidth = wStr;
+            bodyColgroup.appendChild(col);
+          }
+          targetBodyTbl.insertBefore(bodyColgroup, targetBodyTbl.firstChild);
+          targetBodyTbl.style.width = `${syncedTableMeta.tblWidth}px`;
+          targetBodyTbl.style.minWidth = `${syncedTableMeta.tblWidth}px`;
+          targetBodyTbl.style.maxWidth = `${syncedTableMeta.tblWidth}px`;
+          targetBodyTbl.style.tableLayout = 'fixed';
+          targetBodyTbl.style.borderCollapse = 'collapse';
+        }
+      }
 
       // Forward clicks on cloned interactive elements back to live React DOM
       const cloneInteractiveEls = Array.from(bodyClone.querySelectorAll(INTERACTIVE_SELECTOR)) as HTMLElement[];
@@ -302,8 +412,10 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
       });
 
       bodyViewport.appendChild(bodyClone);
+      bodyFrame.appendChild(bodyViewport);
 
-      // Draw crisp horizontal border closures for tables cut at top or bottom of page
+      // Draw crisp horizontal border closures outside overflowY:hidden so borders never clip or vanish at subpixel preview scales
+      const closureThicknessPx = Math.max(2, Math.ceil(1.5 / contentScale));
       for (const tb of slice.tableBorders) {
         const w = Math.max(1, tb.rightPx - tb.leftPx);
         const coveredByRepeatedThead =
@@ -316,37 +428,63 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
           topLine.style.left = `${tb.leftPx}px`;
           topLine.style.top = '0px';
           topLine.style.width = `${w}px`;
-          topLine.style.height = '1px';
+          topLine.style.height = `${closureThicknessPx}px`;
           topLine.style.backgroundColor = '#000000';
+          topLine.style.zIndex = '20';
           topLine.style.pointerEvents = 'none';
-          bodyViewport.appendChild(topLine);
+          bodyFrame.appendChild(topLine);
         }
         if (tb.closeBottom) {
           const botLine = document.createElement('div');
           botLine.setAttribute('data-pdf-border-line', 'true');
           botLine.style.position = 'absolute';
           botLine.style.left = `${tb.leftPx}px`;
-          botLine.style.bottom = '0px';
+          botLine.style.bottom = `-${Math.floor(closureThicknessPx / 2)}px`;
           botLine.style.width = `${w}px`;
-          botLine.style.height = '1px';
+          botLine.style.height = `${closureThicknessPx}px`;
           botLine.style.backgroundColor = '#000000';
+          botLine.style.zIndex = '20';
           botLine.style.pointerEvents = 'none';
-          bodyViewport.appendChild(botLine);
+          bodyFrame.appendChild(botLine);
         }
       }
 
-      pageInner.appendChild(bodyViewport);
+      contentStack.appendChild(bodyFrame);
+      pageInner.appendChild(contentStack);
+
+      const bottomConfBanner = document.createElement('div');
+      bottomConfBanner.className = 'print-conf-banner';
+      bottomConfBanner.setAttribute('data-conf-banner', 'true');
+      bottomConfBanner.textContent = 'CONFIDENTIAL';
+      bottomConfBanner.style.textAlign = 'center';
+      bottomConfBanner.style.fontWeight = '700';
+      bottomConfBanner.style.fontSize = confFontSize;
+      bottomConfBanner.style.lineHeight = '1.1';
+      bottomConfBanner.style.letterSpacing = '0.12em';
+      bottomConfBanner.style.paddingTop = confPadPx;
+      bottomConfBanner.style.color = '#64748b';
+      bottomConfBanner.style.userSelect = 'none';
+      pageInner.appendChild(bottomConfBanner);
+
       scaleHost.appendChild(pageInner);
       slot.appendChild(scaleHost);
     });
-  }, [isMultiPage, slices, usableWidthPx, effectiveContentWidthPx, contentScale, refreshKey]);
+  }, [isMultiPage, slices, usableWidthPx, sheetInnerHeightPx, effectiveContentWidthPx, contentScale, refreshKey]);
 
   const availableStageWidth = Math.max(300, stageWidth - 28);
   const fitScale = Math.min(1, Math.max(0.32, availableStageWidth / pageWidthPx));
   const scaledPageWidth = Math.round(pageWidthPx * fitScale);
 
-  const singlePageScaledContentHeight = Math.ceil(contentHeightPx * contentScale);
-  const singlePageSheetHeight = Math.max(pageHeightPx, singlePageScaledContentHeight + marginPx * 2);
+  const singlePageUnscaledMinHeight = Math.floor(sheetInnerHeightPx / contentScale);
+  const singlePageScaledContentHeight = forceSinglePage
+    ? sheetInnerHeightPx
+    : Math.max(
+        sheetInnerHeightPx,
+        Math.ceil((contentHeightPx + (CONF_BAND_VISUAL_PX * 2) / contentScale) * contentScale)
+      );
+  const singlePageSheetHeight = forceSinglePage
+    ? pageHeightPx
+    : Math.max(pageHeightPx, singlePageScaledContentHeight + verticalMarginPx * 2);
 
   return (
     <div
@@ -355,6 +493,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
       data-paginated-content-width={effectiveContentWidthPx}
       data-paginated-usable-width={usableWidthPx}
       data-paginated-usable-height={usableHeightPx}
+      data-paginated-vertical-margin-mm={verticalMarginMm}
       data-paginated-preserve-colors={preserveColors ? 'true' : 'false'}
       className="bg-slate-200/80 dark:bg-slate-950/75 border border-slate-300/80 dark:border-slate-800 rounded-2xl p-3 sm:p-5 overflow-x-auto print:bg-white print:border-none print:p-0 print:overflow-visible"
     >
@@ -362,6 +501,9 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
         .paginated-preview-doc,
         .paginated-preview-doc * {
           font-family: Arial, sans-serif !important;
+        }
+        .paginated-preview-doc .overflow-x-auto {
+          overflow: visible !important;
         }
         @media print {
           .paginated-offscreen-source {
@@ -412,7 +554,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
               style={{
                 width: `${pageWidthPx}px`,
                 minHeight: `${pageHeightPx}px`,
-                padding: `${marginPx}px`,
+                padding: `${verticalMarginPx}px ${horizontalMarginPx}px`,
                 boxSizing: 'border-box',
                 transform: fitScale < 0.999 ? `scale(${fitScale})` : undefined,
               }}
@@ -420,32 +562,72 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
               <div
                 style={{
                   width: `${usableWidthPx}px`,
-                  height: contentScale < 0.999 ? `${singlePageScaledContentHeight}px` : undefined,
-                  overflow: contentScale < 0.999 ? 'hidden' : 'visible',
+                  display: 'flex',
+                  justifyContent: 'center',
                 }}
-                className="print:w-full! print:h-auto! print:overflow-visible!"
+                className="print:w-full! print:block!"
               >
                 <div
-                  data-paginated-export-page="0"
                   style={{
-                    width: `${effectiveContentWidthPx}px`,
-                    transform: contentScale < 0.999 ? `scale(${contentScale})` : undefined,
-                    transformOrigin: 'top left',
-                    backgroundColor: '#ffffff',
+                    width: `${Math.min(usableWidthPx, Math.round(effectiveContentWidthPx * contentScale))}px`,
+                    height: contentScale < 0.999 ? `${singlePageScaledContentHeight}px` : undefined,
+                    overflowX: 'visible',
+                    overflowY: contentScale < 0.999 ? 'hidden' : 'visible',
                   }}
-                  className="print:transform-none! print:w-full!"
+                  className="print:w-full! print:h-auto! print:overflow-visible!"
                 >
                   <div
-                    ref={sourceRef}
-                    id={elementId}
-                    data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
-                    className="paginated-preview-doc bg-white text-black"
+                    data-paginated-export-page="0"
                     style={{
-                      width: `${usableWidthPx}px`,
-                      fontFamily: 'Arial, sans-serif',
+                      width: `${effectiveContentWidthPx}px`,
+                      minHeight: `${singlePageUnscaledMinHeight}px`,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      transform: contentScale < 0.999 ? `scale(${contentScale})` : undefined,
+                      transformOrigin: 'top left',
+                      backgroundColor: '#ffffff',
                     }}
+                    className="print:transform-none! print:w-full! print:min-h-0!"
                   >
-                    {children}
+                    <div
+                      data-conf-banner="true"
+                      className="print-conf-banner text-center font-bold uppercase tracking-[0.12em] select-none"
+                      style={{
+                        fontSize: `${(10.5 / contentScale).toFixed(2)}px`,
+                        lineHeight: 1.1,
+                        paddingBottom: `${(3 / contentScale).toFixed(2)}px`,
+                        color: '#64748b',
+                      }}
+                    >
+                      CONFIDENTIAL
+                    </div>
+                    <div className="flex-1">
+                      <div
+                        ref={sourceRef}
+                        id={elementId}
+                        data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
+                        className="paginated-preview-doc bg-white text-black print:w-full!"
+                        style={{
+                          width: `${usableWidthPx}px`,
+                          fontFamily: 'Arial, sans-serif',
+                        }}
+                      >
+                        {children}
+                      </div>
+                    </div>
+                    <div
+                      data-conf-banner="true"
+                      className="print-conf-banner text-center font-bold uppercase tracking-[0.12em] select-none"
+                      style={{
+                        fontSize: `${(10.5 / contentScale).toFixed(2)}px`,
+                        lineHeight: 1.1,
+                        paddingTop: `${(3 / contentScale).toFixed(2)}px`,
+                        color: '#64748b',
+                      }}
+                    >
+                      CONFIDENTIAL
+                    </div>
                   </div>
                 </div>
               </div>
@@ -468,18 +650,20 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
               zIndex: -999,
             }}
           >
-            <div
-              ref={sourceRef}
-              id={elementId}
-              data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
-              className="paginated-preview-doc bg-white text-black"
-              style={{
-                width: `${usableWidthPx}px`,
-                fontFamily: 'Arial, sans-serif',
-              }}
-            >
-              {children}
-            </div>
+            <PrintConfidentialShell showOnScreen={false}>
+              <div
+                ref={sourceRef}
+                id={elementId}
+                data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
+                className="paginated-preview-doc bg-white text-black print:w-full!"
+                style={{
+                  width: `${usableWidthPx}px`,
+                  fontFamily: 'Arial, sans-serif',
+                }}
+              >
+                {children}
+              </div>
+            </PrintConfidentialShell>
           </div>
 
           {/* Visible Multi-Page Paper Stack */}
@@ -501,7 +685,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
                     style={{
                       width: `${pageWidthPx}px`,
                       height: `${pageHeightPx}px`,
-                      padding: `${marginPx}px`,
+                      padding: `${verticalMarginPx}px ${horizontalMarginPx}px`,
                       boxSizing: 'border-box',
                       transform: fitScale < 0.999 ? `scale(${fitScale})` : undefined,
                     }}
@@ -513,13 +697,14 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
                       className="paginated-preview-doc"
                       style={{
                         width: `${usableWidthPx}px`,
-                        height: `${usableHeightPx}px`,
-                        overflow: 'hidden',
+                        height: `${sheetInnerHeightPx}px`,
+                        overflowX: 'visible',
+                        overflowY: 'hidden',
                         fontFamily: 'Arial, sans-serif',
                       }}
                     />
                     <div
-                      className="absolute bottom-2 right-4 text-[10px] font-semibold text-slate-400 select-none"
+                      className="absolute bottom-1 right-4 text-[9px] font-semibold text-slate-400 select-none"
                       style={{ fontFamily: 'Arial, sans-serif' }}
                     >
                       Page {idx + 1} / {totalPages}

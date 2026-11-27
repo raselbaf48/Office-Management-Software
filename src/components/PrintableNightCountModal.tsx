@@ -1,4 +1,5 @@
 import { DateNavigator } from './DateNavigator';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -921,6 +922,14 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  if (!list || list.length === 0) {
  return <div className="text-center text-slate-400 font-normal py-1">-</div>;
  }
+ if (list.length === 1) {
+ const item = list[0];
+ return (
+ <div className="text-[11px] leading-snug font-normal text-center whitespace-nowrap">
+ {formatAirmanName(item.airman.rank)} {formatAirmanName(item.airman.name)}
+ </div>
+ );
+ }
  return (
  <ol className="space-y-0.5 text-[11px] leading-snug font-normal text-left">
  {list.map((item, idx) => (
@@ -991,7 +1000,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
             @media print {
               @page {
  size: A4 landscape;
- margin: 8mm;
+ margin: 4mm 6mm;
  }
               body { 
                  background: white !important; 
@@ -1006,6 +1015,10 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
               }
               .print\:text-black, span, div, p, h1, h2, h3, h4, th, td {
                  color: black !important;
+              }
+              .print-conf-table .print-conf-banner,
+              .print-conf-banner {
+                 color: #64748b !important;
               }
               /* Hide scrollbars during print */
               ::-webkit-scrollbar { display: none; }
@@ -1060,8 +1073,9 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
 {/* OFFICIAL PARADE DOCUMENT SHEET (DISPLAYED ON SCREEN & IN PRINT) */}
  <div
  id="official-parade-document"
- className="bg-white dark:bg-slate-900 text-black dark:text-white border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-6 overflow-x-auto print:shadow-none print:border-none print:p-0"
+ className="bg-white dark:bg-slate-900 text-black dark:text-white border border-slate-300 dark:border-slate-700 rounded-2xl shadow-lg p-4 overflow-x-auto print:shadow-none print:border-none print:p-0"
  >
+ <PrintConfidentialShell showOnScreen>
  {loading ? (
  <div className="py-20 text-center text-slate-400">
  <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-500" />
@@ -1584,6 +1598,7 @@ export const PrintableNightCountModal: React.FC<NightCountStateViewProps & { onC
  </div>
  </div>
  )}
+ </PrintConfidentialShell>
  </div>
 
  {/* Row Edit Popover */}

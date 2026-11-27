@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import { Airman } from '../types';
 import { Printer, X, Download } from 'lucide-react';
 import { exportHtmlToWord } from '../utils/htmlExport';
@@ -165,7 +166,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
             @media print {
               @page { 
                 size: ${orientation}; 
-                margin: 6mm; 
+                margin: 4mm 6mm; 
               }
               body {
                 -webkit-print-color-adjust: exact;
@@ -176,15 +177,16 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
         </style>
         <div 
           id="print-nominal-roll-content" 
-          className={`mx-auto h-fit shrink-0 bg-white text-black print:shadow-none print:border-none border border-slate-300 shadow-2xl p-4 sm:p-8 print:p-0 print:m-0 transition-all ${
+          className={`mx-auto h-fit shrink-0 bg-white text-black print:shadow-none print:border-none border border-slate-300 shadow-2xl p-4 sm:p-5 print:p-0 print:m-0 transition-all ${
             orientation === 'landscape'
               ? 'w-full sm:w-[297mm] min-h-[210mm] print:w-full print:min-h-0'
               : 'w-full sm:w-[210mm] min-h-[297mm] print:w-full print:min-h-0'
           }`}
         >
+          <PrintConfidentialShell showOnScreen>
           <div className="w-full">
             {/* Document Header */}
-            <div className="text-center mb-5">
+            <div className="text-center mb-3">
               <h1 className="text-sm sm:text-base font-black underline leading-snug tracking-wide">
                 {docHeading}<br />
                 {officeIdentity.officeName}
@@ -315,6 +317,7 @@ export const PrintableNominalRollModal: React.FC<PrintableNominalRollModalProps>
             </div>
             
           </div>
+          </PrintConfidentialShell>
         </div>
       </div>
     </div>

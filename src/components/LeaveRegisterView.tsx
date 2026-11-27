@@ -1,4 +1,5 @@
 import { DateNavigator } from './DateNavigator';
+import { PrintConfidentialShell } from './PrintConfidentialShell';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Airman, FlightName, UserRole } from '../types';
 import { getCurrentUserSession } from '../utils/authSession';
@@ -595,6 +596,8 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
 
   return (
     <div id="leave-register-container" className="duty-register-print space-y-6">
+      <PrintConfidentialShell showOnScreen={false}>
+      <div className="space-y-6">
       {/* Header & Controls */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -942,6 +945,8 @@ export const LeaveRegisterView: React.FC<LeaveRegisterViewProps> = ({
           </table>
         </div>
       </div>
+      </div>
+      </PrintConfidentialShell>
 
       {/* Grant / Record Leave Modal */}
       {showGrantLeaveModal && (
