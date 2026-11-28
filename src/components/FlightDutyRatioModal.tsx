@@ -10,10 +10,13 @@ import {
 import { X, Check, RefreshCw, Sliders, Info, Calculator, Table as TableIcon, Save } from 'lucide-react';
 
 interface FlightDutyRatioModalProps {
-  date: string;
+  date?: string;
+  selectedDate?: string;
+  isOpen?: boolean;
   airmen?: Airman[];
   onClose: () => void;
   onRatiosUpdated?: () => void;
+  onRatioUpdated?: () => void;
 }
 
 interface DutyRatioItemConfig {
@@ -45,19 +48,25 @@ const FLIGHTS: FlightName[] = ['Mechanics', 'Avionics', 'GCS', 'Admin'];
 
 export const FlightDutyRatioModal: React.FC<FlightDutyRatioModalProps> = ({
   date,
+  selectedDate: propSelectedDate,
   airmen = [],
   onClose,
   onRatiosUpdated,
+  onRatioUpdated,
 }) => {
+  const effectivePropDate = propSelectedDate || date || new Date().toISOString().split('T')[0];
   const [activeTab, setActiveTab] = useState<'CALCULATOR' | 'MATRIX'>('CALCULATOR');
-  const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => getStoredDutyMatrix());
+  const [selectedDate, setSelectedDate] = useState<string>(effectivePropDate);
+  const [activeTabFlight, setActiveTabFlight] = useState<FlightName>('Mechanics');
+  const [matrix, setMatrix] = useState<DutyRatioTable[]>(() => getStoredDutyMatrix(effectivePropDate));
   const [savedMsg, setSavedMsg] = useState<string>('');
   
-  // Daily Matrix State
-  const [selectedDate, setSelectedDate] = useState<string>(date || new Date().toISOString().split('T')[0]);
-  const [activeTabFlight, setActiveTabFlight] = useState<FlightName>('Mechanics');
-  const dayNum = parseDayNumber(selectedDate || date);
+  const dayNum = parseDayNumber(selectedDate || effectivePropDate);
   const dayIndex = Math.max(0, Math.min(30, dayNum - 1));
+
+  useEffect(() => {
+    setMatrix(getStoredDutyMatrix(selectedDate || effectivePropDate));
+  }, [selectedDate, effectivePropDate]);
 
   // Calculator State
   const [monthlyTotals, setMonthlyTotals] = useState<Record<string, number>>({});
@@ -217,9 +226,10 @@ export const FlightDutyRatioModal: React.FC<FlightDutyRatioModalProps> = ({
     });
     
     setMatrix(newMatrix);
-    saveDutyMatrix(newMatrix);
+    saveDutyMatrix(newMatrix, { targetDate: selectedDate || effectivePropDate });
     setSavedMsg('✅ Matrix Auto-Distributed & Saved!');
     if (onRatiosUpdated) onRatiosUpdated();
+    if (onRatioUpdated) onRatioUpdated();
     setTimeout(() => setSavedMsg(''), 2000);
   };
 
@@ -239,9 +249,10 @@ export const FlightDutyRatioModal: React.FC<FlightDutyRatioModalProps> = ({
   };
 
   const handleSaveMatrix = () => {
-    saveDutyMatrix(matrix);
+    saveDutyMatrix(matrix, { targetDate: selectedDate || effectivePropDate });
     setSavedMsg(`✅ Daily matrix saved!`);
     if (onRatiosUpdated) onRatiosUpdated();
+    if (onRatioUpdated) onRatioUpdated();
     setTimeout(() => setSavedMsg(''), 2000);
   };
 

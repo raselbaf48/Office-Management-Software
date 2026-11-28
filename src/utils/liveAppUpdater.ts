@@ -40,6 +40,37 @@ function getCurrentDocumentBundleSignature(): string | null {
   }
 }
 
+let activeBannerEl: HTMLDivElement | null = null;
+let pendingUpdateSig: string | null = null;
+let dismissedSig: string | null = null;
+
+function applyPendingUpdate(targetSig: string) {
+  if (reloadScheduled) return;
+  reloadScheduled = true;
+
+  try {
+    window.sessionStorage.setItem(RELOADED_SIG_SESSION_KEY, targetSig);
+  } catch {}
+
+  try {
+    window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout: false } }));
+  } catch {}
+
+  try {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistration().then((reg) => {
+        if (reg?.waiting) {
+          reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
+      }).catch(() => {});
+    }
+  } catch {}
+
+  setTimeout(() => {
+    window.location.reload();
+  }, 150);
+}
+
 function showUpdatingToastAndReload(targetSig: string) {
   if (reloadScheduled) return;
   try {
@@ -47,37 +78,100 @@ function showUpdatingToastAndReload(targetSig: string) {
     if (lastReloaded && lastReloaded === targetSig) {
       return;
     }
-    window.sessionStorage.setItem(RELOADED_SIG_SESSION_KEY, targetSig);
   } catch {}
 
-  reloadScheduled = true;
+  if (dismissedSig === targetSig) {
+    return;
+  }
 
-  try {
-    window.dispatchEvent(new CustomEvent('baf_prepare_auto_logout', { detail: { isAutoLogout: false } }));
-  } catch {}
+  pendingUpdateSig = targetSig;
 
-  // Show a brief non-intrusive toast in the top corner so the user knows the latest update is applying
+  // If the prompt banner is already rendered, just keep its latest targetSig updated
+  if (activeBannerEl && document.body?.contains(activeBannerEl)) {
+    return;
+  }
+
   try {
     const banner = document.createElement('div');
+    banner.id = 'baf-live-update-banner';
     banner.style.position = 'fixed';
     banner.style.top = '14px';
     banner.style.left = '50%';
     banner.style.transform = 'translateX(-50%)';
     banner.style.zIndex = '99999';
-    banner.style.background = '#059669';
-    banner.style.color = '#ffffff';
-    banner.style.padding = '8px 16px';
+    banner.style.display = 'flex';
+    banner.style.alignItems = 'center';
+    banner.style.gap = '10px';
+    banner.style.background = '#0f172a';
+    banner.style.color = '#f8fafc';
+    banner.style.border = '1px solid rgba(16, 185, 129, 0.5)';
+    banner.style.padding = '7px 10px 7px 14px';
     banner.style.borderRadius = '9999px';
     banner.style.fontSize = '12px';
     banner.style.fontWeight = '700';
-    banner.style.boxShadow = '0 10px 25px rgba(0,0,0,0.35)';
-    banner.textContent = 'New update deployed — refreshing app...';
-    document.body?.appendChild(banner);
-  } catch {}
+    banner.style.boxShadow = '0 10px 30px rgba(0, 0, 0, 0.45)';
+    banner.style.maxWidth = 'calc(100vw - 24px)';
+    banner.style.whiteSpace = 'nowrap';
 
-  setTimeout(() => {
-    window.location.reload();
-  }, 500);
+    const dot = document.createElement('span');
+    dot.style.width = '8px';
+    dot.style.height = '8px';
+    dot.style.borderRadius = '9999px';
+    dot.style.background = '#10b981';
+    dot.style.flexShrink = '0';
+
+    const label = document.createElement('span');
+    label.textContent = 'New Version Available';
+
+    const updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.textContent = 'Update Now';
+    updateBtn.style.background = '#059669';
+    updateBtn.style.color = '#ffffff';
+    updateBtn.style.border = 'none';
+    updateBtn.style.padding = '5px 12px';
+    updateBtn.style.borderRadius = '9999px';
+    updateBtn.style.fontSize = '11px';
+    updateBtn.style.fontWeight = '800';
+    updateBtn.style.cursor = 'pointer';
+    updateBtn.style.letterSpacing = '0.02em';
+    updateBtn.onmouseenter = () => {
+      updateBtn.style.background = '#10b981';
+    };
+    updateBtn.onmouseleave = () => {
+      updateBtn.style.background = '#059669';
+    };
+    updateBtn.onclick = () => {
+      updateBtn.disabled = true;
+      updateBtn.textContent = 'Updating...';
+      updateBtn.style.opacity = '0.8';
+      applyPendingUpdate(pendingUpdateSig || targetSig);
+    };
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Later';
+    closeBtn.style.background = 'transparent';
+    closeBtn.style.color = '#94a3b8';
+    closeBtn.style.border = 'none';
+    closeBtn.style.padding = '0 4px';
+    closeBtn.style.fontSize = '16px';
+    closeBtn.style.lineHeight = '1';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.onclick = () => {
+      dismissedSig = pendingUpdateSig || targetSig;
+      banner.remove();
+      activeBannerEl = null;
+    };
+
+    banner.appendChild(dot);
+    banner.appendChild(label);
+    banner.appendChild(updateBtn);
+    banner.appendChild(closeBtn);
+    document.body?.appendChild(banner);
+    activeBannerEl = banner;
+  } catch {}
 }
 
 async function checkHtmlBundleUpdate(): Promise<void> {

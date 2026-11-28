@@ -118,29 +118,32 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
 }) => {
   // Completely filter out any disabled duties from Duty List so they never appear in print
   const matrix = useMemo(() => {
-    const baseList = (rawMatrix && rawMatrix.length > 0) ? rawMatrix : getStoredDutyMatrix();
+    const hasExplicitRawMatrix = Boolean(rawMatrix && rawMatrix.length > 0);
+    const baseList = hasExplicitRawMatrix ? rawMatrix : getStoredDutyMatrix(targetDate);
     
-    // Cross-check localStorage metadata for any disabled duties
+    // Cross-check localStorage metadata for disabled duties only when reading today's active matrix without an explicit version matrix
     const disabledKeys = new Set<string>();
-    try {
-      const metaRaw = localStorage.getItem('baf_duty_matrix_metadata');
-      if (metaRaw) {
-        const parsed = JSON.parse(metaRaw);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((m: any) => {
-            const isDis = m.isDisabled === true || String(m.isDisabled) === 'true' ||
-              m.is_disabled === true || String(m.is_disabled) === 'true' ||
-              String(m.status || '').toLowerCase() === 'disable' ||
-              String(m.status || '').toLowerCase() === 'disabled';
-            if (isDis) {
-              if (m.id) disabledKeys.add(String(m.id).toLowerCase());
-              if (m.dutyCode) disabledKeys.add(String(m.dutyCode).toLowerCase());
-              if (m.title) disabledKeys.add(String(m.title).trim().toLowerCase());
-            }
-          });
+    if (!hasExplicitRawMatrix) {
+      try {
+        const metaRaw = localStorage.getItem('baf_duty_matrix_metadata');
+        if (metaRaw) {
+          const parsed = JSON.parse(metaRaw);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((m: any) => {
+              const isDis = m.isDisabled === true || String(m.isDisabled) === 'true' ||
+                m.is_disabled === true || String(m.is_disabled) === 'true' ||
+                String(m.status || '').toLowerCase() === 'disable' ||
+                String(m.status || '').toLowerCase() === 'disabled';
+              if (isDis) {
+                if (m.id) disabledKeys.add(String(m.id).toLowerCase());
+                if (m.dutyCode) disabledKeys.add(String(m.dutyCode).toLowerCase());
+                if (m.title) disabledKeys.add(String(m.title).trim().toLowerCase());
+              }
+            });
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     return baseList.filter(t => {
       if (!t) return false;
@@ -150,15 +153,17 @@ export const PrintableDutyRatioModal: React.FC<PrintableDutyRatioModalProps> = (
       if (status === 'disable' || status === 'disabled' || status === 'inactive') return false;
       if ((t as any).active === false || String((t as any).active) === 'false') return false;
       
-      const idKey = String(t.id || '').toLowerCase();
-      const codeKey = String(t.dutyCode || '').toLowerCase();
-      const titleKey = String(t.title || '').trim().toLowerCase();
-      if (disabledKeys.has(idKey) || disabledKeys.has(codeKey) || disabledKeys.has(titleKey)) {
-        return false;
+      if (!hasExplicitRawMatrix) {
+        const idKey = String(t.id || '').toLowerCase();
+        const codeKey = String(t.dutyCode || '').toLowerCase();
+        const titleKey = String(t.title || '').trim().toLowerCase();
+        if (disabledKeys.has(idKey) || disabledKeys.has(codeKey) || disabledKeys.has(titleKey)) {
+          return false;
+        }
       }
       return true;
     });
-  }, [rawMatrix]);
+  }, [rawMatrix, targetDate]);
 
   const daysArray = Array.from({ length: 31 }, (_, i) => i + 1);
 

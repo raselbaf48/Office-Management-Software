@@ -733,6 +733,120 @@ export function getStoredDutyMatrixInternal(): DutyRatioTable[] {
   return baseMatrix;
 }
 
+export function getTodayLocalISOStr(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+export function cloneDutyMatrix(matrix: DutyRatioTable[]): DutyRatioTable[] {
+  if (!Array.isArray(matrix)) return [];
+  return matrix.map((t) => ({
+    ...t,
+    dailyRequirements: Array.isArray(t.dailyRequirements) ? [...t.dailyRequirements] : undefined,
+    eligibleFlights: Array.isArray(t.eligibleFlights) ? [...t.eligibleFlights] : undefined,
+    eligibleRanks: Array.isArray(t.eligibleRanks) ? [...t.eligibleRanks] : undefined,
+    flightTargets: t.flightTargets ? { ...t.flightTargets } : undefined,
+    weeklyFlightTargets: t.weeklyFlightTargets
+      ? Object.fromEntries(
+          Object.entries(t.weeklyFlightTargets).map(([wk, val]) => [wk, val ? { ...val } : val])
+        )
+      : undefined,
+    data: {
+      Mechanics: Array.isArray(t.data?.Mechanics) ? [...t.data.Mechanics] : Array(31).fill(0),
+      Avionics: Array.isArray(t.data?.Avionics) ? [...t.data.Avionics] : Array(31).fill(0),
+      GCS: Array.isArray(t.data?.GCS) ? [...t.data.GCS] : Array(31).fill(0),
+      Admin: Array.isArray(t.data?.Admin) ? [...t.data.Admin] : Array(31).fill(0),
+    },
+  }));
+}
+
+function getVersionForDateFromHistory(history: DutyRatioVersion[], dateStr?: string): DutyRatioVersion | undefined {
+  if (!Array.isArray(history) || history.length === 0) return undefined;
+  const normalized = history
+    .map((v) => ({
+      ...v,
+      applyFromDate: normalizeDateToISOStr(v.applyFromDate) || v.applyFromDate || '2026-01-01',
+    }))
+    .sort((a, b) => (a.applyFromDate || '').localeCompare(b.applyFromDate || ''));
+
+  const targetISO = (dateStr ? normalizeDateToISOStr(dateStr) : '') || getTodayLocalISOStr();
+  const applicable = normalized.filter((v) => (v.applyFromDate || '') <= targetISO);
+  if (applicable.length > 0) {
+    return applicable[applicable.length - 1];
+  }
+  return normalized[0];
+}
+
+function buildMatrixMetadata(matrix: DutyRatioTable[]) {
+  return matrix.map((m) => ({
+    id: m.id,
+    serNo: m.serNo,
+    title: m.title,
+    shortName: m.shortName,
+    dutyCode: m.dutyCode,
+    shiftLabel: m.shiftLabel,
+    eligibleFlights: m.eligibleFlights,
+    eligibleRanks: m.eligibleRanks,
+    allotmentType: m.allotmentType,
+    flightTargets: m.flightTargets,
+    isDisabled: m.isDisabled,
+    totalRequiredDaily: m.totalRequiredDaily,
+    totalRequiredMonth: m.totalRequiredMonth,
+    dailyRequirements: m.dailyRequirements,
+    onParadeOnDutyDay: m.onParadeOnDutyDay,
+    dutyOffNextDay: m.dutyOffNextDay,
+    onPtNextDay: m.onPtNextDay,
+  }));
+}
+
+function persistActiveTodayMatrixToStorage(
+  activeTodayMatrix: DutyRatioTable[],
+  historyToSync?: DutyRatioVersion[]
+) {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  const sanitizedActive = sanitizeDutyMatrix(cloneDutyMatrix(activeTodayMatrix));
+  const metadata = buildMatrixMetadata(sanitizedActive);
+
+  localStorage.setItem(getMatrixStorageKey(), JSON.stringify(sanitizedActive));
+  localStorage.setItem(getMatrixMetadataStorageKey(), JSON.stringify(metadata));
+  localStorage.setItem(getOfficeScopedStorageKey('baf_duty_matrix_full'), JSON.stringify(sanitizedActive));
+  localStorage.setItem('baf_pending_sync', 'true');
+  localStorage.setItem('baf_matrix_last_modified', String(Date.now()));
+
+  if (typeof fetch !== 'undefined' && isDefault155UasuOffice()) {
+    const nowIso = new Date().toISOString();
+    const payload: Array<{ setting_key: string; setting_value: string; updated_at: string }> = [
+      {
+        setting_key: 'baf_official_duty_matrix_v4',
+        setting_value: JSON.stringify(sanitizedActive),
+        updated_at: nowIso,
+      },
+      {
+        setting_key: 'baf_duty_matrix_metadata',
+        setting_value: JSON.stringify(metadata),
+        updated_at: nowIso,
+      },
+      {
+        setting_key: 'baf_duty_matrix_full',
+        setting_value: JSON.stringify(sanitizedActive),
+        updated_at: nowIso,
+      },
+    ];
+    if (historyToSync && Array.isArray(historyToSync)) {
+      payload.push({
+        setting_key: 'baf_duty_ratio_history_v1',
+        setting_value: JSON.stringify(historyToSync),
+        updated_at: nowIso,
+      });
+    }
+    fetch('/api/supabase/rest/v1/app_settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch((err) => console.warn('Could not persist matrix to server app_settings:', err));
+  }
+}
+
 export function getDutyRatioHistory(): DutyRatioVersion[] {
   try {
     if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
@@ -750,6 +864,13 @@ export function getDutyRatioHistory(): DutyRatioVersion[] {
       if (Array.isArray(parsed) && parsed.length > 0) {
         let hasModified = false;
         parsed.forEach((item: any) => {
+          if (item && item.applyFromDate) {
+            const norm = normalizeDateToISOStr(item.applyFromDate);
+            if (norm && norm !== item.applyFromDate) {
+              item.applyFromDate = norm;
+              hasModified = true;
+            }
+          }
           if (item && item.title && (item.title === 'Base Duty Ratio' || item.title === 'Base Duty Ratio (Default)' || item.title.startsWith('Base Duty Ratio'))) {
             item.title = 'All Duty Ratio';
             hasModified = true;
@@ -769,15 +890,20 @@ export function getDutyRatioHistory(): DutyRatioVersion[] {
             localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(parsed));
           } catch {}
         }
-        return parsed.sort((a, b) => (a.applyFromDate || '').localeCompare(b.applyFromDate || ''));
+        return parsed
+          .sort((a, b) => (a.applyFromDate || '').localeCompare(b.applyFromDate || ''))
+          .map((v: DutyRatioVersion) => ({
+            ...v,
+            matrix: cloneDutyMatrix(v.matrix || []),
+          }));
       }
     }
   } catch (e) {
     console.error('Failed to load duty ratio history:', e);
   }
 
-  // Fallback: seed with existing matrix as initial version
-  const baseMatrix = getStoredDutyMatrixInternal();
+  // Fallback: seed with existing active matrix as initial baseline version
+  const baseMatrix = cloneDutyMatrix(getStoredDutyMatrixInternal());
   const initialVersion: DutyRatioVersion = {
     id: 'ratio_version_base',
     applyFromDate: '2026-01-01',
@@ -794,58 +920,64 @@ export function getDutyRatioHistory(): DutyRatioVersion[] {
 
 export function getDutyRatioVersionForDate(dateStr?: string): DutyRatioVersion {
   const history = getDutyRatioHistory();
-  if (history.length === 0) {
+  const matched = getVersionForDateFromHistory(history, dateStr);
+  if (matched) {
     return {
-      id: 'ratio_version_base',
-      applyFromDate: '2026-01-01',
-      title: 'All Duty Ratio',
-      matrix: getStoredDutyMatrixInternal(),
-      createdAt: new Date().toISOString(),
+      ...matched,
+      matrix: cloneDutyMatrix(matched.matrix || []),
     };
   }
-
-  let targetISO = '';
-  if (dateStr) {
-    targetISO = normalizeDateToISOStr(dateStr);
-  }
-  if (!targetISO) {
-    const now = new Date();
-    targetISO = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  }
-
-  // Filter versions whose applyFromDate is <= targetISO
-  const applicable = history.filter(v => (v.applyFromDate || '') <= targetISO);
-  if (applicable.length > 0) {
-    // Return latest applicable version
-    return applicable[applicable.length - 1];
-  }
-
-  // If target date is earlier than all versions, return the earliest version
-  return history[0];
+  return {
+    id: 'ratio_version_base',
+    applyFromDate: '2026-01-01',
+    title: 'All Duty Ratio',
+    matrix: cloneDutyMatrix(getStoredDutyMatrixInternal()),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export function getStoredDutyMatrix(dateStr?: string): DutyRatioTable[] {
-  const currentMatrix = getStoredDutyMatrixInternal();
-  if (dateStr) {
-    const version = getDutyRatioVersionForDate(dateStr);
-    if (version && version.matrix && version.matrix.length > 0) {
-      const currentMap = new Map(currentMatrix.map((t) => [t.id, t]));
-      return version.matrix.map((t) => {
-        const curr = currentMap.get(t.id);
+  const effectiveDate = (dateStr ? normalizeDateToISOStr(dateStr) : '') || getTodayLocalISOStr();
+  const version = getDutyRatioVersionForDate(effectiveDate);
+  if (version && version.matrix && version.matrix.length > 0) {
+    const activeDefaults = getInitialDutyMatrixForActiveOffice();
+    const defaultsMap = new Map(activeDefaults.map((t) => [t.id, t]));
+    const customDuties = getCustomDuties();
+    const customMap = new Map<string, (typeof customDuties)[number]>();
+    customDuties.forEach((cd) => {
+      customMap.set(cd.code.toLowerCase(), cd);
+      customMap.set(`${cd.code.toLowerCase()}_duty`, cd);
+    });
+
+    return version.matrix
+      .filter((t) => !isDutyExcludedForNewOffice(t))
+      .map((t) => {
+        const defT = defaultsMap.get(t.id);
+        const customT =
+          customMap.get(String(t.id || '').toLowerCase()) ||
+          customMap.get(String(t.dutyCode || '').toLowerCase());
         return {
           ...t,
           shortName: getDefaultDutyShortName({
             ...t,
-            shortName: curr?.shortName || t.shortName,
+            shortName: t.shortName || customT?.shortName || defT?.shortName,
           }),
-          onParadeOnDutyDay: t.onParadeOnDutyDay !== undefined ? t.onParadeOnDutyDay : curr?.onParadeOnDutyDay,
-          dutyOffNextDay: t.dutyOffNextDay !== undefined ? t.dutyOffNextDay : curr?.dutyOffNextDay,
-          onPtNextDay: t.onPtNextDay !== undefined ? t.onPtNextDay : curr?.onPtNextDay,
+          onParadeOnDutyDay:
+            t.onParadeOnDutyDay !== undefined
+              ? t.onParadeOnDutyDay
+              : (customT?.onParadeOnDutyDay !== undefined ? customT.onParadeOnDutyDay : defT?.onParadeOnDutyDay),
+          dutyOffNextDay:
+            t.dutyOffNextDay !== undefined
+              ? t.dutyOffNextDay
+              : (customT?.dutyOffNextDay !== undefined ? customT.dutyOffNextDay : defT?.dutyOffNextDay),
+          onPtNextDay:
+            t.onPtNextDay !== undefined
+              ? t.onPtNextDay
+              : (customT?.onPtNextDay !== undefined ? customT.onPtNextDay : defT?.onPtNextDay),
         };
       });
-    }
   }
-  return currentMatrix;
+  return cloneDutyMatrix(getStoredDutyMatrixInternal());
 }
 
 export function saveDutyMatrix(
@@ -853,82 +985,55 @@ export function saveDutyMatrix(
   options?: { skipHistorySync?: boolean; targetDate?: string }
 ) {
   try {
-    const sanitizedMatrix = sanitizeDutyMatrix(matrix);
+    const todayISO = getTodayLocalISOStr();
+    const targetISO = (options?.targetDate ? normalizeDateToISOStr(options.targetDate) : '') || todayISO;
+    const isFutureTarget = targetISO > todayISO;
 
-    localStorage.setItem(getMatrixStorageKey(), JSON.stringify(sanitizedMatrix));
-    
-    const metadata = sanitizedMatrix.map(m => ({
-        id: m.id,
-        serNo: m.serNo,
-        title: m.title,
-        shortName: m.shortName,
-        dutyCode: m.dutyCode,
-        shiftLabel: m.shiftLabel,
-        eligibleFlights: m.eligibleFlights,
-        eligibleRanks: m.eligibleRanks,
-        allotmentType: m.allotmentType,
-        flightTargets: m.flightTargets,
-        isDisabled: m.isDisabled,
-        totalRequiredDaily: m.totalRequiredDaily,
-        totalRequiredMonth: m.totalRequiredMonth,
-        dailyRequirements: m.dailyRequirements,
-        onParadeOnDutyDay: m.onParadeOnDutyDay,
-        dutyOffNextDay: m.dutyOffNextDay,
-        onPtNextDay: m.onPtNextDay
-    }));
-    localStorage.setItem(getMatrixMetadataStorageKey(), JSON.stringify(metadata));
-    localStorage.setItem(getOfficeScopedStorageKey('baf_duty_matrix_full'), JSON.stringify(sanitizedMatrix));
-    localStorage.setItem('baf_pending_sync', 'true');
-    localStorage.setItem('baf_matrix_last_modified', String(Date.now()));
+    // Always ensure baseline history exists BEFORE modifying active storage key
+    let history = getDutyRatioHistory();
+    const sanitizedMatrix = sanitizeDutyMatrix(cloneDutyMatrix(matrix));
 
-    // Synchronize only the active version in history (unless skipped) so past versions stay intact
-    if (!options?.skipHistorySync) {
+    if (!options?.skipHistorySync && history.length > 0) {
       try {
-        const history = getDutyRatioHistory();
-        if (history.length > 0) {
-          const activeVer = getDutyRatioVersionForDate(options?.targetDate);
+        if (isFutureTarget) {
+          // Only update an existing exact future version; never overwrite earlier (< targetISO) active versions
+          const exactIdx = history.findIndex((v) => v.applyFromDate === targetISO);
+          if (exactIdx >= 0) {
+            history = history.map((v, idx) =>
+              idx === exactIdx ? { ...v, matrix: cloneDutyMatrix(sanitizedMatrix) } : v
+            );
+            localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(history));
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('baf_duty_ratio_history_updated', { detail: { history } }));
+            }
+          }
+        } else {
+          const activeVer = getVersionForDateFromHistory(history, targetISO);
           const targetId = activeVer?.id || history[history.length - 1]?.id;
-          const updatedHistory = history.map(v =>
-            v.id === targetId
-              ? { ...v, matrix: sanitizedMatrix }
-              : v
+          history = history.map((v) =>
+            v.id === targetId ? { ...v, matrix: cloneDutyMatrix(sanitizedMatrix) } : v
           );
-          localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(updatedHistory));
+          localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(history));
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('baf_duty_ratio_history_updated', { detail: { history } }));
+          }
         }
       } catch (hErr) {
         console.warn('Could not sync history versions:', hErr);
       }
     }
 
-    // Persist to server app_settings only for default 155 UASU office so custom offices never overwrite 155 UASU server settings
-    if (typeof fetch !== 'undefined' && isDefault155UasuOffice()) {
-      fetch('/api/supabase/rest/v1/app_settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([
-          {
-            setting_key: 'baf_official_duty_matrix_v4',
-            setting_value: JSON.stringify(sanitizedMatrix),
-            updated_at: new Date().toISOString()
-          },
-          {
-            setting_key: 'baf_duty_matrix_metadata',
-            setting_value: JSON.stringify(metadata),
-            updated_at: new Date().toISOString()
-          },
-          {
-            setting_key: 'baf_duty_matrix_full',
-            setting_value: JSON.stringify(sanitizedMatrix),
-            updated_at: new Date().toISOString()
-          }
-        ])
-      }).catch(err => console.warn('Could not persist matrix to server app_settings:', err));
-    }
+    const todayActiveVer = getVersionForDateFromHistory(history, todayISO);
+    const activeTodayMatrix = isFutureTarget
+      ? sanitizeDutyMatrix(cloneDutyMatrix(todayActiveVer?.matrix || getStoredDutyMatrixInternal()))
+      : sanitizedMatrix;
+
+    persistActiveTodayMatrixToStorage(activeTodayMatrix, history);
 
     if (typeof window !== 'undefined') {
       setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: sanitizedMatrix } }));
-        window.dispatchEvent(new CustomEvent('baf_sync_duty_matrix_cloud', { detail: { matrix: sanitizedMatrix } }));
+        window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: activeTodayMatrix } }));
+        window.dispatchEvent(new CustomEvent('baf_sync_duty_matrix_cloud', { detail: { matrix: activeTodayMatrix } }));
       }, 0);
     }
   } catch (e) {
@@ -944,13 +1049,15 @@ export function saveDutyRatioVersion(params: {
   matrix: DutyRatioTable[];
   notes?: string;
 }): DutyRatioVersion {
-  const sanitized = sanitizeDutyMatrix(params.matrix);
+  // Always seed baseline history BEFORE updating active storage keys so previous ratios stay preserved
   const history = getDutyRatioHistory();
+  const sanitized = sanitizeDutyMatrix(cloneDutyMatrix(params.matrix));
   const applyDate = normalizeDateToISOStr(params.applyFromDate) || params.applyFromDate;
-  
+  const todayISO = getTodayLocalISOStr();
+
   let targetVersion: DutyRatioVersion;
-  const existingIdx = history.findIndex(v => (params.id && v.id === params.id) || v.applyFromDate === applyDate);
-  
+  const existingIdx = history.findIndex((v) => (params.id && v.id === params.id) || v.applyFromDate === applyDate);
+
   if (existingIdx >= 0) {
     targetVersion = {
       ...history[existingIdx],
@@ -973,17 +1080,21 @@ export function saveDutyRatioVersion(params: {
   }
 
   history.sort((a, b) => (a.applyFromDate || '').localeCompare(b.applyFromDate || ''));
-  
+
+  const todayActiveVer = getVersionForDateFromHistory(history, todayISO);
+  const todayActiveMatrix = sanitizeDutyMatrix(cloneDutyMatrix(todayActiveVer?.matrix || sanitized));
+
   try {
     localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(history));
-    localStorage.setItem(getMatrixStorageKey(), JSON.stringify(sanitized));
+    persistActiveTodayMatrixToStorage(todayActiveMatrix, history);
   } catch (e) {
     console.error('Failed to save duty ratio history:', e);
   }
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('baf_duty_ratio_history_updated', { detail: { history } }));
-    window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: sanitized } }));
+    window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: todayActiveMatrix } }));
+    window.dispatchEvent(new CustomEvent('baf_sync_duty_matrix_cloud', { detail: { matrix: todayActiveMatrix } }));
   }
 
   return targetVersion;
@@ -993,7 +1104,7 @@ export function deleteDutyRatioVersion(id: string): boolean {
   try {
     const raw = localStorage.getItem(getRatioHistoryStorageKey());
     const history: DutyRatioVersion[] = raw ? JSON.parse(raw) : getDutyRatioHistory();
-    const filtered = history.filter(v => v.id !== id);
+    const filtered = history.filter((v) => v.id !== id);
 
     if (filtered.length === history.length) {
       console.warn('Version not found to delete:', id);
@@ -1006,12 +1117,12 @@ export function deleteDutyRatioVersion(id: string): boolean {
         id: 'ratio_version_base',
         applyFromDate: '2026-01-01',
         title: 'All Duty Ratio',
-        matrix: [...defaults],
+        matrix: cloneDutyMatrix(defaults),
         createdAt: new Date().toISOString(),
         notes: 'Reset to Official Unit Default Scale',
       };
       localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify([resetVersion]));
-      localStorage.setItem(getMatrixStorageKey(), JSON.stringify(defaults));
+      persistActiveTodayMatrixToStorage(defaults, [resetVersion]);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('baf_duty_ratio_history_updated', { detail: { history: [resetVersion] } }));
         window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: defaults } }));
@@ -1019,17 +1130,18 @@ export function deleteDutyRatioVersion(id: string): boolean {
       return true;
     }
 
+    filtered.sort((a, b) => (a.applyFromDate || '').localeCompare(b.applyFromDate || ''));
     localStorage.setItem(getRatioHistoryStorageKey(), JSON.stringify(filtered));
-    const latest = filtered[filtered.length - 1];
-    if (latest && latest.matrix) {
-      localStorage.setItem(getMatrixStorageKey(), JSON.stringify(latest.matrix));
-    }
+
+    const todayActiveVer = getVersionForDateFromHistory(filtered, getTodayLocalISOStr());
+    const activeMatrix = sanitizeDutyMatrix(
+      cloneDutyMatrix(todayActiveVer?.matrix || getInitialDutyMatrixForActiveOffice())
+    );
+    persistActiveTodayMatrixToStorage(activeMatrix, filtered);
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('baf_duty_ratio_history_updated', { detail: { history: filtered } }));
-      if (latest && latest.matrix) {
-        window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: latest.matrix } }));
-      }
+      window.dispatchEvent(new CustomEvent('baf_duty_ratio_updated', { detail: { matrix: activeMatrix } }));
     }
     return true;
   } catch (e) {

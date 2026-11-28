@@ -264,6 +264,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   const [loadedRosterDate, setLoadedRosterDate] = useState<string>('');
   const [processingAirmanId, setProcessingAirmanId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string>('');
+  const [matrixRevision, setMatrixRevision] = useState<number>(0);
   
   const userManuallySelectedDutyRef = useRef<boolean>(Boolean(initialSavedDraft?.activeDutyCode));
   const userManuallySelectedFlightRef = useRef<boolean>(Boolean(initialSavedDraft?.activeFlight));
@@ -459,7 +460,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       return getIdacShiftsForDateAndFlight(fromDate, activeFlight as FlightName);
     }
     return getIdacShiftsForDateAndFlight(fromDate, undefined);
-  }, [fromDate, isFlightLocked, activeFlight]);
+  }, [fromDate, isFlightLocked, activeFlight, matrixRevision]);
 
   // Map of airman ID to Airman object for fast lookup
   const airmanMap = useMemo(() => {
@@ -568,8 +569,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     };
   };
 
-  const getActiveCountedDuties = () => {
-    const _storedMatrix = getStoredDutyMatrix();
+  const getActiveCountedDuties = (targetDateStr?: string) => {
+    const _storedMatrix = getStoredDutyMatrix(targetDateStr || fromDate || selectedDate);
     return DUTY_TYPES.filter((dt) => {
       if (!dt.isCountedAsDuty) return false;
       if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
@@ -761,6 +762,16 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     }
   }, [isOpen, fromDate]);
 
+  useEffect(() => {
+    const handleRatioUpdate = () => setMatrixRevision((prev) => prev + 1);
+    window.addEventListener('baf_duty_ratio_updated', handleRatioUpdate);
+    window.addEventListener('baf_duty_ratio_history_updated', handleRatioUpdate);
+    return () => {
+      window.removeEventListener('baf_duty_ratio_updated', handleRatioUpdate);
+      window.removeEventListener('baf_duty_ratio_history_updated', handleRatioUpdate);
+    };
+  }, []);
+
   // Helper: pick default duty box + shift + ratio flight for a given date according to priority:
   // 1) First duty box with unfilled quota (assigned < required)
   // 2) Else first duty box with exceeded quota (assigned > required)
@@ -936,7 +947,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         setActiveIdaShift(undefined);
       }
       if (!isFlightLocked && !(isAdmin && adminFlight) && !userManuallySelectedFlightRef.current && activeDutyCode) {
-        const isMatrixTracked = getStoredDutyMatrix().some((t) => t.dutyCode === activeDutyCode);
+        const isMatrixTracked = getStoredDutyMatrix(fromDate || selectedDate).some((t) => t.dutyCode === activeDutyCode);
         if (isMatrixTracked) {
           const res = findFirstUnfulfilledFlightForDuty(fromDate, activeDutyCode as DutyCategoryCode, currentDayAssignments);
           if (activeFlight !== res.flight) {
@@ -1020,7 +1031,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         }
       }
     }
-  }, [isOpen, activeDutyCode, fromDate, loadedRosterDate, activeIdaShift, assignmentsList, airmanMap, isFlightLocked, isDutyLocked, availableIdaShifts, loadingInitial, filterByRatio]);
+  }, [isOpen, activeDutyCode, fromDate, loadedRosterDate, activeIdaShift, assignmentsList, airmanMap, isFlightLocked, isDutyLocked, availableIdaShifts, loadingInitial, filterByRatio, matrixRevision]);
 
   // Auto-select duty for locked flight when flight lock is toggled or flight changes (respecting manual clicks)
   useEffect(() => {
@@ -1034,7 +1045,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         if (activeIdaShift !== picked.shift) setActiveIdaShift(picked.shift);
       }
     }
-  }, [isOpen, isFlightLocked, isDutyLocked, activeFlight, fromDate, loadedRosterDate, loadingInitial]);
+  }, [isOpen, isFlightLocked, isDutyLocked, activeFlight, fromDate, loadedRosterDate, loadingInitial, matrixRevision]);
 
   // Helper to check if a given date has duty ratio quota > 0 for the specified flight and/or duty
   const hasDutyQuotaOnDate = (
@@ -1047,7 +1058,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
     const checkFlights: FlightName[] = flight !== 'All' ? [flight as FlightName] : flights;
 
     if (!dutyCode) {
-      const allDuties = getActiveCountedDuties();
+      const allDuties = getActiveCountedDuties(targetDateStr);
       return allDuties.some((dt) => {
         if (isIdacDutyCode(dt.code)) {
           return shifts.some((sh) =>
@@ -1186,7 +1197,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         setActiveFlight(firstWithQuota);
       }
     }
-  }, [isDutyLocked, isFlightLocked, activeFlight, activeDutyCode, fromDate, assignmentsList, airmanMap, loadingInitial]);
+  }, [isDutyLocked, isFlightLocked, activeFlight, activeDutyCode, fromDate, assignmentsList, airmanMap, loadingInitial, matrixRevision]);
 
 
   // Helper to get required ratio count for duty
@@ -1305,7 +1316,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
   // Required quota for currently selected duty & shift (or total across all duties if none selected)
   const currentRequiredQuota = useMemo(() => {
     if (!activeDutyCode) {
-      const storedMatrix = getStoredDutyMatrix();
+      const storedMatrix = getStoredDutyMatrix(fromDate || selectedDate);
       const activeDuties = DUTY_TYPES.filter((dt) => {
         if (!dt.isCountedAsDuty) return false;
         if (!is155Uasu && (dt.code === 'IDAC' || dt.code === 'IDA' || dt.code === 'RECEPTION')) return false;
@@ -1319,7 +1330,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
       return getRequiredCountForDuty('IDAC', activeIdaShift);
     }
     return getRequiredCountForDuty(activeDutyCode);
-  }, [activeDutyCode, activeIdaShift, activeFlight, fromDate]);
+  }, [activeDutyCode, activeIdaShift, activeFlight, fromDate, selectedDate, matrixRevision]);
 
 
   
@@ -2271,7 +2282,15 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
       const isHeavy = (() => {
         try {
-          const matrix = getStoredDutyMatrix(fromDate || selectedDate);
+          let prevLookupDate = yestAss.date || fromDate || selectedDate;
+          if (!yestAss.date && (fromDate || selectedDate)) {
+            const base = fromDate || selectedDate;
+            const [fy, fm, fd] = base.split('-').map(Number);
+            if (fy && fm && fd) {
+              prevLookupDate = new Date(Date.UTC(fy, fm - 1, fd - 1)).toISOString().split('T')[0];
+            }
+          }
+          const matrix = getStoredDutyMatrix(prevLookupDate);
           const c = String(yestAss.dutyCode || '').toUpperCase();
           const s = (yestAss.idaShift || '').toLowerCase();
           const matched = matrix.find((t) => {
@@ -2512,7 +2531,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
         const dutyConfig = DUTY_TYPE_MAP.get(activeDutyCode as any);
         if (dutyConfig) {
           // If the duty has overridden eligible flights in the matrix, use those instead
-          const matrixConfig = getStoredDutyMatrix().find(t => t.dutyCode === activeDutyCode);
+          const matrixConfig = getStoredDutyMatrix(fromDate || selectedDate).find(t => t.dutyCode === activeDutyCode);
           const eligibleFlights = matrixConfig?.eligibleFlights || (officeHasFlights ? dutyConfig.eligibleFlights : undefined);
           const eligibleRanks = matrixConfig?.eligibleRanks || dutyConfig.eligibleRanks;
           
@@ -2586,7 +2605,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
 
         return a.serNo - b.serNo;
       });
-  }, [airmen, activeFlight, proxyForFlight, isProxyEnabled, activeDutyCode, activeIdaShift, searchQuery, assignmentsList, prevDayAssignmentsList]);
+  }, [airmen, activeFlight, proxyForFlight, isProxyEnabled, activeDutyCode, activeIdaShift, searchQuery, assignmentsList, prevDayAssignmentsList, fromDate, selectedDate, matrixRevision]);
 
   const activeDateStr = fromDate || selectedDate;
   const isHoliday = isHolidayDate(activeDateStr);
@@ -2966,8 +2985,8 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
               {/* Duty Category Cards with Detailed Airmen List */}
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                 {(() => {
-                  const _storedMatrix = getStoredDutyMatrix();
-                  const allDuties = getActiveCountedDuties();
+                  const _storedMatrix = getStoredDutyMatrix(fromDate || selectedDate);
+                  const allDuties = getActiveCountedDuties(fromDate || selectedDate);
                   const cardFlightScope: FlightName | 'All' =
                     isFlightLocked && activeFlight !== 'All' ? (activeFlight as FlightName) : 'All';
 
@@ -3478,7 +3497,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
                       // otherwise keep the active duty/shift intact so user can manually assign outside the ratio!
                       if (newFlt !== 'All' && !activeDutyCode) {
                         setSelectionMode('FlightFirst');
-                        const allDuties = getActiveCountedDuties();
+                        const allDuties = getActiveCountedDuties(fromDate || selectedDate);
                         const ratioFiltered = allDuties.filter((dt) => getRequiredCountForDuty(dt.code, undefined, newFlt as FlightName) > 0);
                         if (!isDutyLocked && ratioFiltered.length > 0) {
                           setActiveDutyCode(ratioFiltered[0].code);
@@ -4023,6 +4042,7 @@ export const AssignDutyModal: React.FC<AssignDutyModalProps> = ({
           onClose={() => setShowRatioModal(false)}
           selectedDate={fromDate}
           onRatioUpdated={() => {
+            setMatrixRevision((prev) => prev + 1);
             fetchCurrentRoster();
           }}
         />

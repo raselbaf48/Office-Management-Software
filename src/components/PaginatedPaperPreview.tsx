@@ -174,6 +174,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const sourceRef = useRef<HTMLDivElement | null>(null);
   const cardBodySlotRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const isMeasuringRef = useRef<boolean>(false);
   const [stageWidth, setStageWidth] = useState<number>(960);
   const [slices, setSlices] = useState<PageSliceSpec[]>([]);
   const [contentHeightPx, setContentHeightPx] = useState<number>(0);
@@ -224,45 +225,68 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
     const srcEl = sourceRef.current;
     if (!srcEl) return;
 
-    const raw = measureDomLayoutGeometry(srcEl);
-    const measuredMaxTableRight = raw.tables.reduce((mx, t) => Math.max(mx, Math.ceil(t.right)), 0);
-    const maxRightNeeded = Math.max(Math.ceil(srcEl.scrollWidth), measuredMaxTableRight);
-    const nextContentWidth = maxRightNeeded >= usableWidthPx ? maxRightNeeded + 4 : usableWidthPx;
-    const nextContentScale = nextContentWidth > usableWidthPx + 2 ? usableWidthPx / nextContentWidth : 1;
-    const nextEffectiveUsableHeight = Math.floor(usableHeightPx / nextContentScale);
+    isMeasuringRef.current = true;
+    try {
+      // Temporarily reset to base usableWidthPx so wide tables can both expand and shrink cleanly
+      srcEl.style.boxSizing = 'border-box';
+      srcEl.style.padding = '2px 5px 8px 3px';
+      srcEl.style.width = `${usableWidthPx}px`;
+      let raw = measureDomLayoutGeometry(srcEl);
+      const measuredMaxTableRight = raw.tables.reduce((mx, t) => Math.max(mx, Math.ceil(t.right) + 5), 0);
+      const maxRightNeeded = Math.max(Math.ceil(srcEl.scrollWidth), measuredMaxTableRight);
+      let nextContentWidth = maxRightNeeded > usableWidthPx + 2 ? maxRightNeeded + 4 : usableWidthPx;
+      if (nextContentWidth !== usableWidthPx) {
+        srcEl.style.width = `${nextContentWidth}px`;
+        raw = measureDomLayoutGeometry(srcEl);
+        const postMaxRight = Math.max(
+          Math.ceil(srcEl.scrollWidth),
+          raw.tables.reduce((mx, t) => Math.max(mx, Math.ceil(t.right) + 5), 0)
+        );
+        if (postMaxRight > nextContentWidth) {
+          nextContentWidth = postMaxRight + 2;
+          srcEl.style.width = `${nextContentWidth}px`;
+          raw = measureDomLayoutGeometry(srcEl);
+        }
+      }
+      const nextContentScale = nextContentWidth > usableWidthPx + 2 ? usableWidthPx / nextContentWidth : 1;
+      const nextEffectiveUsableHeight = Math.floor(usableHeightPx / nextContentScale);
 
-    setContentHeightPx(raw.totalHeight);
-    setContentWidthPx(nextContentWidth);
-    if (forceSinglePage) {
-      setSlices([
-        {
-          pageIndex: 0,
-          sliceStartPx: 0,
-          sliceEndPx: raw.totalHeight,
-          bodySliceHeightPx: raw.totalHeight,
-          repeatDocHeader: false,
-          activeTableAtStart: null,
-          repeatedTopHeightPx: 0,
-          headerGapPx: 0,
-          tableBorders: [],
-        },
-      ]);
-      return;
+      setContentHeightPx(raw.totalHeight);
+      setContentWidthPx(nextContentWidth);
+      if (forceSinglePage) {
+        setSlices([
+          {
+            pageIndex: 0,
+            sliceStartPx: 0,
+            sliceEndPx: raw.totalHeight,
+            bodySliceHeightPx: raw.totalHeight,
+            repeatDocHeader: false,
+            activeTableAtStart: null,
+            repeatedTopHeightPx: 0,
+            headerGapPx: 0,
+            tableBorders: [],
+          },
+        ]);
+        return;
+      }
+      const nextSlices = computePageSlices(
+        raw,
+        nextEffectiveUsableHeight,
+        1,
+        1,
+        nextContentWidth
+      );
+      setSlices(nextSlices);
+    } finally {
+      isMeasuringRef.current = false;
     }
-    const nextSlices = computePageSlices(
-      raw,
-      nextEffectiveUsableHeight,
-      1,
-      1,
-      nextContentWidth
-    );
-    setSlices(nextSlices);
   }, [usableHeightPx, usableWidthPx, forceSinglePage]);
 
   // Recompute whenever content, orientation, paperSize, or refreshKey changes
   useLayoutEffect(() => {
     let rafId = 0;
     const schedule = () => {
+      if (isMeasuringRef.current) return;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         recomputeSlices();
@@ -372,7 +396,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
 
       const bodyClone = srcEl.cloneNode(true) as HTMLElement;
       bodyClone.removeAttribute('id');
-      bodyClone.style.width = `${usableWidthPx}px`;
+      bodyClone.style.width = `${effectiveContentWidthPx}px`;
       bodyClone.style.marginTop = `${-slice.sliceStartPx}px`;
       bodyClone.style.pointerEvents = 'auto';
 
@@ -439,7 +463,7 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
           botLine.setAttribute('data-pdf-border-line', 'true');
           botLine.style.position = 'absolute';
           botLine.style.left = `${tb.leftPx}px`;
-          botLine.style.bottom = `-${Math.floor(closureThicknessPx / 2)}px`;
+          botLine.style.bottom = '0px';
           botLine.style.width = `${w}px`;
           botLine.style.height = `${closureThicknessPx}px`;
           botLine.style.backgroundColor = '#000000';
@@ -609,7 +633,9 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
                         data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
                         className="paginated-preview-doc bg-white text-black print:w-full!"
                         style={{
-                          width: `${usableWidthPx}px`,
+                          width: `${effectiveContentWidthPx}px`,
+                          boxSizing: 'border-box',
+                          padding: '2px 5px 8px 3px',
                           fontFamily: 'Arial, sans-serif',
                         }}
                       >
@@ -657,7 +683,9 @@ export const PaginatedPaperPreview: React.FC<PaginatedPaperPreviewProps> = ({
                 data-pdf-preserve-colors={preserveColors ? 'true' : undefined}
                 className="paginated-preview-doc bg-white text-black print:w-full!"
                 style={{
-                  width: `${usableWidthPx}px`,
+                  width: `${effectiveContentWidthPx}px`,
+                  boxSizing: 'border-box',
+                  padding: '2px 5px 8px 3px',
                   fontFamily: 'Arial, sans-serif',
                 }}
               >

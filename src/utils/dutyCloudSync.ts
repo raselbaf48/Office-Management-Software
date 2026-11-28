@@ -154,9 +154,14 @@ export function formatTableToCloudRow(table: DutyRatioTable, index: number): Dut
   return row;
 }
 
-export async function pushDutyListToCloud(matrixInput?: DutyRatioTable[]): Promise<DutySyncResult> {
-  const matrix = matrixInput && matrixInput.length > 0 ? matrixInput : getStoredDutyMatrix();
-  saveDutyMatrix(matrix);
+export async function pushDutyListToCloud(
+  matrixInput?: DutyRatioTable[],
+  options?: { targetDate?: string; skipLocalSave?: boolean }
+): Promise<DutySyncResult> {
+  const matrix = matrixInput && matrixInput.length > 0 ? matrixInput : getStoredDutyMatrix(options?.targetDate);
+  if (!options?.skipLocalSave) {
+    saveDutyMatrix(matrix, { targetDate: options?.targetDate });
+  }
   return {
     success: true,
     count: matrix.length,

@@ -347,9 +347,9 @@ export function computePageSlices(
         if (bestRowCut && bestRowCut.bottomPx >= minReasonableProgress) {
           if (
             bestRowCut.isLastRowOfTable &&
-            bestRowCut.tableBottomPx + Math.round(2 * scaleY) <= targetEndPx
+            bestRowCut.tableBottomPx + Math.round(4 * scaleY) <= targetEndPx
           ) {
-            sliceEndPx = Math.min(targetEndPx, bestRowCut.tableBottomPx + Math.round(2 * scaleY));
+            sliceEndPx = Math.min(targetEndPx, bestRowCut.tableBottomPx + Math.round(4 * scaleY));
           } else {
             sliceEndPx = bestRowCut.bottomPx;
             if (bestRowCut.isLastRowOfTable) {
@@ -443,7 +443,7 @@ export function computePageSlices(
         leftPx: tbl.leftPx,
         rightPx: tbl.rightPx,
         closeTop: pageIndex > 0 && sliceStartPx > tbl.topPx && sliceStartPx < tbl.bottomPx,
-        closeBottom: sliceEndPx < tbl.bottomPx - 1,
+        closeBottom: sliceEndPx < tbl.bottomPx + Math.round(1 * scaleY),
       });
     }
 

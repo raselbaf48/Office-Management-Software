@@ -481,7 +481,7 @@ export async function exportElementToPdf({
 
       for (let i = 0; i < previewPages.length; i++) {
         const pageSlotEl = previewPages[i];
-        const pageW = Math.max(contentWidthPx, pageSlotEl.offsetWidth || contentWidthPx);
+        const pageW = Math.max(contentWidthPx, pageSlotEl.offsetWidth || contentWidthPx, pageSlotEl.scrollWidth || contentWidthPx);
         const pageH = Math.max(40, pageSlotEl.offsetHeight || 0, pageSlotEl.scrollHeight || 0);
 
         const renderSheet = document.createElement('div');
@@ -602,7 +602,7 @@ export async function exportElementToPdf({
     renderSheet.style.background = '#ffffff';
     renderSheet.style.backgroundColor = '#ffffff';
     renderSheet.style.color = '#000000';
-    renderSheet.style.padding = '0px';
+    renderSheet.style.padding = '2px 4px 6px 2px';
     renderSheet.style.margin = '0px';
     renderSheet.style.boxSizing = 'border-box';
     renderSheet.style.width = `${sourceWidth}px`;
@@ -630,7 +630,7 @@ export async function exportElementToPdf({
         widestTable = tbl.scrollWidth;
       }
     }
-    const renderWidth = Math.max(sourceWidth, widestTable);
+    const renderWidth = Math.max(sourceWidth, widestTable + 8);
     renderSheet.style.width = `${renderWidth}px`;
     renderSheet.style.minWidth = `${renderWidth}px`;
     renderSheet.style.maxWidth = `${renderWidth}px`;

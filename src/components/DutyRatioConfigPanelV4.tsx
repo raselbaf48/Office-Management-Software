@@ -2583,7 +2583,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                       d.serNo = idx + 1;
                     });
 
-                    saveDutyMatrix(sorted);
+                    saveDutyMatrix(sorted, { targetDate });
                     onMatrixChange(sorted);
                   }
                   
@@ -2998,7 +2998,7 @@ export const DutyRatioConfigPanel: React.FC<DutyRatioConfigPanelProps> = ({ acti
                         d.serNo = idx + 1;
                       });
 
-                      saveDutyMatrix(sorted);
+                      saveDutyMatrix(sorted, { targetDate });
                       onMatrixChange(sorted);
                     }
                     setEditingDutyIdx(null);
